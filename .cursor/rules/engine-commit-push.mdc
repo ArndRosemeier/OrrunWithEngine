@@ -1,0 +1,17 @@
+---
+description: Commit and push Engine changes separately from this game repo
+alwaysApply: true
+---
+
+# Engine commit / push pairing
+
+When the user asks to **commit** and/or **push** this project (`C:\Projekte\OrrunWithEngine`):
+
+1. Check `C:\Projekte\Engine` for uncommitted or unpushed changes.
+2. If Engine has changes that belong with the work:
+   - **Commit Engine first** in that repo (own commit message, Engine-focused).
+   - **Push Engine** if the user asked to push (or push is part of the request).
+   - Then commit / push **this repo** separately.
+3. Never fold Engine file changes into an OrrunWithEngine commit — they are different git roots.
+4. If Engine is clean, proceed with this repo only.
+5. Still follow the usual git safety rules: only commit/push when the user asked; no force-push to main/master; no amending unless the amend rules allow it.

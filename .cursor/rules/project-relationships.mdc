@@ -1,0 +1,32 @@
+---
+description: How OrrunWithEngine relates to Engine and the Godot Orrun reference
+alwaysApply: true
+---
+
+# Project relationships
+
+## Repositories
+
+| Path | Role |
+|------|------|
+| `C:\Projekte\OrrunWithEngine` | This game — pure Rust, built on the Engine |
+| `C:\Projekte\Engine` | Shared 3D / procedural engine (`engine` crate) — develop in parallel |
+| `C:\Projekte\Orrun` | Legacy Godot reference only — not a dependency, not a 1:1 target |
+
+## Porting stance
+
+- Re-implement intent and proven systems; do **not** copy bad Godot-era decisions.
+- Prefer clearer ownership, simpler data flow, and Rust-native design over GDScript parity.
+- Use Orrun (code + `docs/`) to understand goals and edge cases, then redesign as needed.
+
+## Engine vs game
+
+- **Engine** (`C:\Projekte\Engine`): reusable runtime, rendering, input, meshes, terrain primitives, noise/proc helpers, streaming, anything not Orrun-specific.
+- **This repo**: world fiction, continent atlas, biomes, settlements, game UI/tools, content rules.
+- If a piece is general enough for other games/demos, implement or extend it in the Engine and depend on it here. Do not duplicate engine capabilities locally.
+
+## Workflow
+
+- Keep this project on a path dependency to the local Engine crate.
+- When Engine APIs need to grow for Orrun, change Engine first (or in the same effort), then consume the API here.
+- Loud errors; no silent fallbacks that hide generation or render bugs.

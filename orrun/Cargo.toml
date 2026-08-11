@@ -1,0 +1,18 @@
+[package]
+name = "orrun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Orrun — continental atlas and game content on the Engine"
+
+[[bin]]
+name = "orrun"
+path = "src/main.rs"
+
+[dependencies]
+engine = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rustc-hash = { workspace = true }
