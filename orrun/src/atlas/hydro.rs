@@ -3,6 +3,7 @@
 //! Step 1 of landscape: compact curves (river ribbons, lake rings, coast rings).
 //! Step 2 (world sampler) turns those into continuous `ground` / `water_top`.
 
+use engine::proc::Noise;
 use glam::Vec2;
 use rustc_hash::FxHashMap;
 
@@ -12,17 +13,55 @@ use super::pack;
 use super::types::{Endpoint, Link};
 use super::{layer_seed, ContinentAtlas, CELL_METRES};
 
-const COAST_RESAMPLE_M: f32 = 55.0;
-const COAST_SMOOTH_ITERS: usize = 16;
-const COAST_SMOOTH_HALF_WIN: usize = 6;
-const COAST_WARP_M: f32 = 280.0;
-const COAST_POST_WARP_SMOOTH: usize = 8;
-const LAKE_RESAMPLE_M: f32 = 50.0;
-const LAKE_SMOOTH_ITERS: usize = 10;
-const LAKE_SMOOTH_HALF_WIN: usize = 4;
-const LAKE_WARP_M: f32 = 160.0;
-const LAKE_POST_WARP_SMOOTH: usize = 3;
+const COAST_RESAMPLE_M: f32 = 40.0;
+const COAST_SMOOTH_ITERS: usize = 14;
+const COAST_SMOOTH_HALF_WIN: usize = 5;
+const LAKE_RESAMPLE_M: f32 = 45.0;
+const LAKE_SMOOTH_ITERS: usize = 9;
+const LAKE_SMOOTH_HALF_WIN: usize = 3;
 const RIVER_MEANDER_FRAC: f32 = 0.28;
+
+/// River-like shore meander: amplitudes (m) and wavelengths along the perimeter (m).
+#[derive(Clone, Copy)]
+struct ShoreMeander {
+    coarse_m: f32,
+    mid_m: f32,
+    fine_m: f32,
+    micro_m: f32,
+    coarse_len_m: f32,
+    mid_len_m: f32,
+    fine_len_m: f32,
+    micro_len_m: f32,
+    post_smooth: usize,
+    max_turn_deg: f32,
+}
+
+const COAST_MEANDER: ShoreMeander = ShoreMeander {
+    // Coarse = bay/headland swing; mid/fine/micro = river-like grit inside a km cell.
+    coarse_m: 380.0,
+    mid_m: 200.0,
+    fine_m: 100.0,
+    micro_m: 40.0,
+    coarse_len_m: 2100.0,
+    mid_len_m: 780.0,
+    fine_len_m: 340.0,
+    micro_len_m: 105.0,
+    post_smooth: 1,
+    max_turn_deg: 58.0,
+};
+
+const LAKE_MEANDER: ShoreMeander = ShoreMeander {
+    coarse_m: 120.0,
+    mid_m: 85.0,
+    fine_m: 45.0,
+    micro_m: 22.0,
+    coarse_len_m: 1200.0,
+    mid_len_m: 520.0,
+    fine_len_m: 240.0,
+    micro_len_m: 90.0,
+    post_smooth: 1,
+    max_turn_deg: 52.0,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HydroSink {
@@ -236,11 +275,10 @@ fn build_lakes(atlas: &ContinentAtlas, seed: u32) -> Vec<LakeOutline> {
             LAKE_SMOOTH_ITERS,
             LAKE_SMOOTH_HALF_WIN,
         );
-        warp_ring(
+        meander_ring(
             &mut ring,
             seed ^ (lake.id as u32).wrapping_mul(0x9E37),
-            LAKE_WARP_M,
-            LAKE_POST_WARP_SMOOTH,
+            LAKE_MEANDER,
         );
         ensure_ring_contains_centroid(&mut ring);
         if ring.len() >= 4 {
@@ -285,11 +323,10 @@ fn build_coasts(atlas: &ContinentAtlas, seed: u32) -> Vec<CoastRing> {
             COAST_SMOOTH_ITERS,
             COAST_SMOOTH_HALF_WIN,
         );
-        warp_ring(
+        meander_ring(
             &mut ring,
             seed ^ (landmass_id as u32).wrapping_mul(0xC0A57),
-            COAST_WARP_M,
-            COAST_POST_WARP_SMOOTH,
+            COAST_MEANDER,
         );
         // Landmass centroid must sit inside the ring (positive winding).
         ensure_ring_contains_centroid(&mut ring);
@@ -520,69 +557,80 @@ fn moving_average_closed(points: &[Vec2], half_win: usize) -> Vec<Vec2> {
     out
 }
 
-fn warp_ring(ring: &mut [Vec2], seed: u32, amp_m: f32, post_smooth: usize) {
+/// Displace a closed shore along local normals with multi-octave arc-length noise
+/// (same spirit as river corridors: coarse bays, fine coves, micro grit).
+fn meander_ring(ring: &mut [Vec2], seed: u32, style: ShoreMeander) {
     if ring.len() < 3 {
         return;
     }
-    let mut c = Vec2::ZERO;
-    for p in ring.iter() {
-        c += *p;
-    }
-    c /= ring.len() as f32;
     let n = ring.len();
-    // Local shoreline normals (outward), not centroid rays — better bays/headlands.
+    let mut centroid = Vec2::ZERO;
+    for p in ring.iter() {
+        centroid += *p;
+    }
+    centroid /= n as f32;
+
+    let mut along = vec![0.0_f32; n];
+    for i in 1..n {
+        along[i] = along[i - 1] + ring[i - 1].distance(ring[i]);
+    }
+    let noise = Noise::new(seed);
+    let grit = Noise::new(seed ^ 0x9E37_79B9);
+    let phase_a = hash_u32(seed, 1, 0xC0A5) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
+    let phase_b = hash_u32(seed, 2, 0xBEEF) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
+
     let mut normals = vec![Vec2::ZERO; n];
+    let mut tip = vec![1.0_f32; n];
     for i in 0..n {
         let prev = ring[(i + n - 1) % n];
         let next = ring[(i + 1) % n];
         let tang = (next - prev).normalize_or_zero();
         let mut nrm = Vec2::new(-tang.y, tang.x);
-        if nrm.dot(ring[i] - c) < 0.0 {
+        if nrm.dot(ring[i] - centroid) < 0.0 {
             nrm = -nrm;
         }
         normals[i] = nrm;
-    }
-    // Low-frequency harmonics only — high k creates spikes on dense rings.
-    let mut normal_amp = vec![0.0_f32; n];
-    let mut tang_amp = vec![0.0_f32; n];
-    const WEIGHTS: [f32; 5] = [0.40, 0.26, 0.16, 0.11, 0.07];
-    for (ki, &w) in WEIGHTS.iter().enumerate() {
-        let k = (ki + 1) as f32;
-        let phase_n = hash_angle(seed, ki as u32 + 1);
-        let phase_t = hash_angle(seed ^ 0xA5A5_A5A5, ki as u32 + 1);
-        for i in 0..n {
-            let t = (i as f32 / n as f32) * std::f32::consts::TAU;
-            normal_amp[i] += (t * k + phase_n).sin() * amp_m * w;
-            tang_amp[i] += (t * k + phase_t).cos() * amp_m * w * 0.35;
-        }
-    }
-    // Attenuate warp on already-sharp tips so displacement doesn't create spikes.
-    let mut tip = vec![1.0_f32; n];
-    for i in 0..n {
-        let a = ring[(i + n - 1) % n];
-        let b = ring[i];
-        let c = ring[(i + 1) % n];
-        let u = (b - a).normalize_or_zero();
-        let v = (c - b).normalize_or_zero();
+        let u = (ring[i] - prev).normalize_or_zero();
+        let v = (next - ring[i]).normalize_or_zero();
         let ang = u.dot(v).clamp(-1.0, 1.0).acos();
-        // ang ~ 0 straight; ang ~ pi hairpin. Soften warp when ang > ~35°.
-        tip[i] = (1.0 - ((ang - 0.6).max(0.0) / 1.2)).clamp(0.15, 1.0);
+        // Soften only true hairpins; straight and gently bent shores get full meander.
+        tip[i] = (1.0 - ((ang - 0.85).max(0.0) / 1.0)).clamp(0.35, 1.0);
     }
+
     for i in 0..n {
+        let s = along[i];
+        let u_c = s / style.coarse_len_m.max(1.0);
+        let u_mid = s / style.mid_len_m.max(1.0);
+        let u_f = s / style.fine_len_m.max(1.0);
+        let u_m = s / style.micro_len_m.max(1.0);
+        // Explicit bay/headland swings (guaranteed amplitude) + noisy detail.
+        let bay = (s / style.coarse_len_m.max(1.0) * std::f32::consts::TAU + phase_a).sin() * 0.62
+            + (s / (style.coarse_len_m.max(1.0) * 1.7) * std::f32::consts::TAU + phase_b).sin()
+                * 0.38;
+        let wx = noise.sample2(ring[i].x * 0.0004, ring[i].y * 0.0004) * 0.45;
+        let coarse_n = noise.fbm2(u_c + wx, 0.17, 3, 2.05, 0.52);
+        let mid = noise.fbm2(u_mid * 1.05, 0.91 + wx * 0.5, 2, 2.0, 0.55);
+        let fine = noise.fbm2(u_f * 1.15, 1.9 + wx, 2, 2.0, 0.55);
+        let micro = grit.sample2(u_m * 1.4, 3.4) * 0.65
+            + grit.sample2(u_m * 2.7, 5.1) * 0.35;
+        let lateral = (bay * 0.7 + coarse_n * 0.3) * style.coarse_m
+            + mid * style.mid_m
+            + fine * style.fine_m
+            + micro * style.micro_m;
+        let drift = mid * style.mid_m * 0.18
+            + fine * style.fine_m * 0.25
+            + micro * style.micro_m * 0.2;
         let nrm = normals[i];
         let tang = Vec2::new(-nrm.y, nrm.x);
         let w = tip[i];
-        ring[i] += nrm * normal_amp[i] * w + tang * tang_amp[i] * w;
+        ring[i] += nrm * (lateral * w) + tang * (drift * w);
     }
-    for _ in 0..post_smooth {
-        let softened = moving_average_closed(ring, 3);
+
+    for _ in 0..style.post_smooth {
+        let softened = moving_average_closed(ring, 1);
         ring.copy_from_slice(&softened);
     }
-    despike_closed(ring, 40.0);
-    for _ in 0..3 {
-        let softened = moving_average_closed(ring, 2);
-        ring.copy_from_slice(&softened);
-    }
+    despike_closed(ring, style.max_turn_deg);
 }
 
 /// Replace vertices whose turning angle exceeds `max_turn_deg` with a midpoint.
@@ -611,11 +659,6 @@ fn despike_closed(ring: &mut [Vec2], max_turn_deg: f32) {
             break;
         }
     }
-}
-
-fn hash_angle(seed: u32, k: u32) -> f32 {
-    let h = hash_u32(seed, k, 0xC0FFEE);
-    (h as f32 / u32::MAX as f32) * std::f32::consts::TAU
 }
 
 fn ensure_ring_contains_centroid(ring: &mut Vec<Vec2>) {

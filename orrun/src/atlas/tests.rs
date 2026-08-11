@@ -38,6 +38,35 @@ fn generate_validates_clean() {
 }
 
 #[test]
+fn no_inland_ocean_pockets() {
+    for seed in [3, 7, 20260809, 424242] {
+        let atlas = ContinentAtlas::generate(seed, 96);
+        assert!(
+            atlas.validate().iter().all(|e| !e.contains("inland ocean")),
+            "seed {seed} has inland ocean: {:?}",
+            atlas
+                .validate()
+                .into_iter()
+                .filter(|e| e.contains("inland ocean"))
+                .collect::<Vec<_>>()
+        );
+        // Every ocean cell must reach the border; every former pocket is a lake.
+        let mut ocean = 0;
+        let mut lake_cells = 0;
+        for &cell in &atlas.cells {
+            match pack::biome(cell) {
+                Biome::Ocean => ocean += 1,
+                Biome::Lake => lake_cells += 1,
+                _ => {}
+            }
+        }
+        assert!(ocean > 0, "seed {seed}: expected open ocean");
+        assert!(lake_cells > 0, "seed {seed}: expected lakes");
+        assert_eq!(atlas.first_inland_ocean_cell(), None);
+    }
+}
+
+#[test]
 fn climate_sanity() {
     let atlas = ContinentAtlas::generate(20260809, 128);
     let mut ocean = 0;

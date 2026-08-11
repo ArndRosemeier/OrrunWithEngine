@@ -800,11 +800,6 @@ mod tests {
         for coast in &atlas.hydro.coasts {
             let n = coast.ring.len();
             assert!(n >= 16, "coast ring too sparse: {n}");
-            let mean_y = coast.ring.iter().map(|p| p.y).sum::<f32>() / n as f32;
-            let mad_y = coast.ring.iter().map(|p| (p.y - mean_y).abs()).sum::<f32>() / n as f32;
-            let mean_x = coast.ring.iter().map(|p| p.x).sum::<f32>() / n as f32;
-            let mad_x = coast.ring.iter().map(|p| (p.x - mean_x).abs()).sum::<f32>() / n as f32;
-            // Local meander: consecutive points should not stay on a kilometre grid line.
             let mut off_km = 0usize;
             for p in &coast.ring {
                 let near_km_x = (p.x / CELL_METRES).fract().abs() < 0.02
@@ -815,15 +810,41 @@ mod tests {
                     off_km += 1;
                 }
             }
-            eprintln!(
-                "coast lm={} n={n} mad_x={mad_x:.0} mad_y={mad_y:.0} off_km={off_km}/{n}",
-                coast.landmass_id
-            );
             if off_km * 2 > n {
                 any_meander = true;
             }
         }
         assert!(any_meander, "expected coast vertices off the kilometre grid");
+    }
+
+    #[test]
+    fn coast_meander_has_local_wiggle() {
+        let atlas = ContinentAtlas::generate(3, 96);
+        let coast = atlas.hydro.coasts.first().expect("coast");
+        let n = coast.ring.len();
+        assert!(n >= 32);
+        // Mean absolute lateral second difference along ~2 km windows.
+        let mut sum = 0.0_f32;
+        let mut count = 0usize;
+        let step = (n / 40).max(1);
+        for i in 0..n {
+            let a = coast.ring[(i + n - step) % n];
+            let b = coast.ring[i];
+            let c = coast.ring[(i + step) % n];
+            let chord = c - a;
+            let len = chord.length().max(1.0);
+            let nrm = Vec2::new(-chord.y, chord.x) / len;
+            let mid = (a + c) * 0.5;
+            let lateral = (b - mid).dot(nrm).abs();
+            sum += lateral;
+            count += 1;
+        }
+        let mean = sum / count as f32;
+        eprintln!("coast local wiggle mean={mean:.1}m");
+        assert!(
+            mean > 35.0,
+            "expected lively shore meander (>35m local wiggle), got {mean:.1}m"
+        );
     }
 
     /// Writes a PPM preview of the shared shore field around a coast patch.
@@ -890,7 +911,7 @@ mod tests {
         }
         let (ox, oz) = best.expect("interesting coast window");
         eprintln!("shore preview origin=({ox},{oz}) score={best_score:.2}");
-        let pix_per_cell: usize = 40;
+        let pix_per_cell: usize = 56;
         let w = cells as usize * pix_per_cell;
         let h = cells as usize * pix_per_cell;
         let mut rgb = vec![0u8; w * h * 3];

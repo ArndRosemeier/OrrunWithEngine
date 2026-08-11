@@ -507,6 +507,151 @@ pub fn merge_coastal_lakes_into_ocean(
     scratch.lakes = kept;
 }
 
+/// Water cells not reachable from the atlas border via open ocean become lakes.
+///
+/// The landmask can leave enclosed `land==0` pockets inland; without this step
+/// they classify as ocean and grow fake Coast rings.
+pub fn promote_inland_seas_to_lakes(
+    size: usize,
+    land: &[u8],
+    elev_code: &mut [u8],
+    scratch: &mut LakeScratch,
+) {
+    let count = size * size;
+    let mut ocean = vec![false; count];
+    let mut stack = Vec::new();
+
+    for az in 0..size {
+        for ax in 0..size {
+            if ax != 0 && az != 0 && ax + 1 != size && az + 1 != size {
+                continue;
+            }
+            let idx = az * size + ax;
+            if land[idx] == 0 && scratch.lake_id[idx] < 0 {
+                ocean[idx] = true;
+                stack.push(idx);
+            }
+        }
+    }
+
+    while let Some(idx) = stack.pop() {
+        let ax = (idx % size) as i32;
+        let az = (idx / size) as i32;
+        for k in 0..4 {
+            let (dx, dz) = cardinal(k);
+            let nx = ax + dx;
+            let nz = az + dz;
+            if !in_bounds(nx, nz, size) {
+                continue;
+            }
+            let nb = index_of(nx, nz, size);
+            if ocean[nb] || land[nb] != 0 || scratch.lake_id[nb] >= 0 {
+                continue;
+            }
+            ocean[nb] = true;
+            stack.push(nb);
+        }
+    }
+
+    let mut seen = vec![false; count];
+    for start in 0..count {
+        if land[start] != 0
+            || scratch.lake_id[start] >= 0
+            || ocean[start]
+            || seen[start]
+        {
+            continue;
+        }
+        let mut basin = Vec::new();
+        stack.clear();
+        stack.push(start);
+        seen[start] = true;
+        while let Some(idx) = stack.pop() {
+            basin.push(idx as i32);
+            let ax = (idx % size) as i32;
+            let az = (idx / size) as i32;
+            for k in 0..4 {
+                let (dx, dz) = cardinal(k);
+                let nx = ax + dx;
+                let nz = az + dz;
+                if !in_bounds(nx, nz, size) {
+                    continue;
+                }
+                let nb = index_of(nx, nz, size);
+                if seen[nb]
+                    || land[nb] != 0
+                    || scratch.lake_id[nb] >= 0
+                    || ocean[nb]
+                {
+                    continue;
+                }
+                seen[nb] = true;
+                stack.push(nb);
+            }
+        }
+        commit_inland_sea_as_lake(size, &basin, land, elev_code, scratch);
+    }
+}
+
+fn commit_inland_sea_as_lake(
+    size: usize,
+    basin: &[i32],
+    land: &[u8],
+    elev_code: &mut [u8],
+    scratch: &mut LakeScratch,
+) {
+    if basin.is_empty() {
+        return;
+    }
+    let basin_set: FxHashSet<i32> = basin.iter().copied().collect();
+    let mut spill_cell = basin[0];
+    let mut rim_min = 999i32;
+    for &cell in basin {
+        let cx = cell % size as i32;
+        let cz = cell / size as i32;
+        for k in 0..4 {
+            let (dx, dz) = cardinal(k);
+            let nx = cx + dx;
+            let nz = cz + dz;
+            if !in_bounds(nx, nz, size) {
+                continue;
+            }
+            let nb = index_of(nx, nz, size);
+            if basin_set.contains(&(nb as i32)) {
+                continue;
+            }
+            // Spill over dry land rim only.
+            if land[nb] == 0 || scratch.lake_id[nb] >= 0 {
+                continue;
+            }
+            let ne = elev_code[nb] as i32;
+            if ne < rim_min {
+                rim_min = ne;
+                spill_cell = cell;
+            }
+        }
+    }
+    if rim_min >= 999 {
+        // Fully enclosed by other lakes / degenerate — invent a modest rim.
+        rim_min = (elev_code[basin[0] as usize] as i32 + 8).clamp(40, 180);
+    }
+    let surface_code = (rim_min - 1).clamp(34, 250);
+    let lake_id = scratch.lakes.len() as i32;
+    scratch.lakes.push(Lake {
+        id: lake_id,
+        cells: basin.to_vec(),
+        spill_cell,
+        surface_code,
+        surface_z: pack::elevation_to_metres(surface_code),
+    });
+    let depth = (surface_code - 34).clamp(2, 12);
+    for &cell in basin {
+        scratch.lake_id[cell as usize] = lake_id;
+        let bed = (surface_code - depth).clamp(33, surface_code - 1);
+        elev_code[cell as usize] = bed as u8;
+    }
+}
+
 pub fn label_landmasses(
     size: usize,
     land: &[u8],

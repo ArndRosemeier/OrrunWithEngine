@@ -80,6 +80,7 @@ impl ContinentAtlas {
         );
         lakes::build_lakes(world_seed, size, &land, &mut elev_code, &mut lake_scratch);
         lakes::merge_coastal_lakes_into_ocean(size, &mut land, &mut elev_code, &mut lake_scratch);
+        lakes::promote_inland_seas_to_lakes(size, &land, &mut elev_code, &mut lake_scratch);
         lakes::label_landmasses(size, &land, &lake_scratch.lake_id, &mut landmass_id);
         classify::classify_and_pack(
             world_seed,
@@ -281,6 +282,13 @@ impl ContinentAtlas {
                     lake.id
                 ));
             }
+        }
+        if let Some(cell) = self.first_inland_ocean_cell() {
+            let ax = (cell % self.size) as i32;
+            let az = (cell / self.size) as i32;
+            errors.push(format!(
+                "inland ocean cell at ({ax},{az}) — must be lake or open sea"
+            ));
         }
 
         errors.extend(self.validate_edge_agreement(Kind::River));
@@ -636,6 +644,44 @@ impl ContinentAtlas {
             }
         }
         false
+    }
+
+    /// First ocean cell not 4-connected to the atlas border through ocean.
+    pub(crate) fn first_inland_ocean_cell(&self) -> Option<usize> {
+        let count = self.size * self.size;
+        let mut open = vec![false; count];
+        let mut stack = Vec::new();
+        for az in 0..self.size {
+            for ax in 0..self.size {
+                if ax != 0 && az != 0 && ax + 1 != self.size && az + 1 != self.size {
+                    continue;
+                }
+                let idx = az * self.size + ax;
+                if pack::biome(self.cells[idx]) == Biome::Ocean {
+                    open[idx] = true;
+                    stack.push(idx);
+                }
+            }
+        }
+        while let Some(idx) = stack.pop() {
+            let ax = (idx % self.size) as i32;
+            let az = (idx / self.size) as i32;
+            for k in 0..4 {
+                let (dx, dz) = cardinal(k);
+                let nx = ax + dx;
+                let nz = az + dz;
+                if !self.in_bounds(nx, nz) {
+                    continue;
+                }
+                let nb = self.index_of(nx, nz);
+                if open[nb] || pack::biome(self.cells[nb]) != Biome::Ocean {
+                    continue;
+                }
+                open[nb] = true;
+                stack.push(nb);
+            }
+        }
+        (0..count).find(|&i| pack::biome(self.cells[i]) == Biome::Ocean && !open[i])
     }
 
     fn compute_hash(&self) -> i32 {
