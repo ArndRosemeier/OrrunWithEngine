@@ -1,5 +1,7 @@
 //! ContinentAtlas — generate, validate, accessors.
 
+use std::sync::Arc;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
@@ -14,12 +16,13 @@ use super::pack;
 use super::population;
 use super::rivers::{self, RiverGraph};
 use super::roads::{self, RoadGraph};
+use super::hydro::HydroVectors;
 use super::types::{Crossing, GraphNode, Lake, Link, Port};
 use super::cardinal;
 
 pub const SIZE: usize = 1000;
 pub const CELL_METRES: f32 = 1000.0;
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 pub const SEA_SURFACE_Z: i32 = 0;
 
 #[derive(Debug, Error)]
@@ -49,6 +52,8 @@ pub struct ContinentAtlas {
     pub road_links: FxHashMap<i32, Vec<Link>>,
     pub river_receiver: Vec<i32>,
     pub mouth_distance: Vec<i32>,
+    /// Deterministic vector hydrology (rivers / lakes / coasts as curves).
+    pub hydro: Arc<HydroVectors>,
 }
 
 impl ContinentAtlas {
@@ -148,7 +153,17 @@ impl ContinentAtlas {
             road_links: road_graph.links,
             river_receiver: river_graph.receiver,
             mouth_distance,
+            hydro: Arc::new(HydroVectors {
+                sea_surface_z: SEA_SURFACE_Z as f32,
+                rivers: Vec::new(),
+                lakes: Vec::new(),
+                coasts: Vec::new(),
+                cell_rivers: Vec::new(),
+                cell_lakes: Vec::new(),
+                cell_coasts: Vec::new(),
+            }),
         };
+        atlas.hydro = Arc::new(HydroVectors::bake(&atlas));
         atlas.content_hash = atlas.compute_hash();
         atlas
     }
@@ -237,6 +252,20 @@ impl ContinentAtlas {
         }
         if self.lakes.is_empty() {
             errors.push("no atlas lakes".into());
+        }
+        if self.hydro.coasts.is_empty() {
+            errors.push("hydro: no coast rings".into());
+        }
+        if self.hydro.lakes.is_empty() && !self.lakes.is_empty() {
+            errors.push("hydro: atlas lakes missing outlines".into());
+        }
+        for r in &self.hydro.rivers {
+            match r.sink {
+                super::hydro::HydroSink::Ocean | super::hydro::HydroSink::Lake { .. } => {}
+            }
+            if r.points.len() < 2 {
+                errors.push(format!("hydro: river {} too short", r.id));
+            }
         }
 
         for lake in &self.lakes {
@@ -618,6 +647,9 @@ impl ContinentAtlas {
         h = h.wrapping_mul(31).wrapping_add(self.river_ports.len() as i64);
         h = h.wrapping_mul(31).wrapping_add(self.road_ports.len() as i64);
         h = h.wrapping_mul(31).wrapping_add(self.crossings.len() as i64);
+        h = h.wrapping_mul(31).wrapping_add(self.hydro.rivers.len() as i64);
+        h = h.wrapping_mul(31).wrapping_add(self.hydro.lakes.len() as i64);
+        h = h.wrapping_mul(31).wrapping_add(self.hydro.coasts.len() as i64);
         let step = (self.size / 32).max(1);
         for az in (0..self.size).step_by(step) {
             for ax in (0..self.size).step_by(step) {

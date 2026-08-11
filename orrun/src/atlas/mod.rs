@@ -1,9 +1,11 @@
 //! Continent atlas — climate, lakes, rivers, roads.
 
 pub mod biomes;
+pub mod cell_sublayer;
 mod classify;
 mod continent;
 pub mod features;
+pub mod hydro;
 mod lakes;
 mod landmask;
 mod nodes;
@@ -19,6 +21,8 @@ pub use biomes::Biome;
 pub use continent::{
     AtlasError, ContinentAtlas, CELL_METRES, SCHEMA_VERSION, SEA_SURFACE_Z, SIZE,
 };
+pub use cell_sublayer::{CellSublayer, SublayerStore};
+pub use hydro::{CoastRing, HydroSink, HydroVectors, LakeOutline, RiverPolyline};
 pub use features::{edge_owner, Dir, EndpointKind, Kind, NodeKind, RoadClass};
 pub use pack::{elevation_to_metres, metres_to_elevation, pack, population as cell_population};
 pub use types::{Crossing, Endpoint, GraphNode, Lake, Link, Port};

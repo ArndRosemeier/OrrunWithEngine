@@ -1,4 +1,4 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-cargo run -p orrun -- %*
+cargo run -p orrun --bin orrun -- %*

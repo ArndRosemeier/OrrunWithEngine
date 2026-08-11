@@ -3,12 +3,14 @@
 //! Usage: `cargo run -p orrun -- [seed] [size]`
 //! Controls: drag to pan, scroll to zoom, F to fit, Escape to quit.
 //! Hover shows cell fields; zoom past ~56 px/cell draws them inside cells.
+//! Right-click a cell to bake & keep its vector sublayer; C clears sublayers.
 
 use engine::egui::{
-    self, Align2, ColorImage, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, Vec2,
+    self, Align2, ColorImage, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
+    StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
 use engine::prelude::*;
+use orrun::atlas::cell_sublayer::{CellSublayer, SublayerStore, WaterBodyKind};
 use orrun::atlas::features::{edge_owner, Dir};
 use orrun::atlas::pack;
 use orrun::atlas::preview;
@@ -30,6 +32,9 @@ struct AtlasViewer {
     /// Top-left of the map in panel coordinates.
     pan: Vec2,
     needs_fit: bool,
+    /// Right-click revealed cell vector sublayers (persisted for the session).
+    sublayers: SublayerStore,
+    last_sublayer_note: Option<String>,
 }
 
 impl AtlasViewer {
@@ -43,6 +48,8 @@ impl AtlasViewer {
             zoom: 1.0,
             pan: Vec2::ZERO,
             needs_fit: true,
+            sublayers: SublayerStore::default(),
+            last_sublayer_note: None,
         }
     }
 
@@ -279,6 +286,126 @@ impl AtlasViewer {
         )
     }
 
+    fn reveal_sublayer(&mut self, ax: i32, az: i32) {
+        let layer = self.sublayers.reveal(&self.atlas, ax, az);
+        self.last_sublayer_note = Some(layer.summary.clone());
+        eprintln!("{}", layer.summary);
+    }
+
+    fn local_to_panel(&self, panel_origin: Pos2, ax: i32, az: i32, local: [f32; 2]) -> Pos2 {
+        let origin = self.cell_to_panel(ax, az);
+        Pos2::new(
+            panel_origin.x + origin.x + local[0] * self.zoom,
+            panel_origin.y + origin.y + local[1] * self.zoom,
+        )
+    }
+
+    fn draw_sublayers(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        for layer in self.sublayers.cells.values() {
+            self.draw_one_sublayer(painter, panel_origin, layer);
+        }
+    }
+
+    fn draw_one_sublayer(
+        &self,
+        painter: &egui::Painter,
+        panel_origin: Pos2,
+        layer: &CellSublayer,
+    ) {
+        let ax = layer.ax;
+        let az = layer.az;
+        let cell_origin = panel_origin + self.cell_to_panel(ax, az).to_vec2();
+        let cell_rect = Rect::from_min_size(cell_origin, Vec2::splat(self.zoom));
+
+        // Dim cell so vectors read clearly when zoomed out a bit.
+        painter.rect_filled(cell_rect, 0.0, Color32::from_black_alpha(40));
+        painter.rect_stroke(
+            cell_rect,
+            0.0,
+            Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 120)),
+            StrokeKind::Inside,
+        );
+
+        // Hydro shore field: repaint both wet and dry so biome stairs don't show through.
+        if let Some(water) = &layer.water {
+            let res = water.res.max(1) as f32;
+            let wet_fill = match water.kind {
+                WaterBodyKind::Ocean => Color32::from_rgba_unmultiplied(35, 105, 195, 210),
+                WaterBodyKind::Lake { .. } => Color32::from_rgba_unmultiplied(50, 135, 205, 215),
+            };
+            let dry_fill = Color32::from_rgba_unmultiplied(118, 145, 88, 200);
+            let step = self.zoom / res;
+            for iz in 0..water.res {
+                for ix in 0..water.res {
+                    let wet = water.wet[iz * water.res + ix];
+                    let p0 = self.local_to_panel(
+                        panel_origin,
+                        ax,
+                        az,
+                        [ix as f32 / res, iz as f32 / res],
+                    );
+                    painter.rect_filled(
+                        Rect::from_min_size(p0, Vec2::splat(step + 0.5)),
+                        0.0,
+                        if wet { wet_fill } else { dry_fill },
+                    );
+                }
+            }
+            // Authoritative hydro coast/lake segments (continuous across cell edges).
+            for line in &water.shore_lines {
+                let pts: Vec<Pos2> = line
+                    .iter()
+                    .map(|p| self.local_to_panel(panel_origin, ax, az, *p))
+                    .collect();
+                for w in pts.windows(2) {
+                    painter.line_segment(
+                        [w[0], w[1]],
+                        Stroke::new(3.0_f32, Color32::from_rgb(60, 210, 230)),
+                    );
+                }
+            }
+        }
+
+        // River ribbons (blue waterways) + pale centreline for edge connectivity.
+        for river in &layer.rivers {
+            let pts: Vec<Pos2> = river
+                .points
+                .iter()
+                .map(|p| self.local_to_panel(panel_origin, ax, az, *p))
+                .collect();
+            let width = (river.half_width_local * 2.0 * self.zoom).max(3.0);
+            for w in pts.windows(2) {
+                painter.line_segment(
+                    [w[0], w[1]],
+                    Stroke::new(width, Color32::from_rgba_unmultiplied(45, 145, 225, 220)),
+                );
+            }
+            for w in pts.windows(2) {
+                painter.line_segment(
+                    [w[0], w[1]],
+                    Stroke::new(1.5_f32, Color32::from_rgb(210, 245, 255)),
+                );
+            }
+        }
+
+        // Roads (gold).
+        for road in &layer.roads {
+            let pts: Vec<Pos2> = road
+                .points
+                .iter()
+                .map(|p| self.local_to_panel(panel_origin, ax, az, *p))
+                .collect();
+            let w = if road.class == 0 { 3.0_f32 } else { 2.0_f32 };
+            for win in pts.windows(2) {
+                painter.line_segment(
+                    [win[0], win[1]],
+                    Stroke::new(w, Color32::from_rgb(230, 190, 80)),
+                );
+            }
+        }
+
+    }
+
     fn draw_cell_details(&self, painter: &egui::Painter, panel_origin: Pos2, panel_size: Vec2) {
         let top_left = -self.pan / self.zoom;
         let bottom_right = (panel_size - self.pan) / self.zoom;
@@ -364,6 +491,25 @@ fn main() {
     let (seed, size) = parse_args();
     eprintln!("generating atlas seed={seed} size={size}…");
     let mut viewer = AtlasViewer::new(seed, size);
+    if std::env::var_os("ORRUN_REVEAL_SHORES").is_some() {
+        eprintln!("revealing all shore sublayers…");
+        viewer.sublayers.reveal_all_shores(&viewer.atlas);
+        eprintln!("revealed {} cells", viewer.sublayers.len());
+        // Frame a coast for screenshots.
+        if let Some(((ax, az), _)) = viewer
+            .sublayers
+            .cells
+            .iter()
+            .find(|(_, l)| matches!(l.biome, orrun::atlas::Biome::Coast))
+        {
+            viewer.zoom = 120.0;
+            viewer.pan = Vec2::new(
+                400.0 - *ax as f32 * viewer.zoom,
+                300.0 - *az as f32 * viewer.zoom,
+            );
+            viewer.needs_fit = false;
+        }
+    }
     eprintln!(
         "ready: lakes={} nodes={} river_edges={} road_edges={} hash={:#x}",
         viewer.atlas.lakes.len(),
@@ -392,9 +538,10 @@ fn main() {
                     viewer.fit(panel);
                 }
 
-                let (rect, response) = ui.allocate_exact_size(panel, Sense::click_and_drag());
+                let (rect, response) =
+                    ui.allocate_exact_size(panel, Sense::click_and_drag() | Sense::click());
 
-                if response.dragged() {
+                if response.dragged_by(PointerButton::Primary) {
                     viewer.pan += response.drag_delta();
                 }
 
@@ -410,6 +557,24 @@ fn main() {
                         .unwrap_or_else(|| rect.center());
                     let local = Pos2::new(pivot.x - rect.min.x, pivot.y - rect.min.y);
                     viewer.zoom_at(local, factor);
+                }
+
+                if ui.input(|i| i.key_pressed(egui::Key::C)) {
+                    viewer.sublayers.clear();
+                    viewer.last_sublayer_note = Some("cleared cell sublayers".into());
+                }
+
+                // Right-click: bake & keep vector sublayer for that cell.
+                if response.hovered() {
+                    let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+                    if secondary {
+                        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                            let local = Pos2::new(p.x - rect.min.x, p.y - rect.min.y);
+                            if let Some((ax, az)) = viewer.screen_to_cell(local) {
+                                viewer.reveal_sublayer(ax, az);
+                            }
+                        }
+                    }
                 }
 
                 let hover_cell = ui
@@ -432,23 +597,28 @@ fn main() {
                     viewer.draw_cell_details(&painter, rect.min, panel);
                 }
                 viewer.draw_feature_overlays(&painter, rect.min);
+                viewer.draw_sublayers(&painter, rect.min);
 
                 let status = format!(
-                    "seed {}  |  {} km  |  {} lakes  |  {} nodes  |  rivers {}  roads {}  |  zoom {:.1} px/cell  |  drag pan  |  scroll zoom  |  F fit{}",
+                    "seed {}  |  {} km  |  zoom {:.1} px/cell  |  sublayers {}  |  drag pan  |  scroll zoom  |  F fit  |  RMB cell vector  |  C clear{}",
                     viewer.atlas.world_seed,
                     viewer.atlas.size,
-                    viewer.atlas.lakes.len(),
-                    viewer.atlas.nodes.len(),
-                    viewer.atlas.river_links.len(),
-                    viewer.atlas.road_links.len(),
                     viewer.zoom,
+                    viewer.sublayers.len(),
                     if viewer.zoom < DETAIL_CELL_PX {
                         "  |  zoom in for cell text"
                     } else {
                         ""
                     },
                 );
-                let hover_text = hover_cell.map(|(ax, az)| viewer.hover_line(ax, az));
+                let hover_text = hover_cell.map(|(ax, az)| {
+                    let base = viewer.hover_line(ax, az);
+                    if viewer.sublayers.cells.contains_key(&(ax, az)) {
+                        format!("{base}  |  SUBLAYER ON")
+                    } else {
+                        format!("{base}  |  RMB → vector sublayer")
+                    }
+                });
 
                 egui::Area::new(egui::Id::new("atlas_hud"))
                     .fixed_pos(egui::pos2(12.0, 12.0))
@@ -463,6 +633,13 @@ fn main() {
                                         egui::RichText::new(line)
                                             .size(13.0)
                                             .color(Color32::from_rgb(217, 224, 179)),
+                                    );
+                                }
+                                if let Some(note) = &viewer.last_sublayer_note {
+                                    ui.label(
+                                        egui::RichText::new(note)
+                                            .size(12.0)
+                                            .color(Color32::from_rgb(120, 200, 255)),
                                     );
                                 }
                             });

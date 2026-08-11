@@ -4,10 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Orrun — continental atlas and game content on the Engine"
+default-run = "orrun"
 
 [[bin]]
 name = "orrun"
 path = "src/main.rs"
+
+[[bin]]
+name = "hamlet_lab"
+path = "src/bin/hamlet_lab.rs"
+
+[[bin]]
+name = "continent"
+path = "src/bin/continent.rs"
 
 [dependencies]
 engine = { workspace = true }
