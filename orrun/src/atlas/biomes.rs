@@ -43,6 +43,21 @@ impl Biome {
             Self::Lake => "lake",
         }
     }
+
+    /// Preview colour (sRGB bytes), matching the Godot atlas viewer.
+    pub fn color_rgb(self) -> [u8; 3] {
+        match self {
+            Self::Ocean => [26, 56, 102],
+            Self::Coast => [184, 168, 107],
+            Self::Plains => [107, 148, 71],
+            Self::Forest => [46, 102, 51],
+            Self::Wetland => [71, 122, 92],
+            Self::Arid => [158, 133, 82],
+            Self::Alpine => [140, 143, 133],
+            Self::Tundra => [122, 133, 112],
+            Self::Lake => [41, 97, 148],
+        }
+    }
 }
 
 #[inline]

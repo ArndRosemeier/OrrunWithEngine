@@ -10,6 +10,7 @@ mod nodes;
 mod orogen;
 pub mod pack;
 mod population;
+pub mod preview;
 mod rivers;
 mod roads;
 pub mod types;
@@ -18,7 +19,7 @@ pub use biomes::Biome;
 pub use continent::{
     AtlasError, ContinentAtlas, CELL_METRES, SCHEMA_VERSION, SEA_SURFACE_Z, SIZE,
 };
-pub use features::{Dir, EndpointKind, Kind, NodeKind, RoadClass};
+pub use features::{edge_owner, Dir, EndpointKind, Kind, NodeKind, RoadClass};
 pub use pack::{elevation_to_metres, metres_to_elevation, pack, population as cell_population};
 pub use types::{Crossing, Endpoint, GraphNode, Lake, Link, Port};
 
