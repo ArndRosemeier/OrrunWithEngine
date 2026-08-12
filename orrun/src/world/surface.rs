@@ -225,6 +225,7 @@ pub struct ContinentalSurface {
     index: Arc<HydroIndex>,
     bounds: AtlasBounds,
     sea_surface_z: f32,
+    world_seed: i32,
     detail: TerrainDetail,
 }
 
@@ -245,6 +246,7 @@ impl ContinentalSurface {
             hydro: Arc::clone(&atlas.hydro),
             bounds,
             sea_surface_z: atlas.hydro.sea_surface_z,
+            world_seed: atlas.world_seed,
             detail: TerrainDetail::new(atlas.world_seed),
         };
         surface.validate()?;
@@ -300,6 +302,11 @@ impl ContinentalSurface {
 
     pub fn fields(&self) -> &AtlasFields {
         &self.fields
+    }
+
+    /// Seed everything derived from this continent hangs off.
+    pub fn world_seed(&self) -> i32 {
+        self.world_seed
     }
 
     pub fn hydro(&self) -> &HydroVectors {

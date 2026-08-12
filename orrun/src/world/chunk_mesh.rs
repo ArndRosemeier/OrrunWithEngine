@@ -20,10 +20,38 @@ use engine::SurfaceMeshStyle;
 use glam::{Vec3, Vec4};
 
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
-use super::surface::{ContinentalSurface, SurfaceColumn, SurfaceMaterial};
+use super::surface::{ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
 
-fn water_color() -> Color {
-    rgba(36, 105, 155, 200)
+/// Depth that a fully opaque water vertex stands for.
+///
+/// The sheet carries its depth in vertex alpha and the engine's water material
+/// decodes it with the same scale, which is how a shallow margin stays clear
+/// while a channel goes dark without any second geometry pass.
+pub const WATER_DEPTH_SCALE_M: f32 = 9.0;
+
+/// Body tint, around the neutral 0.45 the water shader expects.
+fn water_tint(body: Option<WaterBody>) -> Color {
+    match body {
+        Some(WaterBody::Ocean) | None => rgba(104, 116, 130, 255),
+        Some(WaterBody::Lake { .. }) => rgba(104, 126, 122, 255),
+        Some(WaterBody::River { .. }) => rgba(112, 122, 104, 255),
+    }
+}
+
+/// A water vertex: where the sheet sits, and how deep it is there.
+#[derive(Clone, Copy, Debug)]
+struct WaterVertex {
+    position: Vec3,
+    depth_m: f32,
+    body: Option<WaterBody>,
+}
+
+impl WaterVertex {
+    fn color(self) -> Vec4 {
+        let mut c: Vec4 = water_tint(self.body).into();
+        c.w = (self.depth_m / WATER_DEPTH_SCALE_M).clamp(0.0, 1.0);
+        c
+    }
 }
 
 /// Samples of one chunk plus its halo, on the global lattice.
@@ -202,7 +230,6 @@ impl TerrainChunkBuilder {
     /// marching squares. Ocean, lake, and river sheets all come out of this one
     /// field, so there is no second ribbon path to drift out of alignment.
     fn build_water(&self, s: &ChunkSamples) -> Option<BuiltMesh> {
-        let color: Vec4 = water_color().into();
         let mut positions: Vec<Vec3> = Vec::new();
         let mut normals: Vec<Vec3> = Vec::new();
         let mut colors: Vec<Vec4> = Vec::new();
@@ -214,7 +241,6 @@ impl TerrainChunkBuilder {
                 for poly in cell_water_polygons(s, ix, iz) {
                     push_fan(
                         &poly,
-                        color,
                         &mut positions,
                         &mut normals,
                         &mut colors,
@@ -275,7 +301,7 @@ impl ChunkBuilder for TerrainChunkBuilder {
 }
 
 /// A water polygon inside one lattice cell, in chunk-local metres.
-type WaterPoly = Vec<Vec3>;
+type WaterPoly = Vec<WaterVertex>;
 
 /// Corner walk `(0,0) → (0,1) → (1,1) → (1,0)`, matching the land winding.
 const CORNERS: [(i32, i32); 4] = [(0, 0), (0, 1), (1, 1), (1, 0)];
@@ -298,10 +324,15 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
         return Vec::new();
     }
 
-    let corner = |k: usize| -> Vec3 {
+    let corner = |k: usize| -> WaterVertex {
         let (dx, dz) = CORNERS[k];
         let (lx, lz) = s.local(ix + dx, iz + dz);
-        Vec3::new(lx, cols[k].sheet_hint(), lz)
+        let sheet = cols[k].sheet_hint();
+        WaterVertex {
+            position: Vec3::new(lx, sheet, lz),
+            depth_m: (sheet - cols[k].ground()).max(0.0),
+            body: cols[k].body(),
+        }
     };
     // The crossing sits at zero depth, so it takes the wet side's sheet height:
     // interpolating towards a dry column would tilt the water surface.
@@ -309,7 +340,7 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
     // The pair is ordered by global lattice index first, so the cell on the
     // other side of an edge evaluates the identical expression and the two
     // shorelines meet bit-for-bit.
-    let crossing = |a: usize, b: usize| -> Vec3 {
+    let crossing = |a: usize, b: usize| -> WaterVertex {
         let (a, b) = if (CORNERS[b].1, CORNERS[b].0) < (CORNERS[a].1, CORNERS[a].0) {
             (b, a)
         } else {
@@ -318,14 +349,19 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
         let wa = cols[a].wetness();
         let wb = cols[b].wetness();
         let t = (wa / (wa - wb)).clamp(0.0, 1.0);
-        let pa = corner(a);
-        let pb = corner(b);
-        let sheet = if wet[a] {
-            cols[a].sheet_hint()
-        } else {
-            cols[b].sheet_hint()
-        };
-        Vec3::new(pa.x + (pb.x - pa.x) * t, sheet, pa.z + (pb.z - pa.z) * t)
+        let pa = corner(a).position;
+        let pb = corner(b).position;
+        let inside = if wet[a] { a } else { b };
+        WaterVertex {
+            position: Vec3::new(
+                pa.x + (pb.x - pa.x) * t,
+                cols[inside].sheet_hint(),
+                pa.z + (pb.z - pa.z) * t,
+            ),
+            // The contour is the waterline, so the sheet has run out here.
+            depth_m: 0.0,
+            body: cols[inside].body(),
+        }
     };
 
     // Saddle: opposite corners wet. The bilinear centre decides whether the two
@@ -365,7 +401,6 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
 /// Fan from the centroid: works for the concave joined-saddle polygon too.
 fn push_fan(
     poly: &WaterPoly,
-    color: Vec4,
     positions: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     colors: &mut Vec<Vec4>,
@@ -374,20 +409,26 @@ fn push_fan(
     if poly.len() < 3 {
         return;
     }
-    let mut centre = Vec3::ZERO;
-    for p in poly {
-        centre += *p;
+    let inv = 1.0 / poly.len() as f32;
+    let mut centre = WaterVertex {
+        position: Vec3::ZERO,
+        depth_m: 0.0,
+        body: poly[0].body,
+    };
+    for v in poly {
+        centre.position += v.position * inv;
+        centre.depth_m += v.depth_m * inv;
+        centre.body = centre.body.or(v.body);
     }
-    centre /= poly.len() as f32;
 
     let base = positions.len() as u32;
-    positions.push(centre);
+    positions.push(centre.position);
     normals.push(Vec3::Y);
-    colors.push(color);
-    for p in poly {
-        positions.push(*p);
+    colors.push(centre.color());
+    for v in poly {
+        positions.push(v.position);
         normals.push(Vec3::Y);
-        colors.push(color);
+        colors.push(v.color());
     }
     for k in 0..poly.len() {
         let a = base + 1 + k as u32;

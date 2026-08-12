@@ -1,7 +1,8 @@
 //! Direct entry into the walkable continent, bypassing the map UI.
 //!
 //! Usage: `cargo run -p orrun --bin continent -- [seed] [size] [where]`
-//! where `where` is `river` (default), `coast`, `inland`, `ocean`, or `x,z`.
+//! where `where` is `river` (default), `coast`, `inland`, `forest`, `ocean`,
+//! or `x,z`.
 //! Controls: W/S walk · Q/E sidestep · A/D turn · mouse look · Shift sprint ·
 //! F fly (Space up, Ctrl down) · Esc quit.
 //!
@@ -15,7 +16,10 @@ use engine::prelude::*;
 use engine::space::GlobalXZ;
 use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
-use orrun::world::{ContinentalSurface, MapPoint, SessionState, WorldEntryRequest, WorldSession};
+use orrun::world::{
+    install_daylight, install_materials, ContinentalSurface, GroundCover, MapPoint, SessionState,
+    WorldEntryRequest, WorldSession,
+};
 
 /// Which part of the continent to enter at.
 #[derive(Clone, Copy, Debug)]
@@ -23,6 +27,7 @@ enum Target {
     River,
     Coast,
     Inland,
+    Forest,
     Ocean,
     Exact(f64, f64),
 }
@@ -33,11 +38,12 @@ impl Target {
             "river" => Self::River,
             "coast" => Self::Coast,
             "inland" => Self::Inland,
+            "forest" => Self::Forest,
             "ocean" => Self::Ocean,
             other => {
                 let (x, z) = other
                     .split_once(',')
-                    .expect("entry must be river|coast|inland|ocean|x,z");
+                    .expect("entry must be river|coast|inland|forest|ocean|x,z");
                 Self::Exact(
                     x.trim().parse().expect("entry x in metres"),
                     z.trim().parse().expect("entry z in metres"),
@@ -81,6 +87,33 @@ fn extreme_column(surface: &ContinentalSurface, want_wet: bool) -> GlobalXZ {
             let score = if want_wet { wetness } else { -wetness };
             if score > best {
                 best = score;
+                at = p;
+            }
+        }
+    }
+    at
+}
+
+/// The deepest timber: the dry, gentle column carrying the most canopy.
+///
+/// `Inland` finds the driest spot on the continent, which is the one place
+/// grass is meant to look like straw; a forest entry is what the ground cover
+/// wants to be judged against.
+fn deepest_timber(surface: &ContinentalSurface) -> GlobalXZ {
+    let probe = 192usize;
+    let step = surface.bounds().metres() / probe as f64;
+    let mut best = f32::NEG_INFINITY;
+    let mut at = GlobalXZ::at(step * 0.5, step * 0.5);
+    for iz in 0..probe {
+        for ix in 0..probe {
+            let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+            let column = surface.column(p);
+            if column.is_wet() {
+                continue;
+            }
+            let cover = GroundCover::sample(surface, p, column.ground(), 0.0, 0.0);
+            if cover.tree > best {
+                best = cover.tree;
                 at = p;
             }
         }
@@ -145,6 +178,7 @@ fn entry_position(
             .expect("the atlas has at least one river"),
         Target::Coast => lowland_shore(atlas, surface),
         Target::Inland => extreme_column(surface, false),
+        Target::Forest => deepest_timber(surface),
         Target::Ocean => extreme_column(surface, true),
     }
 }
@@ -176,33 +210,8 @@ fn main() {
 
     Engine::run("Orrun — Continent", move |world, frame| {
         if frame.first {
-            world.set_clear_color(rgb(145, 195, 235));
-            world.set_sun((0.7, 0.75, 0.4), 0.12);
-
-            let seed = args.seed as u32;
-            let grass = world
-                .create_terrain_albedo(TerrainAlbedo::Grass, 256, seed)
-                .expect("grass albedo");
-            let sand = world
-                .create_terrain_albedo(TerrainAlbedo::Sand, 256, seed ^ 0x51)
-                .expect("sand albedo");
-            let rock = world
-                .create_terrain_albedo(TerrainAlbedo::Rock, 256, seed ^ 0x20C6)
-                .expect("rock albedo");
-            let material = world
-                .create_terrain_material(TerrainMaterialDesc {
-                    grass,
-                    sand,
-                    rock,
-                    metres_per_tile: 7.0,
-                    rock_slope_start: 0.36,
-                    rock_slope_end: 0.70,
-                    sand_height_band: 10.0,
-                    sea_surface_z: sea,
-                    tint_strength: 0.30,
-                })
-                .expect("terrain material");
-            world.set_default_terrain_material(Some(material));
+            install_daylight(world);
+            install_materials(world, args.seed, sea);
 
             let pose = session
                 .begin_entry(world, request)

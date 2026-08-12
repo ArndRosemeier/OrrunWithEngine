@@ -11,7 +11,9 @@ mod chunk_mesh;
 mod coords;
 mod entry;
 mod hydro_geom;
+mod look;
 mod ring_field;
+mod scatter;
 mod session;
 mod surface;
 mod world_stream;
@@ -26,6 +28,8 @@ pub use coords::{
     CHUNK_SPAN_M,
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+pub use look::{install_daylight, install_materials};
+pub use scatter::{GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer};
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
 pub use surface::{
     ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,

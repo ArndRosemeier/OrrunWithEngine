@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
 use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 
@@ -43,6 +44,9 @@ pub enum SessionError {
 
     #[error(transparent)]
     Engine(#[from] EngineError),
+
+    #[error(transparent)]
+    Scatter(#[from] ScatterError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -171,6 +175,8 @@ impl Player {
 pub struct WorldSession {
     surface: Arc<ContinentalSurface>,
     stream: WorldStream,
+    /// Ground cover, once the prop meshes have been uploaded.
+    scatter: Option<ScatterLayer>,
     state: SessionState,
     spawn: Option<SpawnPose>,
     player: Option<Player>,
@@ -182,6 +188,7 @@ impl WorldSession {
         Self {
             surface,
             stream,
+            scatter: None,
             state: SessionState::Atlas,
             spawn: None,
             player: None,
@@ -219,6 +226,20 @@ impl WorldSession {
         request: WorldEntryRequest,
     ) -> Result<SpawnPose, SessionError> {
         let pose = resolve_spawn(&self.surface, request)?;
+
+        // Prop meshes are uploaded once, on the first entry, so a player who
+        // never leaves the map never pays for them.
+        if self.scatter.is_none() {
+            let catalog = ScatterCatalog::discover()?;
+            self.scatter = Some(ScatterLayer::install(
+                world,
+                &catalog,
+                self.surface.world_seed(),
+            )?);
+        }
+        if let Some(scatter) = self.scatter.as_mut() {
+            scatter.clear(world)?;
+        }
 
         self.stream.reset(world);
         world.set_render_origin(RenderOrigin::snapped(pose.ground(), CHUNK_SPAN_M)?)?;
@@ -328,8 +349,11 @@ impl WorldSession {
         }
 
         let foot = player.position.horizontal();
-        self.stream.maybe_rebase(world, foot)?;
+        let rebased = self.stream.maybe_rebase(world, foot)?;
         self.stream.sync(world, foot, Some(player.heading))?;
+        if let Some(scatter) = self.scatter.as_mut() {
+            scatter.follow(world, &self.stream, &self.surface, foot, rebased)?;
+        }
 
         match player.mode {
             // Only the resident bake may move the player vertically: falling
@@ -368,6 +392,11 @@ impl WorldSession {
     /// Where the camera sits, once the player exists.
     pub fn eye_position(&self) -> Option<GlobalPosition> {
         self.player.map(|p| p.eye())
+    }
+
+    /// Grass, stones, and trees standing around the player.
+    pub fn scattered_count(&self) -> usize {
+        self.scatter.as_ref().map_or(0, ScatterLayer::placed_count)
     }
 }
 

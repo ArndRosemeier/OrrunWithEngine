@@ -16,12 +16,71 @@ use glam::Vec2;
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
     chunk_span, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface, EntryError, Locomotion,
-    MapPoint, SessionState, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession,
-    WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
+    MapPoint, PropClass, ScatterCatalog, SessionState, TerrainChunkBuilder, WalkInput,
+    WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
 use crate::atlas::{ContinentAtlas, CELL_METRES};
+
+#[test]
+fn vendored_props_arrive_with_the_colour_the_generator_authored() {
+    // Untextured glTF carries its look in the material factor, and the prop
+    // pipeline has nothing else to shade with: a mesh that loads grey is a mesh
+    // that will stand in the world as a grey stick.
+    let catalog = ScatterCatalog::discover().expect("vendored props");
+    assert!(catalog.count_of(PropClass::Grass) >= 3);
+    assert!(catalog.count_of(PropClass::Tree) >= 3);
+    assert!(catalog.count_of(PropClass::Rock) >= 4);
+
+    let tuft = engine::model::Model::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/props/grass/grass_tuft_lush.glb"),
+    )
+    .expect("grass tuft loads")
+    .build();
+    let green = tuft
+        .colors
+        .iter()
+        .all(|c| c.y > c.x + 0.1 && c.y > c.z + 0.1);
+    assert!(green, "grass tuft is not green: {:?}", tuft.colors.first());
+}
+
+#[test]
+fn the_continent_grows_forests_as_well_as_deserts() {
+    // Rainfall used to be noise around a single mean, and every land cell fell
+    // in the same band: seed 1 had no forest on it at all, so the world could
+    // not have trees no matter what the scatter asked for.
+    for seed in [1, 7, 23] {
+        let (atlas, surface) = world_of(seed, 96);
+        let mut land = 0usize;
+        let mut forest = 0usize;
+        for c in &atlas.cells {
+            match crate::atlas::pack::biome(*c) {
+                crate::atlas::Biome::Ocean | crate::atlas::Biome::Lake => continue,
+                crate::atlas::Biome::Forest => forest += 1,
+                _ => {}
+            }
+            land += 1;
+        }
+        let share = forest as f32 / land as f32;
+        assert!(
+            (0.05..0.60).contains(&share),
+            "seed {seed}: forest share {share:.2} of {land} land cells"
+        );
+
+        let canopy = surface
+            .fields()
+            .canopy01
+            .iter()
+            .cloned()
+            .fold(0.0, f32::max);
+        assert!(
+            canopy > 0.5,
+            "seed {seed}: thickest canopy is only {canopy:.2}"
+        );
+    }
+}
 
 fn world_of(seed: i32, size: usize) -> (ContinentAtlas, Arc<ContinentalSurface>) {
     let atlas = ContinentAtlas::generate(seed, size);

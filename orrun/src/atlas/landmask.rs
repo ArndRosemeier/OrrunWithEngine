@@ -18,6 +18,60 @@ pub fn collar_cells(size: usize) -> i32 {
     6.max(OCEAN_COLLAR_FULL * size as i32 / SIZE_FULL)
 }
 
+/// How far each cell is from open water, in cells.
+///
+/// Two chamfer sweeps: exact enough for a climate gradient, and cheap enough to
+/// run on every atlas build.
+fn distance_to_sea(size: usize, land: &[u8]) -> Vec<f32> {
+    let far = (size * 2) as f32;
+    let mut d: Vec<f32> = land
+        .iter()
+        .map(|&l| if l == 0 { 0.0 } else { far })
+        .collect();
+    let diag = std::f32::consts::SQRT_2;
+    let at = |x: usize, z: usize| z * size + x;
+
+    for z in 0..size {
+        for x in 0..size {
+            let i = at(x, z);
+            let mut best = d[i];
+            if z > 0 {
+                best = best.min(d[at(x, z - 1)] + 1.0);
+                if x > 0 {
+                    best = best.min(d[at(x - 1, z - 1)] + diag);
+                }
+                if x + 1 < size {
+                    best = best.min(d[at(x + 1, z - 1)] + diag);
+                }
+            }
+            if x > 0 {
+                best = best.min(d[at(x - 1, z)] + 1.0);
+            }
+            d[i] = best;
+        }
+    }
+    for z in (0..size).rev() {
+        for x in (0..size).rev() {
+            let i = at(x, z);
+            let mut best = d[i];
+            if z + 1 < size {
+                best = best.min(d[at(x, z + 1)] + 1.0);
+                if x > 0 {
+                    best = best.min(d[at(x - 1, z + 1)] + diag);
+                }
+                if x + 1 < size {
+                    best = best.min(d[at(x + 1, z + 1)] + diag);
+                }
+            }
+            if x + 1 < size {
+                best = best.min(d[at(x + 1, z)] + 1.0);
+            }
+            d[i] = best;
+        }
+    }
+    d
+}
+
 pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
     let count = size * size;
     let continent = Noise::new(layer_seed(world_seed, "atlas_continent"));
@@ -38,6 +92,10 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
     let mut elev_code = vec![0u8; count];
     let mut humidity = vec![0u8; count];
     let mut relief = vec![0u8; count];
+    // Kept for the climate pass, which needs the whole landmask before it can
+    // say how far a cell is from the sea.
+    let mut weather = vec![0.0f32; count];
+    let mut alpine_f = vec![0.0f32; count];
 
     for az in 0..size {
         for ax in 0..size {
@@ -95,11 +153,24 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
                 + 4.0) as i32)
                 .clamp(0, 63) as u8;
 
-            let mut h = moist.fbm2(wx * 0.0035, wz * 0.0035, 3, 2.0, 0.5) * 0.5 + 0.5;
-            h = lerp(h, 0.85, radial.clamp(0.0, 1.0) * 0.35) * 0.35 + h * 0.65;
-            h -= alpine * 0.25;
-            humidity[idx] = ((h * 255.0) as i32).clamp(0, 255) as u8;
+            weather[idx] = moist.fbm2(wx * 0.0035, wz * 0.0035, 3, 2.0, 0.5) * 0.5 + 0.5;
+            alpine_f[idx] = alpine;
         }
+    }
+
+    let sea_cells = distance_to_sea(size, &land);
+    for idx in 0..count {
+        if land[idx] == 0 {
+            continue;
+        }
+        // Weather noise alone clusters around its own mean, which put the whole
+        // continent inside one biome band; rainfall needs geography behind it.
+        let maritime = 1.0 - smoothstep(2.0, 30.0, sea_cells[idx]);
+        let mut h = 0.5 + (weather[idx] - 0.5) * 1.35;
+        h = h * 0.62 + maritime * 0.38 + 0.10;
+        // Only the high ridge casts a shadow; the gentle uplands stay green.
+        h -= smoothstep(0.45, 0.95, alpine_f[idx]) * 0.30;
+        humidity[idx] = ((h * 255.0) as i32).clamp(0, 255) as u8;
     }
 
     LandmaskPlanes {

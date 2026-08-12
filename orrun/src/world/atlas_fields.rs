@@ -3,7 +3,7 @@
 //! Water shores are **not** derived from these grids — see atlas `HydroVectors`.
 
 use crate::atlas::pack;
-use crate::atlas::{ContinentAtlas, CELL_METRES};
+use crate::atlas::{Biome, ContinentAtlas, CELL_METRES};
 
 /// Immutable interpolatable atlas climate layers (built once after atlas generate).
 #[derive(Clone, Debug)]
@@ -13,6 +13,8 @@ pub struct AtlasFields {
     pub elevation_m: Vec<f32>,
     pub humidity01: Vec<f32>,
     pub relief01: Vec<f32>,
+    /// Fraction of the cell the atlas expects under canopy.
+    pub canopy01: Vec<f32>,
 }
 
 impl AtlasFields {
@@ -23,12 +25,14 @@ impl AtlasFields {
         let mut elevation_m = vec![0.0; count];
         let mut humidity01 = vec![0.0; count];
         let mut relief01 = vec![0.0; count];
+        let mut canopy01 = vec![0.0; count];
 
         for i in 0..count {
             let cell = atlas.cells[i];
             elevation_m[i] = pack::elevation_to_metres(pack::elevation(cell)) as f32;
             humidity01[i] = pack::humidity(cell) as f32 / 255.0;
             relief01[i] = pack::relief(cell) as f32 / 63.0;
+            canopy01[i] = canopy_of(pack::biome(cell), humidity01[i]);
         }
 
         Self {
@@ -37,6 +41,7 @@ impl AtlasFields {
             elevation_m,
             humidity01,
             relief01,
+            canopy01,
         }
     }
 
@@ -86,6 +91,26 @@ impl AtlasFields {
     pub fn sample_smooth(&self, field: &[f32], world_x: f32, world_z: f32) -> f32 {
         self.sample_bicubic(field, world_x, world_z)
     }
+}
+
+/// How much of a cell the biome expects under trees, before local terrain has
+/// its say.
+///
+/// Humidity moves the figure but cannot invent a forest on a desert cell: the
+/// biome classification already weighed rainfall, and second-guessing it here
+/// would put woodland where the atlas overlay shows none.
+fn canopy_of(biome: Biome, humidity01: f32) -> f32 {
+    let base = match biome {
+        Biome::Ocean | Biome::Lake => 0.0,
+        Biome::Coast => 0.06,
+        Biome::Plains => 0.14,
+        Biome::Forest => 0.82,
+        Biome::Wetland => 0.28,
+        Biome::Arid => 0.02,
+        Biome::Alpine => 0.12,
+        Biome::Tundra => 0.05,
+    };
+    (base * (0.6 + 0.7 * humidity01.clamp(0.0, 1.0))).clamp(0.0, 1.0)
 }
 
 #[inline]

@@ -22,8 +22,8 @@ use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
 use orrun::world::{
-    AtlasBounds, AtlasCell, ContinentalSurface, Locomotion, MapPoint, SessionState,
-    WorldEntryRequest, WorldSession,
+    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Locomotion,
+    MapPoint, SessionState, WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -516,33 +516,6 @@ fn parse_args() -> (i32, usize) {
     (seed, size.max(32))
 }
 
-fn setup_terrain_material(world: &mut World, seed: i32, sea_surface_z: f32) {
-    let tex_seed = seed as u32;
-    let grass = world
-        .create_terrain_albedo(TerrainAlbedo::Grass, 256, tex_seed)
-        .expect("grass albedo");
-    let sand = world
-        .create_terrain_albedo(TerrainAlbedo::Sand, 256, tex_seed ^ 0x51)
-        .expect("sand albedo");
-    let rock = world
-        .create_terrain_albedo(TerrainAlbedo::Rock, 256, tex_seed ^ 0x20C6)
-        .expect("rock albedo");
-    let material = world
-        .create_terrain_material(TerrainMaterialDesc {
-            grass,
-            sand,
-            rock,
-            metres_per_tile: 7.0,
-            rock_slope_start: 0.36,
-            rock_slope_end: 0.70,
-            sand_height_band: 10.0,
-            sea_surface_z,
-            tint_strength: 0.30,
-        })
-        .expect("terrain material");
-    world.set_default_terrain_material(Some(material));
-}
-
 fn main() {
     let (seed, size) = parse_args();
     eprintln!("generating atlas seed={seed} size={size}…");
@@ -563,12 +536,12 @@ fn main() {
 
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
-            world.set_sun((0.7, 0.75, 0.4), 0.12);
-            setup_terrain_material(world, seed, sea);
+            install_daylight(world);
+            install_materials(world, seed, sea);
         }
 
         match session.state() {
-            SessionState::World => world.set_clear_color(rgb(145, 195, 235)),
+            SessionState::World => install_daylight(world),
             _ => world.set_clear_color(rgb(12, 14, 18)),
         }
 

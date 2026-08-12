@@ -97,7 +97,9 @@ fn classify_land(
     if hum > 170 && elev < 100 {
         return Biome::Wetland;
     }
-    if hum > 130 && rel > 8 {
+    // Closed canopy is a rainfall question, not a relief one: flat, wet ground
+    // grows the deepest timber of all. Plains are what is left in the middle.
+    if hum > 138 {
         return Biome::Forest;
     }
     Biome::Plains
