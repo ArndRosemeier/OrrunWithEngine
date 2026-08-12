@@ -5,7 +5,8 @@
 //! Map: drag to pan · scroll to zoom · F fit · left click picks an exact spot ·
 //! Enter or double click walks there · right click reveals a cell overlay ·
 //! C clears overlays.
-//! World: WASD move · Q/E turn · Shift sprint · M back to the map · Esc quit.
+//! World (first person): W/S walk · Q/E sidestep · A/D turn · mouse look ·
+//! Shift sprint · F fly (Space up, Ctrl down) · M back to the map · Esc quit.
 
 use std::sync::Arc;
 
@@ -21,8 +22,8 @@ use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
 use orrun::world::{
-    AtlasBounds, AtlasCell, ContinentalSurface, MapPoint, SessionState, WorldEntryRequest,
-    WorldSession,
+    AtlasBounds, AtlasCell, ContinentalSurface, Locomotion, MapPoint, SessionState,
+    WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -817,18 +818,24 @@ fn draw_world_hud(session: &mut WorldSession, frame: &Frame) {
     let column = session
         .surface()
         .column(engine::space::GlobalXZ::at(p.x, p.z));
+    let stance = match session.locomotion() {
+        Some(Locomotion::Fly) => "flying",
+        _ if column.is_wet() => "in water",
+        _ => "on land",
+    };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {}  |  chunks {}  |  {:.0} fps  |  M map",
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  M map",
         p.x,
         p.z,
         p.y,
-        if column.is_wet() { "in water" } else { "on land" },
         session.stream().resident_count(),
         frame.fps,
     );
+    // Non-interactive: the pointer belongs to mouse-look, not to the HUD.
     egui::Area::new(egui::Id::new("world_hud"))
         .fixed_pos(egui::pos2(12.0, 12.0))
         .order(egui::Order::Foreground)
+        .interactable(false)
         .show(&ctx, |ui| {
             egui::Frame::popup(ui.style())
                 .inner_margin(egui::Margin::same(8))

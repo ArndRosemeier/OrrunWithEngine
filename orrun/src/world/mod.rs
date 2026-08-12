@@ -26,7 +26,7 @@ pub use coords::{
     CHUNK_SPAN_M,
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
-pub use session::{SessionError, SessionState, WalkInput, WorldSession};
+pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
 pub use surface::{
     ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
 };

@@ -5,14 +5,16 @@
 //! the spawn is *actually* resident, because the drawn chunk carries the only
 //! collision data there is — a guessed spawn height would drop the player
 //! through the terrain or leave them hovering.
+//!
+//! The view is first person: there is no avatar to draw, the camera *is* the
+//! player, and the mouse is captured for as long as they are in the world.
 
 use std::sync::Arc;
 
+use engine::camera::{Camera, MAX_PITCH_DEGREES};
 use engine::error::EngineError;
-use engine::mesh::Mesh;
-use engine::place::GlobalPlace;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
-use engine::world::{EntityId, Frame, World};
+use engine::world::{Frame, World};
 use engine::Key;
 use glam::Vec2;
 use thiserror::Error;
@@ -22,13 +24,17 @@ use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 
-/// Eye/foot offset so the walker mesh rests on the ground.
+/// Gap between the contact height and the soles, so rounding never buries them.
 const FOOT_CLEARANCE_M: f32 = 0.05;
+/// Camera height above the feet.
+const EYE_HEIGHT_M: f32 = 1.7;
 const WALK_SPEED: f32 = 10.0;
 const SPRINT_SPEED: f32 = 28.0;
-const TURN_DEGREES_PER_S: f32 = 90.0;
-const CAMERA_DISTANCE: f32 = 14.0;
-const CAMERA_HEIGHT: f32 = 7.0;
+const FLY_SPEED: f32 = 40.0;
+const FLY_SPRINT_SPEED: f32 = 160.0;
+const TURN_DEGREES_PER_S: f32 = 120.0;
+/// Degrees per unit of raw pointer motion.
+const MOUSE_DEGREES_PER_COUNT: f32 = 0.12;
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -55,44 +61,111 @@ pub enum SessionState {
     World,
 }
 
-/// One frame of walking intent, independent of how it was produced.
+/// Walking on the ground, or flying free of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Locomotion {
+    Walk,
+    Fly,
+}
+
+impl Locomotion {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Walk => Self::Fly,
+            Self::Fly => Self::Walk,
+        }
+    }
+}
+
+/// One frame of movement intent, independent of how it was produced.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkInput {
     /// Unit-ish direction on the XZ plane, already rotated into world space.
     pub direction: Vec2,
-    pub speed_m_s: f32,
+    /// Vertical intent while flying: +1 up, −1 down.
+    pub lift: f32,
+    /// Metres to travel this frame at the current speed.
+    pub step_m: f32,
     pub yaw_delta_degrees: f32,
+    pub pitch_delta_degrees: f32,
+    /// F went down this frame: swap between walking and flying.
+    pub toggle_fly: bool,
 }
 
 impl WalkInput {
     pub const IDLE: Self = Self {
         direction: Vec2::ZERO,
-        speed_m_s: 0.0,
+        lift: 0.0,
+        step_m: 0.0,
         yaw_delta_degrees: 0.0,
+        pitch_delta_degrees: 0.0,
+        toggle_fly: false,
     };
 
-    /// Read WASD / Q / E / Shift for one frame.
-    pub fn from_frame(frame: &Frame, yaw_degrees: f32) -> Self {
-        let dir = frame.input.move_dir_xz(yaw_degrees);
-        let speed = if frame.input.down(Key::Shift) {
-            SPRINT_SPEED
-        } else {
-            WALK_SPEED
+    /// Read one frame of first-person controls.
+    ///
+    /// W/S and Up/Down walk, Q/E sidestep, A/D and Left/Right turn, the mouse
+    /// looks, Shift sprints, F toggles flying, and Space/Ctrl climb and descend
+    /// while airborne.
+    pub fn from_frame(frame: &Frame, yaw_degrees: f32, mode: Locomotion) -> Self {
+        let keys = &frame.input;
+        let forward = (keys.axis(Key::S, Key::W) + keys.axis(Key::Down, Key::Up)).clamp(-1.0, 1.0);
+        let strafe = keys.axis(Key::Q, Key::E).clamp(-1.0, 1.0);
+        let facing = Camera::facing_xz(yaw_degrees);
+        let right = Camera::right_xz(yaw_degrees);
+        let dir = (right * strafe + facing * forward).normalize_or_zero();
+
+        let sprint = keys.down(Key::Shift);
+        let speed = match (mode, sprint) {
+            (Locomotion::Walk, false) => WALK_SPEED,
+            (Locomotion::Walk, true) => SPRINT_SPEED,
+            (Locomotion::Fly, false) => FLY_SPEED,
+            (Locomotion::Fly, true) => FLY_SPRINT_SPEED,
         };
+
+        let steer = (keys.axis(Key::A, Key::D) + keys.axis(Key::Left, Key::Right)).clamp(-1.0, 1.0);
+        let look = keys.mouse_delta();
+
         Self {
             direction: Vec2::new(dir.x, dir.z),
-            speed_m_s: speed * frame.dt,
-            yaw_delta_degrees: frame.input.yaw_sign() * TURN_DEGREES_PER_S * frame.dt,
+            lift: keys.axis(Key::Ctrl, Key::Space),
+            step_m: speed * frame.dt,
+            yaw_delta_degrees: turn_degrees(steer, look.x, frame.dt),
+            // Raw motion counts +y downward; pushing the mouse away looks up.
+            pitch_delta_degrees: -look.y * MOUSE_DEGREES_PER_COUNT,
+            toggle_fly: keys.pressed(Key::F),
         }
     }
 }
 
+/// Yaw change for one frame of steering, positive meaning "turn right".
+///
+/// Yaw grows toward +X, but screen-right at yaw 0 is −X, so turning right has
+/// to subtract: get this backwards and the mouse and the turn keys both fight
+/// the view.
+pub(super) fn turn_degrees(steer_right: f32, mouse_dx: f32, dt: f32) -> f32 {
+    -(steer_right * TURN_DEGREES_PER_S * dt + mouse_dx * MOUSE_DEGREES_PER_COUNT)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Player {
+    /// Where the feet are: the eye sits [`EYE_HEIGHT_M`] above this.
     position: GlobalPosition,
     yaw_degrees: f32,
+    pitch_degrees: f32,
+    mode: Locomotion,
     /// Last horizontal movement direction, used to bias streaming.
     heading: Vec2,
+}
+
+impl Player {
+    fn eye(&self) -> GlobalPosition {
+        GlobalPosition::at(
+            self.position.x,
+            self.position.y + EYE_HEIGHT_M as f64,
+            self.position.z,
+        )
+    }
 }
 
 pub struct WorldSession {
@@ -101,7 +174,6 @@ pub struct WorldSession {
     state: SessionState,
     spawn: Option<SpawnPose>,
     player: Option<Player>,
-    walker: Option<EntityId>,
 }
 
 impl WorldSession {
@@ -113,7 +185,6 @@ impl WorldSession {
             state: SessionState::Atlas,
             spawn: None,
             player: None,
-            walker: None,
         }
     }
 
@@ -155,6 +226,8 @@ impl WorldSession {
         self.player = Some(Player {
             position: pose.position(),
             yaw_degrees: pose.heading().degrees(),
+            pitch_degrees: 0.0,
+            mode: Locomotion::Walk,
             heading: pose.heading().direction(),
         });
         self.state = SessionState::Loading;
@@ -192,12 +265,18 @@ impl WorldSession {
 
     /// Advance the session for one rendered frame.
     pub fn update(&mut self, world: &mut World, frame: &Frame) -> Result<(), SessionError> {
-        let yaw = self.player.map(|p| p.yaw_degrees).unwrap_or_default();
-        self.step(world, WalkInput::from_frame(frame, yaw))
+        let (yaw, mode) = self
+            .player
+            .map(|p| (p.yaw_degrees, p.mode))
+            .unwrap_or((0.0, Locomotion::Walk));
+        self.step(world, WalkInput::from_frame(frame, yaw, mode))
     }
 
     /// Advance the session with explicit intent (also the headless path).
     pub fn step(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
+        // The mouse only belongs to the game while the player is in it; the
+        // atlas and the loading screen need a cursor.
+        world.set_pointer_lock(self.state == SessionState::World);
         match self.state {
             SessionState::Atlas => Ok(()),
             SessionState::Loading => self.update_loading(world),
@@ -220,17 +299,13 @@ impl WorldSession {
         };
 
         let position = GlobalPosition::at(focus.x, (ground + FOOT_CLEARANCE_M) as f64, focus.z);
-        let player = Player {
+        self.player = Some(Player {
             position,
             yaw_degrees: spawn.heading().degrees(),
+            pitch_degrees: 0.0,
+            mode: Locomotion::Walk,
             heading: spawn.heading().direction(),
-        };
-        self.player = Some(player);
-        let place = GlobalPlace::at(position).with_yaw_deg(player.yaw_degrees);
-        match self.walker {
-            Some(id) => world.set_anchored_place(id, place)?,
-            None => self.walker = Some(world.spawn_anchored(walker_mesh(), place)?),
-        }
+        });
         self.state = SessionState::World;
         Ok(())
     }
@@ -238,9 +313,15 @@ impl WorldSession {
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
-        player.yaw_degrees += input.yaw_delta_degrees;
+        if input.toggle_fly {
+            player.mode = player.mode.toggled();
+        }
+        player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);
+        player.pitch_degrees = (player.pitch_degrees + input.pitch_delta_degrees)
+            .clamp(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES);
+
+        let step = input.step_m as f64;
         if input.direction.length_squared() > 0.0 {
-            let step = input.speed_m_s as f64;
             player.position.x += input.direction.x as f64 * step;
             player.position.z += input.direction.y as f64 * step;
             player.heading = input.direction;
@@ -250,25 +331,19 @@ impl WorldSession {
         self.stream.maybe_rebase(world, foot)?;
         self.stream.sync(world, foot, Some(player.heading))?;
 
-        // Only the resident bake may move the player vertically: falling back to
-        // a fresh surface query here would put the feet on a different surface
-        // than the one being drawn.
-        if let Some(ground) = self.stream.contact_height(foot) {
-            player.position.y = (ground + FOOT_CLEARANCE_M) as f64;
+        match player.mode {
+            // Only the resident bake may move the player vertically: falling
+            // back to a fresh surface query here would put the feet on a
+            // different surface than the one being drawn.
+            Locomotion::Walk => {
+                if let Some(ground) = self.stream.contact_height(foot) {
+                    player.position.y = (ground + FOOT_CLEARANCE_M) as f64;
+                }
+            }
+            Locomotion::Fly => player.position.y += input.lift as f64 * step,
         }
 
-        if let Some(id) = self.walker {
-            world.set_anchored_place(
-                id,
-                GlobalPlace::at(player.position).with_yaw_deg(player.yaw_degrees),
-            )?;
-        }
-        world.look_follow_global(
-            player.position,
-            player.yaw_degrees,
-            CAMERA_DISTANCE,
-            CAMERA_HEIGHT,
-        )?;
+        world.look_first_person_global(player.eye(), player.yaw_degrees, player.pitch_degrees)?;
 
         self.player = Some(player);
         Ok(())
@@ -284,21 +359,27 @@ impl WorldSession {
         self.player
             .and_then(|p| Heading::from_degrees(p.yaw_degrees).ok())
     }
+
+    /// How the player is currently getting around.
+    pub fn locomotion(&self) -> Option<Locomotion> {
+        self.player.map(|p| p.mode)
+    }
+
+    /// Where the camera sits, once the player exists.
+    pub fn eye_position(&self) -> Option<GlobalPosition> {
+        self.player.map(|p| p.eye())
+    }
 }
 
-fn walker_mesh() -> Mesh {
-    let mut m = Mesh::new();
-    m.add_box(
-        (0.0, 0.55, 0.0),
-        (0.55, 1.1, 0.35),
-        engine::color::rgb(55, 90, 160),
-    )
-    .expect("walker body");
-    m.add_box(
-        (0.0, 1.35, 0.0),
-        (0.4, 0.4, 0.4),
-        engine::color::rgb(220, 190, 160),
-    )
-    .expect("walker head");
-    m
+/// Keep yaw in [0, 360) so it stays exact after hours of turning.
+///
+/// `rem_euclid` can round a hair below zero up to a full turn, which is one
+/// past what [`Heading`] accepts.
+fn wrap_degrees(degrees: f32) -> f32 {
+    let wrapped = degrees.rem_euclid(360.0);
+    if wrapped >= 360.0 {
+        0.0
+    } else {
+        wrapped
+    }
 }

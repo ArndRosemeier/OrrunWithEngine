@@ -15,9 +15,9 @@ use glam::Vec2;
 
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
-    chunk_span, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface, EntryError, MapPoint,
-    SessionState, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession, WorldStream,
-    CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
+    chunk_span, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface, EntryError, Locomotion,
+    MapPoint, SessionState, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession,
+    WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
@@ -473,6 +473,154 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
     assert_eq!(session.state(), SessionState::Atlas);
     session.resume().expect("resume");
     assert_eq!(session.state(), SessionState::World);
+}
+
+#[test]
+fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
+    let (atlas, surface) = world_of(1, 48);
+    let bounds = AtlasBounds::of(&atlas);
+    let Some(mid) = river_reach(&atlas) else {
+        return;
+    };
+    let request = WorldEntryRequest::at_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
+        .expect("river point");
+
+    let mut world = World::new();
+    let mut session = WorldSession::new(Arc::clone(&surface));
+    session.begin_entry(&mut world, request).expect("entry");
+    for _ in 0..600 {
+        session.step(&mut world, WalkInput::IDLE).expect("update");
+        if session.state() == SessionState::World {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(session.state(), SessionState::World);
+    assert_eq!(session.locomotion(), Some(Locomotion::Walk));
+
+    let feet = session.player_position().expect("player");
+    let eye = session.eye_position().expect("eye");
+    assert!(
+        (eye.y - feet.y - 1.7).abs() < 1e-6,
+        "the camera must sit at eye height above the feet, got {} above {}",
+        eye.y,
+        feet.y
+    );
+    assert!(
+        (eye.x - feet.x).abs() < 1e-9 && (eye.z - feet.z).abs() < 1e-9,
+        "a first-person eye never trails the body"
+    );
+
+    let ground = feet.y;
+    let climb = WalkInput {
+        lift: 1.0,
+        step_m: 20.0,
+        toggle_fly: true,
+        ..WalkInput::IDLE
+    };
+    session.step(&mut world, climb).expect("start flying");
+    assert_eq!(session.locomotion(), Some(Locomotion::Fly));
+    let up = session.player_position().expect("player");
+    assert!(
+        up.y > ground + 19.0,
+        "flying must ignore the contact height: {} vs {ground}",
+        up.y
+    );
+
+    // Keep climbing without touching F, then drop back into walking.
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                lift: 1.0,
+                step_m: 20.0,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("keep flying");
+    assert!(session.player_position().expect("player").y > up.y);
+
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                toggle_fly: true,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("stop flying");
+    assert_eq!(session.locomotion(), Some(Locomotion::Walk));
+    let landed = session.player_position().expect("player");
+    assert!(
+        (landed.y - ground).abs() < 0.2,
+        "landing must snap back to the drawn ground: {} vs {ground}",
+        landed.y
+    );
+}
+
+#[test]
+fn steering_right_swings_the_view_to_the_right() {
+    use engine::camera::Camera;
+
+    use super::session::turn_degrees;
+
+    // One second of full-right steering, whatever the turn rate is set to.
+    let quarter = turn_degrees(1.0, 0.0, 1.0);
+    let yaw = 20.0;
+    let after = Camera::facing_xz(yaw + quarter * (90.0 / quarter.abs()));
+    assert!(
+        after.dot(Camera::right_xz(yaw)) > 0.999,
+        "steering right must rotate the facing onto the screen-right axis"
+    );
+    assert!(quarter < 0.0, "yaw decreases when turning right");
+    assert!(
+        turn_degrees(0.0, 10.0, 0.0) < 0.0,
+        "moving the mouse right must turn right too"
+    );
+    assert_eq!(turn_degrees(0.0, 0.0, 0.016), 0.0);
+}
+
+#[test]
+fn turning_wraps_instead_of_drifting_off_the_compass() {
+    let (atlas, surface) = world_of(1, 48);
+    let bounds = AtlasBounds::of(&atlas);
+    let Some(mid) = river_reach(&atlas) else {
+        return;
+    };
+    let request = WorldEntryRequest::at_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
+        .expect("river point");
+
+    let mut world = World::new();
+    let mut session = WorldSession::new(Arc::clone(&surface));
+    session.begin_entry(&mut world, request).expect("entry");
+    for _ in 0..600 {
+        session.step(&mut world, WalkInput::IDLE).expect("update");
+        if session.state() == SessionState::World {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(session.state(), SessionState::World);
+
+    let start = session.player_heading().expect("heading").degrees();
+    // Ten full turns: Heading rejects anything outside [0, 360).
+    for _ in 0..100 {
+        session
+            .step(
+                &mut world,
+                WalkInput {
+                    yaw_delta_degrees: 36.0,
+                    ..WalkInput::IDLE
+                },
+            )
+            .expect("turn");
+        session.player_heading().expect("yaw stayed on the compass");
+    }
+    let end = session.player_heading().expect("heading").degrees();
+    assert!(
+        (end - start).abs() < 0.01,
+        "ten whole turns must come back to the same heading: {start} then {end}"
+    );
 }
 
 // --------------------------------------------------------------------- stream

@@ -2,7 +2,8 @@
 //!
 //! Usage: `cargo run -p orrun --bin continent -- [seed] [size] [where]`
 //! where `where` is `river` (default), `coast`, `inland`, `ocean`, or `x,z`.
-//! Controls: WASD move · Q/E turn · Shift sprint · Esc quit.
+//! Controls: W/S walk · Q/E sidestep · A/D turn · mouse look · Shift sprint ·
+//! F fly (Space up, Ctrl down) · Esc quit.
 //!
 //! This is the same `WorldSession` the game uses — there is no second spawn or
 //! streaming path to keep in sync. `ocean` exists to show that an impossible
