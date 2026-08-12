@@ -2,13 +2,17 @@
 //!
 //! Usage: `cargo run -p orrun -- [seed] [size]`
 //!
-//! Map: drag to pan · scroll to zoom · F fit · left click picks an exact spot ·
-//! Enter or double click walks there · right click reveals a cell overlay ·
-//! C clears overlays.
-//! World (first person): W/S walk · Q/E sidestep · A/D turn · mouse look ·
-//! Shift sprint · F fly (Space up, Ctrl down) · M back to the map · Esc quit.
+//! Map: drag to pan · scroll to zoom · F fit · left click travels there ·
+//! right click reveals a cell overlay · C clears overlays · M returns to where
+//! you were standing.
+//! World (first person): click to look · Esc hands the mouse back · W/S walk ·
+//! Q/E sidestep · A/D turn · Shift sprint · F fly (Space up, Ctrl down) ·
+//! M summons the map · Esc with a free cursor quits.
+//!
+//! Where the player stood is written on exit, per seed and size, and walked
+//! back to on the next launch.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use engine::egui::{
     self, Align2, Color32, ColorImage, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -21,9 +25,10 @@ use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
+use orrun::save::SavedStand;
 use orrun::world::{
-    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Locomotion,
-    MapPoint, SessionState, WorldEntryRequest, WorldSession,
+    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Heading,
+    Locomotion, MapPoint, SessionState, WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -438,6 +443,23 @@ impl AtlasViewer {
         );
     }
 
+    /// Where the player is standing, so a summoned map is not a guess.
+    fn draw_stand(&self, painter: &egui::Painter, panel_origin: Pos2, at: MapPoint) {
+        let (fx, fz) = at.fraction();
+        let cell = at.cell();
+        let p = panel_origin
+            + self
+                .local_to_panel(Pos2::ZERO, cell.ax(), cell.az(), [fx, fz])
+                .to_vec2();
+        let r = (self.zoom * 0.1).clamp(4.0, 14.0);
+        painter.circle_filled(p, r, Color32::from_rgb(120, 200, 255));
+        painter.circle_stroke(
+            p,
+            r + 2.0,
+            Stroke::new(1.5_f32, Color32::from_rgb(20, 30, 40)),
+        );
+    }
+
     fn draw_cell_details(&self, painter: &egui::Painter, panel_origin: Pos2, panel_size: Vec2) {
         let top_left = -self.pan / self.zoom;
         let bottom_right = (panel_size - self.pan) / self.zoom;
@@ -516,6 +538,35 @@ fn parse_args() -> (i32, usize) {
     (seed, size.max(32))
 }
 
+/// Ask the session to enter where the player last stood.
+///
+/// A remembered stand that no longer resolves is worth saying out loud: it
+/// means entry and the saved world have drifted apart, and silently dropping
+/// the player on the map would hide that.
+fn resume_saved_stand(
+    stand: SavedStand,
+    bounds: AtlasBounds,
+    session: &mut WorldSession,
+    world: &mut World,
+) {
+    let point = match MapPoint::from_global(bounds, stand.at()) {
+        Ok(point) => point,
+        Err(err) => {
+            eprintln!("saved stand is outside this atlas: {err}");
+            return;
+        }
+    };
+    let heading = Heading::from_degrees(stand.yaw_degrees).expect("a saved heading is finite");
+    match session.begin_entry(world, WorldEntryRequest::at(point).facing(heading)) {
+        Ok(pose) => eprintln!(
+            "resuming at ({:.0} m, {:.0} m)",
+            pose.ground().x,
+            pose.ground().z
+        ),
+        Err(err) => eprintln!("cannot resume the saved stand: {err}"),
+    }
+}
+
 fn main() {
     let (seed, size) = parse_args();
     eprintln!("generating atlas seed={seed} size={size}…");
@@ -533,11 +584,24 @@ fn main() {
     let mut viewer = AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface));
     let mut session = WorldSession::new(Arc::clone(&surface));
     let sea = surface.sea_surface_z();
+    let bounds = surface.bounds();
+
+    // Read before the window opens: a broken save should say so instead of
+    // quietly dropping the player back on the map.
+    let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
+
+    // The frame callback owns the session, so the last stand is handed out
+    // here and written once the window has closed.
+    let last_stand = Arc::new(Mutex::new(remembered));
+    let stand_in_loop = Arc::clone(&last_stand);
 
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);
             install_materials(world, seed, sea);
+            if let Some(stand) = remembered {
+                resume_saved_stand(stand, bounds, &mut session, world);
+            }
         }
 
         match session.state() {
@@ -549,12 +613,28 @@ fn main() {
             panic!("world session failed: {err}");
         }
 
+        if let (Some(p), Some(heading)) = (session.player_position(), session.player_heading()) {
+            *stand_in_loop.lock().expect("last stand") =
+                Some(SavedStand::new(seed, size, GlobalXZ::at(p.x, p.z), heading));
+        }
+
         match session.state() {
             SessionState::Atlas => draw_atlas(&mut viewer, &mut session, world, frame),
             SessionState::Loading => draw_loading(&viewer, &session, frame),
-            SessionState::World => draw_world_hud(&mut session, frame),
+            SessionState::World => draw_world_hud(&mut session, world, frame),
         }
     });
+
+    let stand = *last_stand.lock().expect("last stand");
+    if let Some(stand) = stand {
+        let path = stand.write().unwrap_or_else(|err| panic!("{err}"));
+        eprintln!(
+            "saved ({:.0} m, {:.0} m) to {}",
+            stand.x,
+            stand.z,
+            path.display()
+        );
+    }
 }
 
 fn draw_atlas(
@@ -607,7 +687,8 @@ fn draw_atlas(
                 .input(|i| i.pointer.interact_pos())
                 .map(|p| Pos2::new(p.x - rect.min.x, p.y - rect.min.y));
 
-            // Left click picks the exact spot; right click reveals the overlay.
+            // Left click travels there; right click reveals the overlay. A
+            // click that came out of a drag was the player panning the map.
             if response.hovered() {
                 let primary = ui.input(|i| i.pointer.button_clicked(PointerButton::Primary));
                 let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
@@ -615,14 +696,7 @@ fn draw_atlas(
                     if primary && !response.dragged_by(PointerButton::Primary) {
                         if let Some(point) = viewer.screen_to_map(local) {
                             viewer.selection = Some(point);
-                            let g = point.to_global();
-                            let wet = viewer.surface.is_wet(g);
-                            viewer.note = Some(format!(
-                                "selected ({:.0} m, {:.0} m){}  —  Enter to walk there",
-                                g.x,
-                                g.z,
-                                if wet { "  [open water]" } else { "" }
-                            ));
+                            travel_to(viewer, session, world);
                         }
                     }
                     if secondary {
@@ -633,10 +707,13 @@ fn draw_atlas(
                 }
             }
 
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter))
-                || response.double_clicked_by(PointerButton::Primary);
-            if enter {
-                enter_world(viewer, session, world);
+            // Enter still travels to the last pick, and M puts a summoned map
+            // away again without moving anybody.
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                travel_to(viewer, session, world);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::M)) && session.spawn().is_some() {
+                session.resume().expect("resume a loaded world");
             }
 
             let hover_cell = ui
@@ -659,16 +736,22 @@ fn draw_atlas(
             }
             viewer.draw_feature_overlays(&painter, rect.min);
             viewer.draw_overlays(&painter, rect.min);
+            if let Some(stand) = session
+                .player_position()
+                .and_then(|p| MapPoint::from_global(viewer.bounds, GlobalXZ::at(p.x, p.z)).ok())
+            {
+                viewer.draw_stand(&painter, rect.min, stand);
+            }
             viewer.draw_selection(&painter, rect.min);
 
             let status = format!(
-                "seed {}  |  {} km  |  zoom {:.1} px/cell  |  overlays {}  |  LMB pick  |  Enter walk  |  RMB overlay  |  C clear{}",
+                "seed {}  |  {} km  |  zoom {:.1} px/cell  |  overlays {}  |  LMB travel  |  drag pan  |  RMB overlay  |  C clear{}",
                 viewer.atlas.world_seed,
                 viewer.atlas.size,
                 viewer.zoom,
                 viewer.overlays.len(),
                 if session.spawn().is_some() {
-                    "  |  Enter resumes the loaded world"
+                    "  |  M back to where you stood"
                 } else {
                     ""
                 },
@@ -709,21 +792,21 @@ fn draw_atlas(
         });
 }
 
-/// Enter the selected point, or resume a world that is already streamed.
-fn enter_world(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+/// Travel to the picked point, entering the world or moving across it.
+///
+/// The same call serves first entry and a jump from a map summoned mid-walk:
+/// entry resolves the nearest standable ground and streams it, so there is no
+/// second teleport path that could land somewhere the walker cannot stand.
+fn travel_to(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
     let Some(point) = viewer.selection else {
-        if session.spawn().is_some() {
-            session.resume().expect("resume a loaded world");
-        } else {
-            viewer.note = Some("pick a spot on the map first (left click)".into());
-        }
+        viewer.note = Some("click a spot on the map to travel there".into());
         return;
     };
     match session.begin_entry(world, WorldEntryRequest::at(point)) {
         Ok(pose) => {
             let g = pose.ground();
             viewer.note = Some(format!(
-                "entering at ({:.0} m, {:.0} m), {:.0} m from the pick",
+                "travelling to ({:.0} m, {:.0} m), {:.0} m from the pick",
                 g.x,
                 g.z,
                 pose.offset_m()
@@ -731,7 +814,7 @@ fn enter_world(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut
             eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
         }
         Err(err) => {
-            viewer.note = Some(format!("cannot enter here: {err}"));
+            viewer.note = Some(format!("cannot land there: {err}"));
             eprintln!("entry refused: {err}");
         }
     }
@@ -775,10 +858,11 @@ fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame) {
         });
 }
 
-fn draw_world_hud(session: &mut WorldSession, frame: &Frame) {
+fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     if ctx.input(|i| i.key_pressed(egui::Key::M)) {
         session.return_to_atlas();
+        world.set_pointer_lock(false);
         return;
     }
     let Some(p) = session.player_position() else {
@@ -796,8 +880,13 @@ fn draw_world_hud(session: &mut WorldSession, frame: &Frame) {
         _ if column.is_wet() => "in water",
         _ => "on land",
     };
+    let mouse = if world.pointer_lock() {
+        "Esc frees the mouse"
+    } else {
+        "click to look"
+    };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  M map",
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  M map  |  {mouse}",
         p.x,
         p.z,
         p.y,

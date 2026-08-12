@@ -334,6 +334,14 @@ impl ContinentalSurface {
     }
 
     /// Fully resolved column at `p`.
+    ///
+    /// Every tier of the visibility ladder, from the four-metre ground under the
+    /// player's feet to the thirty-kilometre horizon, reads this one function.
+    /// Each is a downsample of the same landform, so the only way two of them
+    /// can disagree is the spacing of their samples — and a cheap stand-in that
+    /// skipped the hydrology would disagree by kilometres, because the atlas
+    /// elevation it would have to read is the land as laid down, before the
+    /// coast rings decided what the sea covers.
     pub fn column(&self, p: GlobalXZ) -> SurfaceColumn {
         let x = p.x as f32;
         let z = p.z as f32;

@@ -89,9 +89,20 @@ pub struct TerrainChunkBuilder {
     span: ChunkSpan,
     sample_m: f64,
     style: SurfaceMeshStyle,
+    /// Metres the ground is lowered by.
+    ///
+    /// Distant tiers sit deliberately low. A wide grid cuts the corners off
+    /// ridges, and where its surface came out *above* the detailed one it won
+    /// the depth test and pushed blunt triangles through the ground the player
+    /// is standing on. Dropping the tier by more than that error keeps the
+    /// finer ground on top wherever the two overlap.
+    sink_m: f32,
+    /// Whether this tier bakes the CPU grid the player stands on.
+    contact: bool,
 }
 
 impl TerrainChunkBuilder {
+    /// The tier the player walks on: full detail, real collision.
     pub fn new(surface: Arc<ContinentalSurface>) -> Self {
         Self {
             surface,
@@ -101,6 +112,24 @@ impl TerrainChunkBuilder {
                 rock_height: super::surface::ROCK_HEIGHT,
                 ..SurfaceMeshStyle::default()
             },
+            sink_m: 0.0,
+            contact: true,
+        }
+    }
+
+    /// A distance tier: bigger chunks, coarser samples, no collision.
+    pub fn distant(
+        surface: Arc<ContinentalSurface>,
+        span: ChunkSpan,
+        sample_m: f64,
+        sink_m: f32,
+    ) -> Self {
+        Self {
+            span,
+            sample_m,
+            sink_m,
+            contact: false,
+            ..Self::new(surface)
         }
     }
 
@@ -180,7 +209,7 @@ impl TerrainChunkBuilder {
                     Vec3::Y
                 };
                 let (lx, lz) = s.local(ix, iz);
-                positions.push(Vec3::new(lx, column.ground(), lz));
+                positions.push(Vec3::new(lx, column.ground() - self.sink_m, lz));
                 normals.push(normal);
                 colors.push(self.vertex_color(column, normal, sea));
             }
@@ -287,12 +316,12 @@ impl ChunkBuilder for TerrainChunkBuilder {
         let samples = self.sample_chunk(coord);
         let land = self.build_land(&samples);
         let water = self.build_water(&samples);
-        let contact = self.build_contact(&samples)?;
 
         let anchor = samples.origin.with_height(0.0)?;
-        let mut payload = ChunkPayload::new(anchor)
-            .with_layer(ChunkLayer::Land, land)?
-            .with_contact(contact);
+        let mut payload = ChunkPayload::new(anchor).with_layer(ChunkLayer::Land, land)?;
+        if self.contact {
+            payload = payload.with_contact(self.build_contact(&samples)?);
+        }
         if let Some(water) = water {
             payload = payload.with_layer(ChunkLayer::Water, water)?;
         }

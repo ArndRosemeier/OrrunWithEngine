@@ -47,6 +47,92 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
 }
 
 #[test]
+#[ignore = "diagnostic: what a distance ring costs to bake"]
+fn what_a_distance_ring_costs() {
+    let surface = surface_of(3);
+    for tier in super::DISTANT {
+        let span = engine::space::ChunkSpan::new(tier.span_m).unwrap();
+        let builder =
+            TerrainChunkBuilder::distant(Arc::clone(&surface), span, tier.sample_m, tier.sink_m);
+        let mid = surface.bounds().metres() / 2.0;
+        let centre = ChunkCoord::containing(GlobalXZ::at(mid, mid), span);
+        let ring = tier.radius;
+        let started = Instant::now();
+        let mut chunks = 0;
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                let coord = ChunkCoord::new(centre.x + dx, centre.z + dz);
+                if builder.build(coord).unwrap().is_some() {
+                    chunks += 1;
+                }
+            }
+        }
+        eprintln!(
+            "tier {:>4} m: {chunks} chunks in {:.0} ms on one thread",
+            tier.sample_m,
+            started.elapsed().as_secs_f32() * 1000.0,
+        );
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: how far the coarse tiers stand off the walked ground"]
+fn how_far_the_tiers_disagree() {
+    for seed in [3, 20260809] {
+        let (_, surface) = world_of(seed, 64);
+        for tier in super::DISTANT {
+            let mut over = overshoot_samples(&surface, &tier);
+            over.sort_by(|a, b| a.total_cmp(b));
+            let at = |q: f64| over[((over.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "seed {seed} tier {:>3} m: p50={:+.1} p90={:+.1} p99={:+.1} p99.9={:+.1} max={:+.1}",
+                tier.sample_m,
+                at(0.50),
+                at(0.90),
+                at(0.99),
+                at(0.999),
+                at(1.0),
+            );
+        }
+    }
+}
+
+#[test]
+fn a_distant_tier_stays_under_the_ground_the_player_walks_on() {
+    // The tiers overlap rather than meet, so where the walked tier ends two
+    // resolutions of the same hillside are drawn on top of each other and the
+    // sink decides which one shows. Ordinary ground has to be covered by it;
+    // cliffs and gorges cannot be, because a coarse grid does not know they are
+    // there, and no sink deep enough to hide those would leave the tier
+    // anywhere near the ground it continues.
+    for seed in [3, 20260809] {
+        for tier in super::DISTANT {
+            let mut over = overshoot_samples(&surface_of(seed), &tier);
+            over.sort_by(|a, b| a.total_cmp(b));
+            let ordinary = over[(over.len() as f64 * 0.99) as usize];
+            assert!(
+                ordinary <= 0.0,
+                "tier at {} m samples rises {ordinary:.1} m above the walked ground across a \
+                 hundredth of seed {seed}; its {} m sink is too shallow",
+                tier.sample_m,
+                tier.sink_m
+            );
+            // Sunk deeper than it needs to be, the coarse ground drops away in
+            // a terrace along the line where the finer tier stops.
+            let typical = over[over.len() / 2];
+            assert!(
+                typical >= -tier.sink_m * 2.0,
+                "tier at {} m samples sits {:.1} m below the walked ground on seed {seed}; \
+                 its {} m sink is deeper than it has to be",
+                tier.sample_m,
+                -typical,
+                tier.sink_m
+            );
+        }
+    }
+}
+
+#[test]
 fn the_continent_grows_forests_as_well_as_deserts() {
     // Rainfall used to be noise around a single mean, and every land cell fell
     // in the same band: seed 1 had no forest on it at all, so the world could
@@ -82,10 +168,57 @@ fn the_continent_grows_forests_as_well_as_deserts() {
     }
 }
 
+fn surface_of(seed: i32) -> Arc<ContinentalSurface> {
+    world_of(seed, 64).1
+}
+
 fn world_of(seed: i32, size: usize) -> (ContinentAtlas, Arc<ContinentalSurface>) {
     let atlas = ContinentAtlas::generate(seed, size);
     let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     (atlas, surface)
+}
+
+/// Height of a tier's drawn surface at `p`, sunk as the builder sinks it.
+///
+/// A tier only samples on its own lattice, so between samples the mesh is the
+/// interpolation of the corners — which is what a viewer sees, and what has to
+/// stay below the finer ground.
+fn tier_height(surface: &ContinentalSurface, p: GlobalXZ, tier: &super::TerrainTier) -> f32 {
+    let s = tier.sample_m;
+    let (x0, z0) = ((p.x / s).floor() * s, (p.z / s).floor() * s);
+    let (tx, tz) = (((p.x - x0) / s) as f32, ((p.z - z0) / s) as f32);
+    let at = |dx: f64, dz: f64| {
+        surface
+            .column(GlobalXZ::at(x0 + dx * s, z0 + dz * s))
+            .ground()
+    };
+    let top = at(0.0, 0.0) + (at(1.0, 0.0) - at(0.0, 0.0)) * tx;
+    let bottom = at(0.0, 1.0) + (at(1.0, 1.0) - at(0.0, 1.0)) * tx;
+    top + (bottom - top) * tz - tier.sink_m
+}
+
+/// How far a distant tier stands above the ground the player walks on, over a
+/// lattice of probes across the continent.
+///
+/// Positive is the direction that shows: a coarse tier standing above the fine
+/// one wins the depth test and covers the detailed ground it is supposed to be
+/// hiding behind. Some of that is unavoidable — a grid of hundreds of metres
+/// cannot know about a gorge — so what matters is the bulk of the distribution,
+/// not its tail.
+fn overshoot_samples(surface: &ContinentalSurface, tier: &super::TerrainTier) -> Vec<f32> {
+    let span = surface.bounds().metres();
+    let probe = 200usize;
+    let step = span / probe as f64;
+    let mut over = Vec::with_capacity(probe * probe);
+    for iz in 0..probe {
+        for ix in 0..probe {
+            // Off-lattice on purpose: on a shared sample the tiers agree, and
+            // the error being measured is the one between them.
+            let p = GlobalXZ::at((ix as f64 + 0.37) * step, (iz as f64 + 0.61) * step);
+            over.push(tier_height(surface, p, tier) - tier_height(surface, p, &super::NEAR));
+        }
+    }
+    over
 }
 
 fn river_reach(atlas: &ContinentAtlas) -> Option<Vec2> {
@@ -485,6 +618,58 @@ fn selecting_outside_the_atlas_is_an_error() {
 }
 
 // -------------------------------------------------------------------- session
+
+/// Enter at a river reach and run until the player is standing.
+fn standing_session(seed: i32, size: usize) -> Option<(World, WorldSession)> {
+    let (atlas, surface) = world_of(seed, size);
+    let bounds = AtlasBounds::of(&atlas);
+    let mid = river_reach(&atlas)?;
+    let request = WorldEntryRequest::at_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
+        .expect("river point");
+
+    let mut world = World::new();
+    let mut session = WorldSession::new(Arc::clone(&surface));
+    session.begin_entry(&mut world, request).expect("entry");
+    for _ in 0..600 {
+        session.step(&mut world, WalkInput::IDLE).expect("update");
+        if session.state() == SessionState::World {
+            return Some((world, session));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    panic!("the entry ring never became resident");
+}
+
+#[test]
+fn the_mouse_is_taken_only_when_the_player_asks_and_is_given_back_on_the_map() {
+    // The world used to grab the pointer the moment it opened, which confines
+    // the cursor to the window and follows the player out of the game.
+    let Some((mut world, mut session)) = standing_session(1, 48) else {
+        return;
+    };
+    assert!(
+        !world.pointer_lock(),
+        "standing in the world is not a request for the desktop's mouse"
+    );
+
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                capture_look: true,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("click");
+    assert!(world.pointer_lock(), "a click asks for mouse-look");
+
+    session.return_to_atlas();
+    session.step(&mut world, WalkInput::IDLE).expect("map");
+    assert!(
+        !world.pointer_lock(),
+        "a map you have to click needs a cursor"
+    );
+}
 
 #[test]
 fn a_session_loads_its_entry_ring_before_handing_over_control() {

@@ -34,4 +34,7 @@ pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSessio
 pub use surface::{
     ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
 };
-pub use world_stream::{WorldStream, ENTRY_RING, REBASE_DISTANCE_M, VISUAL_RING};
+pub use world_stream::{
+    TerrainTier, WorldStream, DISTANT, ENTRY_RING, FAR, FAR_VIEW_M, MEDIUM, NEAR,
+    REBASE_DISTANCE_M, VISUAL_RING,
+};

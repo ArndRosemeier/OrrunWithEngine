@@ -2,9 +2,10 @@
 //!
 //! Usage: `cargo run -p orrun --bin continent -- [seed] [size] [where]`
 //! where `where` is `river` (default), `coast`, `inland`, `forest`, `ocean`,
-//! or `x,z`.
-//! Controls: W/S walk · Q/E sidestep · A/D turn · mouse look · Shift sprint ·
-//! F fly (Space up, Ctrl down) · Esc quit.
+//! `summit`, or `x,z`.
+//! Controls: click to look · Esc hands the mouse back · W/S walk · Q/E
+//! sidestep · A/D turn · Shift sprint · F fly (Space up, Ctrl down) · Esc with
+//! a free cursor quits.
 //!
 //! This is the same `WorldSession` the game uses — there is no second spawn or
 //! streaming path to keep in sync. `ocean` exists to show that an impossible
@@ -29,6 +30,7 @@ enum Target {
     Inland,
     Forest,
     Ocean,
+    Summit,
     Exact(f64, f64),
 }
 
@@ -40,10 +42,11 @@ impl Target {
             "inland" => Self::Inland,
             "forest" => Self::Forest,
             "ocean" => Self::Ocean,
+            "summit" => Self::Summit,
             other => {
                 let (x, z) = other
                     .split_once(',')
-                    .expect("entry must be river|coast|inland|forest|ocean|x,z");
+                    .expect("entry must be river|coast|inland|forest|ocean|summit|x,z");
                 Self::Exact(
                     x.trim().parse().expect("entry x in metres"),
                     z.trim().parse().expect("entry z in metres"),
@@ -121,6 +124,26 @@ fn deepest_timber(surface: &ContinentalSurface) -> GlobalXZ {
     at
 }
 
+/// The highest walkable ground: the view the visibility ladder is judged from.
+fn highest_ground(surface: &ContinentalSurface) -> GlobalXZ {
+    let probe = 192usize;
+    let step = surface.bounds().metres() / probe as f64;
+    let mut best = f32::NEG_INFINITY;
+    let mut at = GlobalXZ::at(step * 0.5, step * 0.5);
+    for iz in 0..probe {
+        for ix in 0..probe {
+            let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+            let column = surface.column(p);
+            if column.is_wet() || column.ground() <= best {
+                continue;
+            }
+            best = column.ground();
+            at = p;
+        }
+    }
+    at
+}
+
 /// A gentle stretch of shoreline: the coast point whose hinterland is lowest.
 ///
 /// The continent also has cliff coasts, where entry legitimately fails; those
@@ -180,6 +203,7 @@ fn entry_position(
         Target::Inland => extreme_column(surface, false),
         Target::Forest => deepest_timber(surface),
         Target::Ocean => extreme_column(surface, true),
+        Target::Summit => highest_ground(surface),
     }
 }
 
@@ -187,6 +211,7 @@ fn main() {
     let args = parse_args();
     eprintln!("generating atlas seed={} size={}…", args.seed, args.size);
     let atlas = Arc::new(ContinentAtlas::generate(args.seed, args.size));
+    let atlas_took = std::time::Instant::now();
     let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     let bounds = surface.bounds();
     eprintln!(
@@ -195,6 +220,12 @@ fn main() {
         atlas.hydro.rivers.len(),
         atlas.hydro.coasts.len(),
         atlas.content_hash as u32
+    );
+    // Building the surface is dead time between the map and the world, so it is
+    // worth seeing whenever anything moves work into it.
+    eprintln!(
+        "surface ready in {:.2}s",
+        atlas_took.elapsed().as_secs_f32()
     );
 
     let at = entry_position(&atlas, &surface, args.target);
@@ -207,6 +238,7 @@ fn main() {
     let sea = surface.sea_surface_z();
     let mut session = WorldSession::new(Arc::clone(&surface));
     let mut announced = false;
+    let mut reported = false;
 
     Engine::run("Orrun — Continent", move |world, frame| {
         if frame.first {
@@ -237,6 +269,18 @@ fn main() {
                 p.y,
                 p.z,
                 session.stream().resident_count()
+            );
+        }
+
+        // What the visibility ladder actually costs, once it has settled.
+        if !reported && announced && frame.time > 1.5 {
+            reported = true;
+            eprintln!(
+                "steady at {:.0} fps: chunks near={} distant={:?} pending={}",
+                frame.fps,
+                session.stream().resident_count(),
+                session.stream().distant_resident_counts(),
+                session.stream().pending_count()
             );
         }
     });

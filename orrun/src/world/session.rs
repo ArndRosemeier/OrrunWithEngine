@@ -7,7 +7,8 @@
 //! through the terrain or leave them hovering.
 //!
 //! The view is first person: there is no avatar to draw, the camera *is* the
-//! player, and the mouse is captured for as long as they are in the world.
+//! player. The mouse is captured only once they click in the world, and the
+//! window gives it back on Escape or when it loses focus.
 
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use engine::camera::{Camera, MAX_PITCH_DEGREES};
 use engine::error::EngineError;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{Frame, World};
-use engine::Key;
+use engine::{Key, MouseButton};
 use glam::Vec2;
 use thiserror::Error;
 
@@ -94,6 +95,9 @@ pub struct WalkInput {
     pub pitch_delta_degrees: f32,
     /// F went down this frame: swap between walking and flying.
     pub toggle_fly: bool,
+    /// The player clicked in the world, which is how they ask for the mouse to
+    /// be captured for looking.
+    pub capture_look: bool,
 }
 
 impl WalkInput {
@@ -104,6 +108,7 @@ impl WalkInput {
         yaw_delta_degrees: 0.0,
         pitch_delta_degrees: 0.0,
         toggle_fly: false,
+        capture_look: false,
     };
 
     /// Read one frame of first-person controls.
@@ -111,7 +116,12 @@ impl WalkInput {
     /// W/S and Up/Down walk, Q/E sidestep, A/D and Left/Right turn, the mouse
     /// looks, Shift sprints, F toggles flying, and Space/Ctrl climb and descend
     /// while airborne.
-    pub fn from_frame(frame: &Frame, yaw_degrees: f32, mode: Locomotion) -> Self {
+    ///
+    /// `mouse_look` says whether the pointer belongs to the game this frame.
+    /// Raw motion arrives whether or not it does, and turning the view with a
+    /// cursor the player is using elsewhere is how a first-person camera ends
+    /// up spinning on its own.
+    pub fn from_frame(frame: &Frame, yaw_degrees: f32, mode: Locomotion, mouse_look: bool) -> Self {
         let keys = &frame.input;
         let forward = (keys.axis(Key::S, Key::W) + keys.axis(Key::Down, Key::Up)).clamp(-1.0, 1.0);
         let strafe = keys.axis(Key::Q, Key::E).clamp(-1.0, 1.0);
@@ -128,7 +138,11 @@ impl WalkInput {
         };
 
         let steer = (keys.axis(Key::A, Key::D) + keys.axis(Key::Left, Key::Right)).clamp(-1.0, 1.0);
-        let look = keys.mouse_delta();
+        let look = if mouse_look {
+            keys.mouse_delta()
+        } else {
+            Vec2::ZERO
+        };
 
         Self {
             direction: Vec2::new(dir.x, dir.z),
@@ -138,6 +152,7 @@ impl WalkInput {
             // Raw motion counts +y downward; pushing the mouse away looks up.
             pitch_delta_degrees: -look.y * MOUSE_DEGREES_PER_COUNT,
             toggle_fly: keys.pressed(Key::F),
+            capture_look: keys.mouse_clicked(MouseButton::Left),
         }
     }
 }
@@ -285,19 +300,31 @@ impl WorldSession {
     }
 
     /// Advance the session for one rendered frame.
+    ///
+    /// Mouse-look is taken, never assumed: the pointer is captured when the
+    /// player clicks in the world, and the window hands it back on Escape or
+    /// when it loses focus. Grabbing it at startup, as this used to, pins the
+    /// cursor of somebody who has not even entered the world yet.
     pub fn update(&mut self, world: &mut World, frame: &Frame) -> Result<(), SessionError> {
         let (yaw, mode) = self
             .player
             .map(|p| (p.yaw_degrees, p.mode))
             .unwrap_or((0.0, Locomotion::Walk));
-        self.step(world, WalkInput::from_frame(frame, yaw, mode))
+        let looking = world.pointer_lock();
+        self.step(world, WalkInput::from_frame(frame, yaw, mode, looking))
     }
 
     /// Advance the session with explicit intent (also the headless path).
     pub fn step(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
-        // The mouse only belongs to the game while the player is in it; the
-        // atlas and the loading screen need a cursor.
-        world.set_pointer_lock(self.state == SessionState::World);
+        // Whatever anyone asked for, the map and the loading screen need a
+        // cursor the player can use; in the world they have to ask for it.
+        if self.state == SessionState::World {
+            if input.capture_look {
+                world.set_pointer_lock(true);
+            }
+        } else {
+            world.set_pointer_lock(false);
+        }
         match self.state {
             SessionState::Atlas => Ok(()),
             SessionState::Loading => self.update_loading(world),
