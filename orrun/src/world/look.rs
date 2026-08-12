@@ -5,7 +5,7 @@
 
 use engine::color::rgb;
 use engine::texture::{TerrainAlbedo, TerrainMaterialDesc, WaterMaterialDesc};
-use engine::world::{Haze, World};
+use engine::world::{Haze, Sky, World};
 
 use super::chunk_mesh::WATER_DEPTH_SCALE_M;
 use super::world_stream::FAR_VIEW_M;
@@ -13,15 +13,6 @@ use super::world_stream::FAR_VIEW_M;
 /// Ground albedo resolution. Large enough that a tile carries pebble-scale
 /// detail at the seven metres it is stretched over.
 const ALBEDO_SIZE: u32 = 512;
-
-/// Sky the haze fades into.
-///
-/// The clear colour and the haze colour are the same sky on purpose: any
-/// difference between them shows up as a band along the horizon where the
-/// ground ends and the background begins.
-fn sky() -> engine::color::Color {
-    rgb(150, 196, 232)
-}
 
 /// Distance at which ground at eye level is indistinguishable from sky.
 ///
@@ -36,17 +27,20 @@ const VISIBILITY_M: f32 = 12_000.0;
 /// so the scatter reads it rather than guessing.
 pub const SUN_DIR: (f32, f32, f32) = (0.62, 0.68, 0.38);
 
-/// Mid-morning sun, and enough sky light that a north slope is still readable.
+/// Mid-morning sun, a cool northern sky, and enough fill that a north slope
+/// is still readable.
 ///
-/// Nothing casts shadows yet, so ambient is doing the work of bounced light:
-/// too little and the ground turns to mud wherever it faces away from the sun.
+/// The sky, the haze, and the clear colour share one horizon so distant ground
+/// dissolves into the same band the dome is already showing. Nothing casts
+/// shadows yet, so ambient is doing the work of bounced light.
 pub fn install_daylight(world: &mut World) {
+    let sky = Sky::daylight();
     world.set_sun(SUN_DIR, 0.34);
-    world.set_clear_color(sky());
-    // Thick air near sea level thinning over 1.4 km of altitude: valleys go
-    // milky within a few kilometres while a 3 km summit still reads as rock.
+    world.light.color = sky.sun_color.to_vec3();
+    world.set_sky(Some(sky));
+    world.set_clear_color(sky.horizon);
     world.set_haze(Some(
-        Haze::new(sky(), VISIBILITY_M).thinning_above(0.0, 1_400.0),
+        Haze::new(sky.horizon, VISIBILITY_M).thinning_above(0.0, 1_400.0),
     ));
     world
         .set_view_distance(FAR_VIEW_M)
@@ -102,4 +96,21 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
         })
         .expect("water material");
     world.set_default_water_material(Some(water));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::world::World;
+
+    #[test]
+    fn daylight_haze_matches_the_sky_horizon() {
+        let mut world = World::default();
+        install_daylight(&mut world);
+        let sky = world.sky().expect("sky");
+        let haze = world.haze().expect("haze");
+        assert_eq!(sky.horizon, haze.color);
+        assert_eq!(world.clear_color, sky.horizon);
+        assert!(world.sky().is_some());
+    }
 }

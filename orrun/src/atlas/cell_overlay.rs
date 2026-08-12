@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 use super::biomes::{self, Biome};
 use super::features::{edge_owner, Dir, EndpointKind, Kind};
 use super::pack;
-use super::types::{Endpoint, Link};
+use super::types::Endpoint;
 use super::{layer_seed, ContinentAtlas, CELL_METRES};
 use crate::world::{AtlasCell, ContinentalSurface, WaterBody};
 
@@ -385,24 +385,8 @@ fn bake_roads(atlas: &ContinentAtlas, ax: i32, az: i32, seed: u32) -> Vec<Overla
     let links = atlas.links_in_cell(ax, az, Kind::Road);
     let cell_idx = atlas.index_of(ax, az) as i32;
 
-    let mut best: FxHashMap<(EndpointKey, EndpointKey), &Link> = FxHashMap::default();
-    for link in links {
-        let mut ka = endpoint_key(link.a);
-        let mut kb = endpoint_key(link.b);
-        if kb < ka {
-            std::mem::swap(&mut ka, &mut kb);
-        }
-        best.entry((ka, kb))
-            .and_modify(|prev| {
-                if link.feature_class < prev.feature_class {
-                    *prev = link;
-                }
-            })
-            .or_insert(link);
-    }
-
     let mut out = Vec::new();
-    for link in best.into_values() {
+    for link in super::road_geom::unique_links(links) {
         let a = endpoint_local(atlas, ax, az, link.a);
         let b = endpoint_local(atlas, ax, az, link.b);
         let points = super::road_geom::meander_cell_corridor(
@@ -423,21 +407,6 @@ fn bake_roads(atlas: &ContinentAtlas, ax: i32, az: i32, seed: u32) -> Vec<Overla
     }
     out.sort_by_key(|r| (r.class, r.feature_id));
     out
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct EndpointKey {
-    kind: u8,
-    ref_id: i32,
-    port_id: i32,
-}
-
-fn endpoint_key(ep: Endpoint) -> EndpointKey {
-    EndpointKey {
-        kind: ep.kind as u8,
-        ref_id: ep.ref_id,
-        port_id: ep.port_id,
-    }
 }
 
 fn endpoint_local(atlas: &ContinentAtlas, ax: i32, az: i32, ep: Endpoint) -> [f32; 2] {

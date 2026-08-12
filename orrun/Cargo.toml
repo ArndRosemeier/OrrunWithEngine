@@ -6,6 +6,9 @@ license.workspace = true
 description = "Orrun — continental atlas and game content on the Engine"
 default-run = "orrun"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "orrun"
 path = "src/main.rs"

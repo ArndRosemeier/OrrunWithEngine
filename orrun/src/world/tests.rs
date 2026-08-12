@@ -156,6 +156,7 @@ fn a_hamlet_split_across_a_river_gets_a_footbridge() {
         let right = river.at - perp * offset;
         let hamlet = HamletStand {
             at: pin.at,
+            radius: 40.0,
             houses: vec![
                 GlobalXZ::at(f64::from(left.x), f64::from(left.y)),
                 GlobalXZ::at(f64::from(right.x), f64::from(right.y)),
@@ -1496,14 +1497,27 @@ fn standing_session(seed: i32, size: usize) -> Option<(World, WorldSession)> {
     let mut world = World::new();
     let mut session = WorldSession::new(Arc::clone(&surface));
     session.begin_entry(&mut world, request).expect("entry");
-    for _ in 0..600 {
-        session.step(&mut world, WalkInput::IDLE).expect("update");
+    wait_until_world(&mut session, &mut world);
+    Some((world, session))
+}
+
+/// Brook tracing and the entry ring take a few seconds in debug; the loading
+/// screen covers that. Tests wait for the real work, not a short wall clock.
+fn wait_until_world(session: &mut WorldSession, world: &mut World) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        session.step(world, WalkInput::IDLE).expect("update");
         if session.state() == SessionState::World {
-            return Some((world, session));
+            return;
         }
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("the entry ring never became resident");
+    panic!(
+        "the entry ring never became resident (spawn={} resident={} pending={})",
+        session.spawn().is_some(),
+        session.stream().resident_count(),
+        session.stream().pending_count(),
+    );
 }
 
 #[test]
@@ -1556,18 +1570,7 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
     // to be traced first, and that happens behind the loading screen.
     assert!(session.spawn().is_none());
 
-    for _ in 0..600 {
-        session.step(&mut world, WalkInput::IDLE).expect("update");
-        if session.state() == SessionState::World {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(
-        session.state(),
-        SessionState::World,
-        "the entry ring never became resident"
-    );
+    wait_until_world(&mut session, &mut world);
 
     let feet = session.player_position().expect("player");
     let contact = session
@@ -1604,14 +1607,7 @@ fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
     let mut world = World::new();
     let mut session = WorldSession::new(Arc::clone(&surface));
     session.begin_entry(&mut world, request).expect("entry");
-    for _ in 0..600 {
-        session.step(&mut world, WalkInput::IDLE).expect("update");
-        if session.state() == SessionState::World {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(session.state(), SessionState::World);
+    wait_until_world(&mut session, &mut world);
     assert_eq!(session.locomotion(), Some(Locomotion::Walk));
 
     let feet = session.player_position().expect("player");
@@ -1629,7 +1625,7 @@ fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
 
     let ground = feet.y;
     let climb = WalkInput {
-        lift: 1.0,
+        direction: Vec3::Y,
         step_m: 20.0,
         toggle_fly: true,
         ..WalkInput::IDLE
@@ -1643,18 +1639,30 @@ fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
         up.y
     );
 
-    // Keep climbing without touching F, then drop back into walking.
+    let along = Vec3::new(0.6, 0.8, 0.0).normalize();
     session
         .step(
             &mut world,
             WalkInput {
-                lift: 1.0,
-                step_m: 20.0,
+                direction: along,
+                step_m: 10.0,
                 ..WalkInput::IDLE
             },
         )
-        .expect("keep flying");
-    assert!(session.player_position().expect("player").y > up.y);
+        .expect("fly along the look");
+    let along_pos = session.player_position().expect("player");
+    assert!(
+        along_pos.y > up.y + 7.0,
+        "a look-up flight must climb: {} vs {}",
+        along_pos.y,
+        up.y
+    );
+    assert!(
+        (along_pos.x - up.x).abs() > 5.0,
+        "a look-up flight must also travel forward: {} vs {}",
+        along_pos.x,
+        up.x
+    );
 
     session
         .step(
@@ -1667,10 +1675,49 @@ fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
         .expect("stop flying");
     assert_eq!(session.locomotion(), Some(Locomotion::Walk));
     let landed = session.player_position().expect("player");
+    let floor = session
+        .contact_height(landed.horizontal())
+        .expect("contact underfoot") as f64
+        + 0.05;
     assert!(
-        (landed.y - ground).abs() < 0.2,
-        "landing must snap back to the drawn ground: {} vs {ground}",
+        (landed.y - floor).abs() < 0.2,
+        "landing must snap back to the drawn ground: {} vs {floor}",
         landed.y
+    );
+
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                jump: true,
+                dt: 1.0 / 60.0,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("jump");
+    let sprung = session.player_position().expect("player");
+    assert!(
+        sprung.y > landed.y + 0.05,
+        "space must leave the ground: {} vs {}",
+        sprung.y,
+        landed.y
+    );
+    for _ in 0..90 {
+        session
+            .step(
+                &mut world,
+                WalkInput {
+                    dt: 1.0 / 60.0,
+                    ..WalkInput::IDLE
+                },
+            )
+            .expect("fall");
+    }
+    let after_jump = session.player_position().expect("player");
+    assert!(
+        (after_jump.y - floor).abs() < 0.2,
+        "a jump must land back on the drawn ground: {} vs {floor}",
+        after_jump.y
     );
 }
 
@@ -1709,14 +1756,7 @@ fn turning_wraps_instead_of_drifting_off_the_compass() {
     let mut world = World::new();
     let mut session = WorldSession::new(Arc::clone(&surface));
     session.begin_entry(&mut world, request).expect("entry");
-    for _ in 0..600 {
-        session.step(&mut world, WalkInput::IDLE).expect("update");
-        if session.state() == SessionState::World {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    assert_eq!(session.state(), SessionState::World);
+    wait_until_world(&mut session, &mut world);
 
     let start = session.player_heading().expect("heading").degrees();
     // Ten full turns: Heading rejects anything outside [0, 360).

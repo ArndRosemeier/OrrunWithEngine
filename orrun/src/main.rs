@@ -1,18 +1,22 @@
-//! Orrun — atlas map and walkable continent in one process.
+//! Orrun — title, atlas map, and walkable continent in one process.
 //!
 //! Usage: `cargo run -p orrun -- [seed] [size]`
 //!
-//! Map: drag to pan · scroll to zoom · F fit · left click travels there ·
-//! right click reveals a cell overlay · C clears overlays · M returns to where
-//! you were standing · the largest-town button enters at the biggest settlement.
-//! World (first person): click to look · Esc hands the mouse back · W/S walk ·
-//! Q/E sidestep · A/D turn · Shift sprint · F fly (Space up, Ctrl down) ·
-//! M summons the map · Esc with a free cursor quits.
+//! Title: the painted vista while the continent is charted, then Continue
+//! (if you have a stand) or Chart the land. Map: drag to pan · scroll to zoom · F fit · left click
+//! travels there · right click reveals a cell overlay · C clears overlays ·
+//! M returns to where you were standing · the largest-town button enters at
+//! the biggest settlement. World (first person): click to look · Esc hands
+//! the mouse back · W/S walk · Q/E sidestep · A/D turn · Shift sprint ·
+//! F fly · Space jump · M summons the map · Esc with a free cursor
+//! quits.
 //!
-//! Where the player stood is written on exit, per seed and size, and walked
-//! back to on the next launch.
+//! Where the player stood is written on exit, per seed and size, and offered
+//! as Continue on the next launch.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use engine::egui::{
     self, Align2, Color32, ColorImage, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -566,44 +570,108 @@ fn resume_saved_stand(
 
 fn main() {
     let (seed, size) = parse_args();
-    eprintln!("generating atlas seed={seed} size={size}…");
-    let atlas = Arc::new(ContinentAtlas::generate(seed, size));
-    let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
-    eprintln!(
-        "ready: lakes={} rivers={} coasts={} nodes={} hash={:#x}",
-        atlas.hydro.lakes.len(),
-        atlas.hydro.rivers.len(),
-        atlas.hydro.coasts.len(),
-        atlas.nodes.len(),
-        atlas.content_hash as u32,
-    );
-
-    let mut viewer = AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface));
-    let mut session = WorldSession::new(Arc::clone(&surface));
-    let sea = surface.sea_surface_z();
-    let bounds = surface.bounds();
-
     // Read before the window opens: a broken save should say so instead of
     // quietly dropping the player back on the map.
     let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
 
-    // The frame callback owns the session, so the last stand is handed out
-    // here and written once the window has closed.
+    let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
+    let status_job = Arc::clone(&status);
+    eprintln!("generating atlas seed={seed} size={size}…");
+    let mut generating: Option<
+        JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>)>,
+    > = Some(
+        std::thread::Builder::new()
+            .name("atlas".into())
+            .spawn(move || {
+                let atlas = ContinentAtlas::generate(seed, size);
+                *status_job.lock().expect("title status") =
+                    "Building continental terrain…".into();
+                let surface =
+                    ContinentalSurface::new(&atlas).expect("canonical surface");
+                (Arc::new(atlas), Arc::new(surface))
+            })
+            .expect("atlas thread"),
+    );
+
+    let mut viewer: Option<AtlasViewer> = None;
+    let mut session: Option<WorldSession> = None;
+    let mut title_art: Option<TextureHandle> = None;
+    let mut on_title = true;
+    let mut dressed = false;
+
     let last_stand = Arc::new(Mutex::new(remembered));
     let stand_in_loop = Arc::clone(&last_stand);
 
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);
-            install_materials(world, seed, sea);
-            if let Some(stand) = remembered {
-                resume_saved_stand(stand, bounds, &mut session, world);
+        }
+
+        if let Some(job) = generating.take() {
+            if job.is_finished() {
+                let (atlas, surface) = job.join().expect("atlas thread");
+                eprintln!(
+                    "ready: lakes={} rivers={} coasts={} nodes={} hash={:#x}",
+                    atlas.hydro.lakes.len(),
+                    atlas.hydro.rivers.len(),
+                    atlas.hydro.coasts.len(),
+                    atlas.nodes.len(),
+                    atlas.content_hash as u32,
+                );
+                *status.lock().expect("title status") = String::new();
+                viewer = Some(AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface)));
+                session = Some(WorldSession::new(surface));
+            } else {
+                generating = Some(job);
             }
         }
 
+        if !dressed {
+            if let Some(session) = &session {
+                install_materials(world, seed, session.surface().sea_surface_z());
+                dressed = true;
+            }
+        }
+
+        if on_title {
+            if title_art.is_none() {
+                title_art = Some(load_title_vista(frame.ui.ctx()));
+            }
+            let ready = viewer.is_some();
+            let line = status.lock().expect("title status").clone();
+            match draw_title(
+                frame,
+                title_art.as_ref().expect("title art"),
+                seed,
+                size,
+                ready,
+                remembered.is_some(),
+                &line,
+            ) {
+                TitleAction::Stay => {}
+                TitleAction::Chart => {
+                    on_title = false;
+                }
+                TitleAction::Continue => {
+                    on_title = false;
+                    let bounds = viewer.as_ref().expect("atlas ready").bounds;
+                    resume_saved_stand(
+                        remembered.expect("continue needs a stand"),
+                        bounds,
+                        session.as_mut().expect("atlas ready"),
+                        world,
+                    );
+                }
+            }
+            return;
+        }
+
+        let viewer = viewer.as_mut().expect("left the title before the atlas was ready");
+        let session = session.as_mut().expect("left the title before the atlas was ready");
+
         match session.state() {
-            SessionState::World => install_daylight(world),
-            _ => world.set_clear_color(rgb(12, 14, 18)),
+            SessionState::World | SessionState::Loading => install_daylight(world),
+            SessionState::Atlas => {}
         }
 
         if let Err(err) = session.update(world, frame) {
@@ -616,9 +684,19 @@ fn main() {
         }
 
         match session.state() {
-            SessionState::Atlas => draw_atlas(&mut viewer, &mut session, world, frame),
-            SessionState::Loading => draw_loading(&viewer, &session, frame),
-            SessionState::World => draw_world_hud(&mut session, world, frame),
+            SessionState::Atlas => draw_atlas(viewer, session, world, frame),
+            SessionState::Loading => {
+                if title_art.is_none() {
+                    title_art = Some(load_title_vista(frame.ui.ctx()));
+                }
+                draw_loading(
+                    viewer,
+                    session,
+                    frame,
+                    title_art.as_ref().expect("title art"),
+                );
+            }
+            SessionState::World => draw_world_hud(session, world, frame),
         }
     });
 
@@ -632,6 +710,184 @@ fn main() {
             path.display()
         );
     }
+}
+
+enum TitleAction {
+    Stay,
+    Chart,
+    Continue,
+}
+
+fn load_title_vista(ctx: &egui::Context) -> TextureHandle {
+    let path = title_vista_path();
+    let (w, h, rgba) = load_rgba8_png(&path).unwrap_or_else(|err| panic!("{err}"));
+    let image = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    ctx.load_texture("title_vista", image, TextureOptions::LINEAR)
+}
+
+fn title_vista_path() -> PathBuf {
+    let mut tried = Vec::new();
+    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
+        tried.push(PathBuf::from(dir).join("title").join("vista.png"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            tried.push(dir.join("assets").join("title").join("vista.png"));
+        }
+    }
+    tried.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("title")
+            .join("vista.png"),
+    );
+    tried
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| {
+            panic!("title vista missing; expected orrun/assets/title/vista.png")
+        })
+}
+
+fn paint_vista_backdrop(ui: &egui::Ui, rect: Rect, art: &TextureHandle) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, Color32::BLACK);
+    paint_cover(&painter, rect, art);
+    paint_edge_fade(&painter, rect, true);
+    paint_edge_fade(&painter, rect, false);
+}
+
+fn paint_cover(painter: &egui::Painter, rect: Rect, texture: &TextureHandle) {
+    let size = texture.size_vec2();
+    let scale = (rect.width() / size.x).max(rect.height() / size.y);
+    let drawn = size * scale;
+    let origin = rect.center() - drawn * 0.5;
+    painter.image(
+        texture.id(),
+        Rect::from_min_size(origin, drawn),
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+fn paint_edge_fade(painter: &egui::Painter, rect: Rect, from_top: bool) {
+    let band = rect.height() * 0.16;
+    for i in 0..8 {
+        let t = i as f32 / 8.0;
+        let (y0, y1) = if from_top {
+            (rect.min.y + band * t, rect.min.y + band * ((i + 1) as f32 / 8.0))
+        } else {
+            let fade_top = rect.max.y - band;
+            (
+                fade_top + band * t,
+                fade_top + band * ((i + 1) as f32 / 8.0),
+            )
+        };
+        let alpha = if from_top {
+            (90.0 * (1.0 - t)) as u8
+        } else {
+            (28.0 + t * 110.0) as u8
+        };
+        painter.rect_filled(
+            Rect::from_min_max(egui::pos2(rect.min.x, y0), egui::pos2(rect.max.x, y1)),
+            0.0,
+            Color32::from_black_alpha(alpha),
+        );
+    }
+}
+
+fn draw_title(
+    frame: &Frame,
+    art: &TextureHandle,
+    seed: i32,
+    size: usize,
+    ready: bool,
+    can_continue: bool,
+    status: &str,
+) -> TitleAction {
+    let ctx = frame.ui.ctx().clone();
+    let cream = Color32::from_rgb(235, 230, 210);
+    let mute = Color32::from_rgb(168, 186, 204);
+    let mut action = TitleAction::Stay;
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(&ctx, |ui| {
+            let rect = ui.max_rect();
+            paint_vista_backdrop(ui, rect, art);
+
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label(
+                    egui::RichText::new("ORRUN")
+                        .size(72.0)
+                        .color(cream)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("a continent to walk")
+                        .size(20.0)
+                        .italics()
+                        .color(mute),
+                );
+                ui.add_space(16.0);
+                ui.label(
+                    egui::RichText::new(format!("seed {seed}   ·   {size} km"))
+                        .size(14.0)
+                        .color(Color32::from_rgb(140, 158, 176)),
+                );
+                if !ready {
+                    ui.add_space(18.0);
+                    let line = if status.is_empty() {
+                        "Shaping the land…"
+                    } else {
+                        status
+                    };
+                    ui.label(egui::RichText::new(line).size(16.0).color(mute));
+                }
+            });
+
+            if ready {
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                egui::Area::new(egui::Id::new("title_actions"))
+                    .anchor(Align2::CENTER_BOTTOM, [0.0, -28.0])
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        ui.vertical_centered(|ui| {
+                            if can_continue {
+                                if title_button(ui, "Continue").clicked() || enter {
+                                    action = TitleAction::Continue;
+                                }
+                                ui.add_space(10.0);
+                                if title_button(ui, "Chart the land").clicked() {
+                                    action = TitleAction::Chart;
+                                }
+                            } else if title_button(ui, "Chart the land").clicked() || enter {
+                                action = TitleAction::Chart;
+                            }
+                        });
+                    });
+            }
+        });
+
+    action
+}
+
+fn title_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(text)
+                .size(18.0)
+                .color(Color32::from_rgb(235, 230, 210)),
+        )
+        .fill(Color32::from_rgba_unmultiplied(10, 14, 20, 170))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            Color32::from_rgb(168, 186, 204),
+        ))
+        .min_size(egui::vec2(240.0, 40.0)),
+    )
 }
 
 fn draw_atlas(
@@ -870,38 +1126,52 @@ fn settlement_tier_name(tier: u8) -> &'static str {
     }
 }
 
-fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame) {
+fn draw_loading(
+    viewer: &AtlasViewer,
+    session: &WorldSession,
+    frame: &Frame,
+    art: &TextureHandle,
+) {
     let ctx = frame.ui.ctx().clone();
+    let cream = Color32::from_rgb(235, 230, 210);
+    let mute = Color32::from_rgb(168, 186, 204);
     let progress = session.loading_progress();
     let where_to = session
         .destination()
         .map(|g| format!("({:.0} m, {:.0} m)", g.x, g.z))
         .unwrap_or_default();
+    let heading = viewer
+        .note
+        .as_deref()
+        .filter(|note| !note.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Travelling to {where_to}"));
+
     egui::CentralPanel::default()
-        .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
+        .frame(egui::Frame::NONE)
         .show(&ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(ui.available_height() * 0.4);
-                ui.label(
-                    egui::RichText::new(format!("Travelling to {where_to}"))
-                        .size(22.0)
-                        .color(Color32::from_rgb(235, 230, 210)),
-                );
-                ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "streaming ground… {:.0}%   ({} chunks resident)",
-                        progress * 100.0,
-                        session.stream().resident_count()
-                    ))
-                    .size(14.0)
-                    .color(Color32::from_rgb(150, 200, 240)),
-                );
-                if let Some(note) = &viewer.note {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(note).size(12.0));
-                }
-            });
+            let rect = ui.max_rect();
+            paint_vista_backdrop(ui, rect, art);
+
+            egui::Area::new(egui::Id::new("travel_status"))
+                .anchor(Align2::CENTER_BOTTOM, [0.0, -36.0])
+                .order(egui::Order::Foreground)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(heading).size(22.0).color(cream));
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "streaming ground… {:.0}%   ({} chunks resident)",
+                                progress * 100.0,
+                                session.stream().resident_count()
+                            ))
+                            .size(14.0)
+                            .color(mute),
+                        );
+                    });
+                });
         });
 }
 
@@ -933,7 +1203,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         "click to look"
     };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  M map  |  {mouse}",
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  Space jump  |  M map  |  {mouse}",
         p.x,
         p.z,
         p.y,

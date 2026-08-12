@@ -116,7 +116,7 @@ pub(crate) fn meander_cell_corridor(
     pts
 }
 
-fn unique_links(links: &[Link]) -> Vec<&Link> {
+pub(crate) fn unique_links(links: &[Link]) -> Vec<&Link> {
     let mut best: FxHashMap<(EndpointKey, EndpointKey), &Link> = FxHashMap::default();
     for link in links {
         let mut ka = endpoint_key(link.a);
@@ -294,6 +294,82 @@ fn join_piece(chain: &mut Vec<Vec2>, piece: Vec<Vec2>, at_tail: bool) {
     }
 }
 
+/// Collapse corridors that run beside each other.
+///
+/// Do not call this on the full continent: every road against every other
+/// road, each point against every segment, hangs atlas construction. The 3D
+/// path layer already drops stacked decks with `near_deck`.
+#[cfg(test)]
+fn merge_parallel(mut roads: Vec<RoadPath>) -> Vec<RoadPath> {
+    roads.sort_by_key(|r| (r.class, -(r.points.len() as i32)));
+    let mut keep = Vec::new();
+    for road in roads {
+        if keep
+            .iter()
+            .any(|k: &RoadPath| corridors_overlap(&k.points, &road.points, 40.0))
+        {
+            continue;
+        }
+        keep.push(road);
+    }
+    keep
+}
+
+#[cfg(test)]
+fn corridors_overlap(a: &[Vec2], b: &[Vec2], max_d: f32) -> bool {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if short.len() < 4 {
+        return false;
+    }
+    if !bboxes_overlap(short, long, max_d) {
+        return false;
+    }
+    let near = short
+        .iter()
+        .filter(|p| dist_to_poly(**p, long) < max_d)
+        .count();
+    near as f32 / short.len() as f32 > 0.55
+}
+
+#[cfg(test)]
+fn bboxes_overlap(a: &[Vec2], b: &[Vec2], pad: f32) -> bool {
+    let (amin, amax) = bbox(a);
+    let (bmin, bmax) = bbox(b);
+    amin.x <= bmax.x + pad
+        && bmin.x <= amax.x + pad
+        && amin.y <= bmax.y + pad
+        && bmin.y <= amax.y + pad
+}
+
+#[cfg(test)]
+fn bbox(pts: &[Vec2]) -> (Vec2, Vec2) {
+    let mut min = pts[0];
+    let mut max = pts[0];
+    for p in pts {
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    (min, max)
+}
+
+#[cfg(test)]
+fn dist_to_poly(p: Vec2, poly: &[Vec2]) -> f32 {
+    poly.windows(2)
+        .map(|w| dist_point_seg(p, w[0], w[1]))
+        .fold(f32::INFINITY, f32::min)
+}
+
+#[cfg(test)]
+fn dist_point_seg(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let d = b - a;
+    let len2 = d.length_squared();
+    if len2 < 1e-8 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
+    p.distance(a + d * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +424,73 @@ mod tests {
                 road.id
             );
         }
+    }
+
+    #[test]
+    fn a_town_has_one_way_out_unless_the_road_goes_through() {
+        use crate::atlas::features::NodeKind;
+
+        let atlas = ContinentAtlas::generate(20260809, 64);
+        let roads = bake_road_paths(&atlas);
+        for node in &atlas.nodes {
+            if node.kind != NodeKind::Settlement {
+                continue;
+            }
+            let plaza = Vec2::new(
+                (node.ax as f32 + 0.5) * CELL_METRES,
+                (node.az as f32 + 0.5) * CELL_METRES,
+            );
+            let nearby: Vec<&RoadPath> = roads
+                .iter()
+                .filter(|r| r.points.iter().any(|p| p.distance(plaza) < 120.0))
+                .collect();
+            assert!(
+                nearby.len() <= 2,
+                "town {} has {} roads at the plaza",
+                node.id,
+                nearby.len()
+            );
+            if nearby.len() < 2 {
+                continue;
+            }
+            let b0 = exit_world_bearing(&nearby[0].points, plaza);
+            let b1 = exit_world_bearing(&nearby[1].points, plaza);
+            assert!(
+                b0.dot(b1) <= -0.5,
+                "town {} has two roads leaving the same way ({b0:?} vs {b1:?})",
+                node.id
+            );
+        }
+    }
+
+    fn exit_world_bearing(points: &[Vec2], plaza: Vec2) -> Vec2 {
+        let far = points
+            .iter()
+            .copied()
+            .filter(|p| p.distance(plaza) < 400.0)
+            .max_by(|a, b| {
+                a.distance(plaza)
+                    .partial_cmp(&b.distance(plaza))
+                    .unwrap()
+            })
+            .unwrap_or(plaza);
+        (far - plaza).normalize_or_zero()
+    }
+
+    #[test]
+    fn parallel_roads_collapse_to_one() {
+        let a = RoadPath {
+            id: 1,
+            class: 0,
+            points: (0..20).map(|i| v(i as f32 * 50.0, 0.0)).collect(),
+        };
+        let b = RoadPath {
+            id: 2,
+            class: 1,
+            points: (0..20).map(|i| v(i as f32 * 50.0, 18.0)).collect(),
+        };
+        let merged = merge_parallel(vec![a, b]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, 1);
     }
 }

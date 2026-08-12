@@ -9,7 +9,7 @@ use rand_chacha::ChaCha8Rng;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::biomes::{self, Biome};
-use super::features::{edge_key, edge_owner, Dir, Kind, NodeKind, RoadClass};
+use super::features::{edge_key, edge_owner, Dir, EndpointKind, Kind, NodeKind, RoadClass};
 use super::pack;
 use super::types::{Crossing, Endpoint, GraphNode, Link, Port};
 use super::{cardinal, feature_hash, layer_seed, lerp, NEIGHBOR_DX, NEIGHBOR_DZ};
@@ -53,6 +53,12 @@ pub fn build_roads(
     for (i, node) in nodes.iter().enumerate() {
         by_mass.entry(node.landmass).or_default().push(i);
     }
+
+    let towns: FxHashSet<i32> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Settlement)
+        .map(|n| n.cell)
+        .collect();
 
     let mut road_serial = 0i32;
     for (_mass, mut indices) in by_mass {
@@ -107,6 +113,7 @@ pub fn build_roads(
                 b,
                 RoadClass::Primary,
                 road_serial,
+                &towns,
                 graph,
             ) {
                 graph.primary_edges.push((a.id, b.id));
@@ -126,7 +133,7 @@ pub fn build_roads(
             }
             best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
             let spur_budget = if ni.kind == NodeKind::Settlement {
-                3
+                0
             } else {
                 2
             };
@@ -151,6 +158,7 @@ pub fn build_roads(
                     nj,
                     RoadClass::Secondary,
                     road_serial,
+                    &towns,
                     graph,
                 ) {
                     linked.insert(key);
@@ -235,6 +243,7 @@ fn route_and_stamp_road(
     b: &GraphNode,
     road_class: RoadClass,
     serial: i32,
+    towns: &FxHashSet<i32>,
     graph: &mut RoadGraph,
 ) -> bool {
     let mut path = road_astar(
@@ -253,7 +262,7 @@ fn route_and_stamp_road(
         return false;
     }
     stamp_road_path(
-        world_seed, size, cells, &path, road_class, a.id, b.id, serial, graph,
+        world_seed, size, cells, &path, road_class, a.id, b.id, serial, towns, graph,
     );
     true
 }
@@ -430,6 +439,7 @@ fn stamp_road_path(
     node_a: i32,
     node_b: i32,
     serial: i32,
+    towns: &FxHashSet<i32>,
     graph: &mut RoadGraph,
 ) {
     let feature_id = feature_hash(&[
@@ -494,7 +504,62 @@ fn stamp_road_path(
             feature_class: road_class as i32,
             feature_id,
         };
-        graph.links.entry(cell).or_default().push(link);
+        let slot = graph.links.entry(cell).or_default();
+        if already_has_undirected(slot, &link) {
+            continue;
+        }
+        if towns.contains(&cell) && !plaza_allows_link(slot, ax, az, &link) {
+            continue;
+        }
+        slot.push(link);
+    }
+}
+
+fn already_has_undirected(existing: &[Link], new: &Link) -> bool {
+    existing.iter().any(|l| {
+        (l.a == new.a && l.b == new.b) || (l.a == new.b && l.b == new.a)
+    })
+}
+
+/// A town is a spur or a through-road, not a hub of MST/spur exits.
+fn plaza_allows_link(existing: &[Link], ax: i32, az: i32, new: &Link) -> bool {
+    let Some(new_dir) = plaza_exit_dir(ax, az, new) else {
+        return true;
+    };
+    let mut exits = Vec::new();
+    for link in existing {
+        let Some(dir) = plaza_exit_dir(ax, az, link) else {
+            continue;
+        };
+        if !exits.contains(&dir) {
+            exits.push(dir);
+        }
+    }
+    if exits.contains(&new_dir) {
+        return false;
+    }
+    match exits.len() {
+        0 => true,
+        1 => exits[0].opposite() == new_dir,
+        _ => false,
+    }
+}
+
+pub(crate) fn plaza_exit_dir(ax: i32, az: i32, link: &Link) -> Option<Dir> {
+    let ep = match (link.a.kind, link.b.kind) {
+        (EndpointKind::EdgePort, EndpointKind::Node) => link.a,
+        (EndpointKind::Node, EndpointKind::EdgePort) => link.b,
+        _ => return None,
+    };
+    let (ox, oz, dir) = edge_owner(ep.ref_id);
+    if ox == ax && oz == az {
+        Some(dir)
+    } else if ox == ax - 1 && oz == az && dir == Dir::East {
+        Some(Dir::West)
+    } else if ox == ax && oz == az - 1 && dir == Dir::South {
+        Some(Dir::North)
+    } else {
+        None
     }
 }
 

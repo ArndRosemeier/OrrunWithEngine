@@ -4,7 +4,7 @@
 //! where `where` is `river` (default), `coast`, `inland`, `forest`, `ocean`,
 //! `summit`, `brook`, `pond`, or `x,z`.
 //! Controls: click to look · Esc hands the mouse back · W/S walk · Q/E
-//! sidestep · A/D turn · Shift sprint · F fly (Space up, Ctrl down) · Esc with
+//! sidestep · A/D turn · Shift sprint · F fly (W follows the look) · Space jump · Esc with
 //! a free cursor quits.
 //!
 //! This is the same `WorldSession` the game uses — there is no second spawn or

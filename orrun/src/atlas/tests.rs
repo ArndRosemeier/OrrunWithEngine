@@ -189,3 +189,37 @@ fn population_sparse() {
     assert!(settlements > 0 || atlas.river_links.is_empty());
     let _ = RoadClass::Primary;
 }
+
+#[test]
+fn a_settlement_cell_is_a_spur_or_a_through_road() {
+    let atlas = ContinentAtlas::generate(20260809, 64);
+    for node in &atlas.nodes {
+        if node.kind != NodeKind::Settlement {
+            continue;
+        }
+        let links = atlas.links_in_cell(node.ax, node.az, Kind::Road);
+        let mut exits = Vec::new();
+        for link in links {
+            let Some(dir) = super::roads::plaza_exit_dir(node.ax, node.az, link) else {
+                continue;
+            };
+            if !exits.contains(&dir) {
+                exits.push(dir);
+            }
+        }
+        assert!(
+            exits.len() <= 2,
+            "town {} has {} plaza exits: {exits:?}",
+            node.id,
+            exits.len()
+        );
+        if exits.len() == 2 {
+            assert_eq!(
+                exits[0].opposite(),
+                exits[1],
+                "town {} is a fork, not a through-road: {exits:?}",
+                node.id
+            );
+        }
+    }
+}

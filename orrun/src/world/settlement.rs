@@ -36,6 +36,10 @@ const RESEED_M: f64 = 70.0;
 /// underfill. 3D uses the atlas tier's market and spread, with this cap on
 /// houses until packing is off the main thread.
 const MAX_3D_DWELLINGS: u32 = 80;
+/// Keep house footprints off the atlas road bed (half of a primary ribbon plus a wall).
+const ROAD_CLEAR_M: f32 = 4.0;
+/// Extra metres past the outermost house where the dirt ribbon still pauses.
+const HAMLET_ROAD_PAD_M: f32 = 10.0;
 
 /// Blender authors the door on +Y; glTF Y-up maps that to −Z, which is where
 /// the planner already puts the door at yaw 0. No extra turn.
@@ -89,6 +93,8 @@ struct Standing {
 #[derive(Clone, Debug)]
 pub struct HamletStand {
     pub at: GlobalXZ,
+    /// Disk that covers the packed houses, for roads to pause inside.
+    pub radius: f32,
     pub houses: Vec<GlobalXZ>,
 }
 
@@ -97,6 +103,7 @@ struct GroundPlot<'a> {
     brooks: &'a BrookField,
     stream: Option<&'a WorldStream>,
     origin: GlobalXZ,
+    roads: Vec<(Vec2, Vec2)>,
 }
 
 impl GroundPlot<'_> {
@@ -126,7 +133,17 @@ impl Plot for GroundPlot<'_> {
     }
 
     fn wetness(&self, p: Vec2) -> f32 {
-        self.column(self.world(p)).wetness()
+        let at = self.world(p);
+        let hydro = self.column(at).wetness();
+        if on_road(
+            Vec2::new(at.x as f32, at.z as f32),
+            &self.roads,
+            ROAD_CLEAR_M,
+        ) {
+            hydro.max(1.0)
+        } else {
+            hydro
+        }
     }
 }
 
@@ -302,12 +319,17 @@ impl SettlementLayer {
                 &self.houses,
                 &mut self.standing,
             );
-            let houses = self.standing[before..]
+            let houses: Vec<GlobalXZ> = self.standing[before..]
                 .iter()
                 .filter(|s| matches!(s.kind, Kind::House(_) | Kind::Well))
                 .map(|s| s.at.horizontal())
                 .collect();
-            self.hamlets.push(HamletStand { at: pin.at, houses });
+            let radius = hamlet_radius(pin.at, &houses);
+            self.hamlets.push(HamletStand {
+                at: pin.at,
+                radius,
+                houses,
+            });
         }
     }
 
@@ -355,6 +377,7 @@ fn layout_for(
         brooks,
         stream: None,
         origin: pin.at,
+        roads: nearby_road_segs(surface, pin.at, config.max_settle_radius + 24.0),
     };
     plan_on(&config, Some(&plot))
 }
@@ -373,6 +396,11 @@ fn seat_plan(
         brooks,
         stream: Some(stream),
         origin: pin.at,
+        roads: nearby_road_segs(
+            surface,
+            pin.at,
+            layout_config(pin).max_settle_radius + 24.0,
+        ),
     };
     for shape in &plan.shapes {
         if shape.kind != ShapeKind::House {
@@ -454,6 +482,43 @@ fn skirt_mesh() -> EngineResult<Mesh> {
     Mesh::box_at(Vec3::ZERO, Vec3::ONE, Color::rgb(78, 68, 58))
 }
 
+fn hamlet_radius(at: GlobalXZ, houses: &[GlobalXZ]) -> f32 {
+    let mut r = 20.0_f32;
+    for h in houses {
+        let dx = (h.x - at.x) as f32;
+        let dz = (h.z - at.z) as f32;
+        r = r.max((dx * dx + dz * dz).sqrt());
+    }
+    r + HAMLET_ROAD_PAD_M
+}
+
+fn nearby_road_segs(surface: &ContinentalSurface, origin: GlobalXZ, reach: f32) -> Vec<(Vec2, Vec2)> {
+    let o = Vec2::new(origin.x as f32, origin.z as f32);
+    let mut segs = Vec::new();
+    for road in surface.roads() {
+        for w in road.points.windows(2) {
+            if dist_point_seg(o, w[0], w[1]) <= reach {
+                segs.push((w[0], w[1]));
+            }
+        }
+    }
+    segs
+}
+
+fn on_road(p: Vec2, segs: &[(Vec2, Vec2)], clear: f32) -> bool {
+    segs.iter().any(|&(a, b)| dist_point_seg(p, a, b) < clear)
+}
+
+fn dist_point_seg(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let d = b - a;
+    let len2 = d.length_squared();
+    if len2 < 1e-8 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
+    p.distance(a + d * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +541,21 @@ mod tests {
         assert!(town.dwelling_min > hamlet.dwelling_max);
         assert!(town.max_settle_radius > hamlet.max_settle_radius);
         assert!(town.market_radius > hamlet.market_radius);
+    }
+
+    #[test]
+    fn a_point_on_a_road_centreline_is_blocked() {
+        let segs = [(Vec2::ZERO, Vec2::new(100.0, 0.0))];
+        assert!(on_road(Vec2::new(50.0, 0.0), &segs, ROAD_CLEAR_M));
+        assert!(!on_road(Vec2::new(50.0, 8.0), &segs, ROAD_CLEAR_M));
+    }
+
+    #[test]
+    fn hamlet_radius_covers_the_outer_house() {
+        let at = GlobalXZ::at(0.0, 0.0);
+        let houses = vec![GlobalXZ::at(30.0, 0.0), GlobalXZ::at(0.0, 10.0)];
+        let r = hamlet_radius(at, &houses);
+        assert!(r >= 40.0);
+        assert!(r < 50.0);
     }
 }
