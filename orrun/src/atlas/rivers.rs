@@ -1,8 +1,8 @@
 //! Major river graph via priority-flood drainage.
 
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rustc_hash::FxHashMap;
 
 use super::biomes::{self, Biome};
@@ -138,10 +138,7 @@ pub fn build_rivers(
                         &mut graph.ports,
                     );
                     river_serial += 1;
-                    Endpoint::edge_port(
-                        edge_key(ax as i32, az as i32, dir, size),
-                        port.id,
-                    )
+                    Endpoint::edge_port(edge_key(ax as i32, az as i32, dir, size), port.id)
                 }
             };
 
@@ -172,8 +169,7 @@ pub fn build_rivers(
                     &mut graph.ports,
                 );
                 river_serial += 1;
-                let in_endpoint =
-                    Endpoint::edge_port(edge_key(nx, nz, idir, size), in_port.id);
+                let in_endpoint = Endpoint::edge_port(edge_key(nx, nz, idir, size), in_port.id);
                 add_river_link(
                     world_seed,
                     idx as i32,
@@ -249,9 +245,7 @@ fn priority_flood_fill(
         if open_min >= 256 {
             break;
         }
-        let cell = buckets[open_min as usize]
-            .pop()
-            .expect("bucket non-empty");
+        let cell = buckets[open_min as usize].pop().expect("bucket non-empty");
         let ax = cell % size as i32;
         let az = cell / size as i32;
         let ce = elev_code[cell as usize] as i32;
@@ -339,12 +333,7 @@ fn ensure_river_port(
         feature_class,
         flow_sign: 1,
         surface_z,
-        feature_id: feature_hash(&[
-            &world_seed.to_string(),
-            "river",
-            &key.to_string(),
-            "0",
-        ]),
+        feature_id: feature_hash(&[&world_seed.to_string(), "river", &key.to_string(), "0"]),
     };
     entry.push(port);
     port

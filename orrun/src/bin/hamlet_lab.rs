@@ -115,8 +115,12 @@ impl HamletLab {
                 continue;
             }
             let color = catalog_color(&shape.catalog_id);
-            let corners =
-                obb_corners(shape.center, shape.half_size.x, shape.half_size.y, shape.yaw);
+            let corners = obb_corners(
+                shape.center,
+                shape.half_size.x,
+                shape.half_size.y,
+                shape.yaw,
+            );
             let pts: Vec<Pos2> = corners
                 .iter()
                 .map(|p| self.world_to_panel(origin, *p))

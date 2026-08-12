@@ -1,11 +1,33 @@
-//! 3D continental world layers (surface sample, later sectors).
+//! The 3D continent: one surface authority, chunked meshes, one entry path.
+//!
+//! * [`ContinentalSurface`] answers every question about ground and water.
+//! * [`TerrainChunkBuilder`] turns it into seam-safe land/water/contact chunks.
+//! * [`WorldStream`] keeps those chunks around the player and rebases render
+//!   space so `f32` precision stays local.
+//! * [`WorldSession`] runs atlas → loading → walking in one process.
 
 mod atlas_fields;
+mod chunk_mesh;
+mod coords;
+mod entry;
 mod hydro_geom;
+mod ring_field;
+mod session;
 mod surface;
+mod world_stream;
 
 #[cfg(test)]
 mod tests;
 
 pub use atlas_fields::AtlasFields;
-pub use surface::{find_land_spawn, find_water_view_spawn, ContinentalSurface};
+pub use chunk_mesh::TerrainChunkBuilder;
+pub use coords::{
+    chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
+    CHUNK_SPAN_M,
+};
+pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+pub use session::{SessionError, SessionState, WalkInput, WorldSession};
+pub use surface::{
+    ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
+};
+pub use world_stream::{WorldStream, ENTRY_RING, REBASE_DISTANCE_M, VISUAL_RING};

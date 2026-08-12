@@ -3,7 +3,7 @@ use glam::Vec2;
 use super::catalog::{self, BuildingRole};
 use super::config::HamletLabConfig;
 use super::planner::plan;
-use super::{ShapeKind, Shape};
+use super::{Shape, ShapeKind};
 
 fn house_obb_overlap(a: &Shape, b: &Shape) -> bool {
     if a.kind != ShapeKind::House || b.kind != ShapeKind::House {
@@ -20,10 +20,10 @@ fn house_obb_overlap(a: &Shape, b: &Shape) -> bool {
     let all = [a_axes[0], a_axes[1], b_axes[0], b_axes[1]];
     let delta = b.center - a.center;
     for axis in all {
-        let ra = a.half_size.x * axis.dot(a_axes[0]).abs()
-            + a.half_size.y * axis.dot(a_axes[1]).abs();
-        let rb = b.half_size.x * axis.dot(b_axes[0]).abs()
-            + b.half_size.y * axis.dot(b_axes[1]).abs();
+        let ra =
+            a.half_size.x * axis.dot(a_axes[0]).abs() + a.half_size.y * axis.dot(a_axes[1]).abs();
+        let rb =
+            b.half_size.x * axis.dot(b_axes[0]).abs() + b.half_size.y * axis.dot(b_axes[1]).abs();
         if delta.dot(axis).abs() >= ra + rb - TOUCH_EPS {
             return false;
         }
@@ -40,7 +40,11 @@ fn hamlet_tier0_places_well_and_dwellings() {
     assert!(plan.house_count >= 3, "expected several dwellings");
     assert!(plan.civic_count >= 1);
     assert_eq!(plan.market_sides, 6);
-    assert!(plan.underfill_message.is_empty(), "{}", plan.underfill_message);
+    assert!(
+        plan.underfill_message.is_empty(),
+        "{}",
+        plan.underfill_message
+    );
 
     let mut saw_well = false;
     for s in &plan.shapes {
@@ -91,11 +95,10 @@ fn port_places_bell_tower() {
     cfg.dwelling_min = 40;
     cfg.dwelling_max = 40;
     let plan = plan(&cfg).expect("plan");
-    assert!(
-        plan.shapes
-            .iter()
-            .any(|s| s.kind == ShapeKind::House && s.catalog_id == "Bell_Tower")
-    );
+    assert!(plan
+        .shapes
+        .iter()
+        .any(|s| s.kind == ShapeKind::House && s.catalog_id == "Bell_Tower"));
     assert_eq!(plan.house_count, 40, "{}", plan.underfill_message);
 }
 

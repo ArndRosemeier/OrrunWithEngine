@@ -1,110 +1,233 @@
-//! Walkable continental surface — atlas → surface sample → streamed chunks.
+//! Direct entry into the walkable continent, bypassing the map UI.
 //!
-//! Usage: `cargo run -p orrun --bin continent -- [seed] [size]`
-//! Controls: WASD move · Q/E turn · Shift sprint · Esc quit
+//! Usage: `cargo run -p orrun --bin continent -- [seed] [size] [where]`
+//! where `where` is `river` (default), `coast`, `inland`, `ocean`, or `x,z`.
+//! Controls: WASD move · Q/E turn · Shift sprint · Esc quit.
+//!
+//! This is the same `WorldSession` the game uses — there is no second spawn or
+//! streaming path to keep in sync. `ocean` exists to show that an impossible
+//! selection fails loudly rather than dropping the player somewhere else.
 
 use std::sync::Arc;
 
 use engine::prelude::*;
+use engine::space::GlobalXZ;
+use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
-use orrun::world::{find_water_view_spawn, AtlasFields, ContinentalSurface};
+use orrun::world::{ContinentalSurface, MapPoint, SessionState, WorldEntryRequest, WorldSession};
 
-fn walker_mesh() -> Mesh {
-    let mut m = Mesh::new();
-    m.add_box((0.0, 0.55, 0.0), (0.55, 1.1, 0.35), rgb(55, 90, 160))
-        .unwrap();
-    m.add_box((0.0, 1.35, 0.0), (0.4, 0.4, 0.4), rgb(220, 190, 160))
-        .unwrap();
-    m
+/// Which part of the continent to enter at.
+#[derive(Clone, Copy, Debug)]
+enum Target {
+    River,
+    Coast,
+    Inland,
+    Ocean,
+    Exact(f64, f64),
 }
 
-fn parse_args() -> (i32, usize) {
+impl Target {
+    fn parse(text: &str) -> Self {
+        match text {
+            "river" => Self::River,
+            "coast" => Self::Coast,
+            "inland" => Self::Inland,
+            "ocean" => Self::Ocean,
+            other => {
+                let (x, z) = other
+                    .split_once(',')
+                    .expect("entry must be river|coast|inland|ocean|x,z");
+                Self::Exact(
+                    x.trim().parse().expect("entry x in metres"),
+                    z.trim().parse().expect("entry z in metres"),
+                )
+            }
+        }
+    }
+}
+
+struct Args {
+    seed: i32,
+    size: usize,
+    target: Target,
+}
+
+fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
-    let seed = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let size = args
         .next()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(128)
+        .unwrap_or(128usize)
         .clamp(32, 512);
-    (seed, size)
+    let target = args
+        .next()
+        .map(|s| Target::parse(&s))
+        .unwrap_or(Target::River);
+    Args { seed, size, target }
+}
+
+/// Coarse scan for the driest (`Inland`) or deepest (`Ocean`) column.
+fn extreme_column(surface: &ContinentalSurface, want_wet: bool) -> GlobalXZ {
+    let probe = 192usize;
+    let step = surface.bounds().metres() / probe as f64;
+    let mut best = f32::NEG_INFINITY;
+    let mut at = GlobalXZ::at(step * 0.5, step * 0.5);
+    for iz in 0..probe {
+        for ix in 0..probe {
+            let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+            let wetness = surface.column(p).wetness();
+            let score = if want_wet { wetness } else { -wetness };
+            if score > best {
+                best = score;
+                at = p;
+            }
+        }
+    }
+    at
+}
+
+/// A gentle stretch of shoreline: the coast point whose hinterland is lowest.
+///
+/// The continent also has cliff coasts, where entry legitimately fails; those
+/// are reachable with explicit `x,z` coordinates.
+fn lowland_shore(atlas: &ContinentAtlas, surface: &ContinentalSurface) -> GlobalXZ {
+    let coast = atlas
+        .hydro
+        .coasts
+        .iter()
+        .max_by_key(|c| c.ring.len())
+        .expect("the atlas has a coastline");
+    let mut centre = Vec2::ZERO;
+    for p in &coast.ring {
+        centre += *p;
+    }
+    centre /= coast.ring.len() as f32;
+
+    let stride = (coast.ring.len() / 512).max(1);
+    let mut best = f32::MAX;
+    let mut at = GlobalXZ::at(centre.x as f64, centre.y as f64);
+    for rim in coast.ring.iter().step_by(stride) {
+        let inland = (centre - *rim).normalize_or_zero();
+        if inland.length_squared() < 0.5 {
+            continue;
+        }
+        // Close enough to the rim that the entry heading finds the sea.
+        let probe = *rim + inland * 60.0;
+        let column = surface.column(GlobalXZ::at(probe.x as f64, probe.y as f64));
+        if column.is_wet() {
+            continue;
+        }
+        if column.ground() < best {
+            best = column.ground();
+            at = GlobalXZ::at(probe.x as f64, probe.y as f64);
+        }
+    }
+    at
+}
+
+fn entry_position(
+    atlas: &ContinentAtlas,
+    surface: &ContinentalSurface,
+    target: Target,
+) -> GlobalXZ {
+    match target {
+        Target::Exact(x, z) => GlobalXZ::at(x, z),
+        // The middle of the longest reach: a lively place to look at the water.
+        Target::River => atlas
+            .hydro
+            .rivers
+            .iter()
+            .max_by_key(|r| r.points.len())
+            .map(|r| r.points[r.points.len() / 2])
+            .map(|v| GlobalXZ::at(v.x as f64, v.y as f64))
+            .expect("the atlas has at least one river"),
+        Target::Coast => lowland_shore(atlas, surface),
+        Target::Inland => extreme_column(surface, false),
+        Target::Ocean => extreme_column(surface, true),
+    }
 }
 
 fn main() {
-    let (seed, size) = parse_args();
-    eprintln!("generating atlas seed={seed} size={size}…");
-    let atlas = ContinentAtlas::generate(seed, size);
+    let args = parse_args();
+    eprintln!("generating atlas seed={} size={}…", args.seed, args.size);
+    let atlas = Arc::new(ContinentAtlas::generate(args.seed, args.size));
+    let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
+    let bounds = surface.bounds();
     eprintln!(
-        "atlas ready: lakes={} rivers={} coasts={} nodes={} hash={:#x}",
+        "atlas ready: lakes={} rivers={} coasts={} hash={:#x}",
         atlas.hydro.lakes.len(),
         atlas.hydro.rivers.len(),
         atlas.hydro.coasts.len(),
-        atlas.nodes.len(),
         atlas.content_hash as u32
     );
-    let fields = AtlasFields::build(&atlas);
-    let surface = Arc::new(ContinentalSurface::new(&atlas, fields));
-    let (sx, sz, spawn_yaw) = find_water_view_spawn(&surface, &atlas);
-    let look = surface.sample_at(sx + spawn_yaw.to_radians().sin() * 40.0, sz + spawn_yaw.to_radians().cos() * 40.0);
+
+    let at = entry_position(&atlas, &surface, args.target);
+    let point = MapPoint::from_global(bounds, at).expect("entry point is outside the atlas");
     eprintln!(
-        "spawn at ({sx:.0}, {sz:.0}) yaw={spawn_yaw:.0}  lookahead wet={} water_top={}",
-        look.is_wet(),
-        look.water_top
+        "entry target {:?} at ({:.0}, {:.0})",
+        args.target, at.x, at.z
     );
-
-    let style = SurfaceMeshStyle {
-        chunk_cells: 48,
-        cell_size: 3.0,
-        water_iso_cell: 1.5,
-        rock_height: 600.0,
-        ..SurfaceMeshStyle::default()
-    };
-    let terrain = SurfaceTerrain::new(surface.clone(), style);
-    // Instant surround (radius 2 ≈ 25 chunks), then grow — never bake a whole sector.
-    let target_radius = 5;
-    let mut stream = SurfaceStream::new(terrain, 2).with_budgets(14, 8);
-    let mut grow_radius = 2_i32;
-    let mut last_grow_t = 0.0_f32;
-
-    let mut pos = Vec3::new(sx, 0.0, sz);
-    pos.y = stream.height_at(pos.x, pos.z) + 0.05;
-    let mut yaw = spawn_yaw;
-    let mut walker: Option<EntityId> = None;
+    let request = WorldEntryRequest::at(point);
+    let sea = surface.sea_surface_z();
+    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut announced = false;
 
     Engine::run("Orrun — Continent", move |world, frame| {
         if frame.first {
             world.set_clear_color(rgb(145, 195, 235));
-            world.set_sun((0.45, 1.0, 0.25), 0.28);
-            walker = Some(world.spawn(walker_mesh()));
-            stream.sync_blocking(world, pos);
+            world.set_sun((0.7, 0.75, 0.4), 0.12);
+
+            let seed = args.seed as u32;
+            let grass = world
+                .create_terrain_albedo(TerrainAlbedo::Grass, 256, seed)
+                .expect("grass albedo");
+            let sand = world
+                .create_terrain_albedo(TerrainAlbedo::Sand, 256, seed ^ 0x51)
+                .expect("sand albedo");
+            let rock = world
+                .create_terrain_albedo(TerrainAlbedo::Rock, 256, seed ^ 0x20C6)
+                .expect("rock albedo");
+            let material = world
+                .create_terrain_material(TerrainMaterialDesc {
+                    grass,
+                    sand,
+                    rock,
+                    metres_per_tile: 7.0,
+                    rock_slope_start: 0.36,
+                    rock_slope_end: 0.70,
+                    sand_height_band: 10.0,
+                    sea_surface_z: sea,
+                    tint_strength: 0.30,
+                })
+                .expect("terrain material");
+            world.set_default_terrain_material(Some(material));
+
+            let pose = session
+                .begin_entry(world, request)
+                .expect("entry point must resolve to walkable ground");
+            let g = pose.ground();
+            eprintln!(
+                "entering at ({:.0}, {:.0}) yaw={:.0}° ({:.0} m from the request)",
+                g.x,
+                g.z,
+                pose.heading().degrees(),
+                pose.offset_m()
+            );
         }
 
-        if grow_radius < target_radius && frame.time - last_grow_t > 0.12 {
-            grow_radius += 1;
-            stream.radius = grow_radius;
-            last_grow_t = frame.time;
-        }
+        session.update(world, frame).expect("world session");
 
-        yaw += frame.input.yaw_sign() * 90.0 * frame.dt;
-        let dir = frame.input.move_dir_xz(yaw);
-        if dir.length_squared() > 0.0 {
-            let speed = if frame.input.down(Key::Shift) {
-                28.0
-            } else {
-                10.0
-            };
-            pos += dir * speed * frame.dt;
+        if !announced && session.state() == SessionState::World {
+            announced = true;
+            let p = session.player_position().expect("player");
+            eprintln!(
+                "world ready: standing at ({:.0}, {:.1}, {:.0}) with {} chunks",
+                p.x,
+                p.y,
+                p.z,
+                session.stream().resident_count()
+            );
         }
-        pos.y = stream.height_at(pos.x, pos.z) + 0.05;
-        stream.sync(world, pos);
-
-        if let Some(id) = walker {
-            world
-                .set_place(id, Place::new(pos.x, pos.y, pos.z).with_yaw_deg(yaw))
-                .expect("walker");
-        }
-        world.look_follow(pos, yaw, 18.0, 10.0);
     });
 }

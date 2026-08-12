@@ -19,7 +19,8 @@ const COAST_SMOOTH_HALF_WIN: usize = 5;
 const LAKE_RESAMPLE_M: f32 = 45.0;
 const LAKE_SMOOTH_ITERS: usize = 9;
 const LAKE_SMOOTH_HALF_WIN: usize = 3;
-const RIVER_MEANDER_FRAC: f32 = 0.28;
+const RIVER_MEANDER_FRAC: f32 = 0.18;
+const RIVER_CURVE_SPACING_M: f32 = 36.0;
 
 /// River-like shore meander: amplitudes (m) and wavelengths along the perimeter (m).
 #[derive(Clone, Copy)]
@@ -83,12 +84,14 @@ pub struct RiverPolyline {
 pub struct LakeOutline {
     pub id: i32,
     pub surface_z: f32,
+    /// The one authored outline: drawn by the atlas and queried by the surface.
     pub ring: Vec<Vec2>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CoastRing {
     pub landmass_id: i32,
+    /// The one authored outline: drawn by the atlas and queried by the surface.
     pub ring: Vec<Vec2>,
 }
 
@@ -168,8 +171,17 @@ fn half_width_for_class(class: i32) -> f32 {
 
 fn build_rivers(atlas: &ContinentAtlas, sea: f32, seed: u32) -> Vec<RiverPolyline> {
     let size = atlas.size as i32;
-    let mut out = Vec::new();
-    let mut next_id = 1_i32;
+
+    struct Seg {
+        a_edge: Option<(i32, i32)>,
+        b_edge: Option<(i32, i32)>,
+        pts: Vec<Vec2>,
+        zs: Vec<f32>,
+        class: i32,
+        sink: HydroSink,
+    }
+
+    let mut segs: Vec<Seg> = Vec::new();
     for (&cell_idx, links) in &atlas.river_links {
         let ax = cell_idx % size;
         let az = cell_idx / size;
@@ -184,20 +196,245 @@ fn build_rivers(atlas: &ContinentAtlas, sea: f32, seed: u32) -> Vec<RiverPolylin
             let b = endpoint_metres(atlas, ax, az, link.b);
             let za = sheet_for_endpoint(atlas, sea, link.a, ax, az);
             let zb = sheet_for_endpoint(atlas, sea, link.b, ax, az);
-            let mid = meander_mid(a, b, seed, cell_idx, link.feature_id);
-            let zm = (za + zb) * 0.5;
-            out.push(RiverPolyline {
-                id: next_id,
+            let (pts, zs) = meander_controls(a, b, za, zb, seed, cell_idx, link.feature_id);
+            segs.push(Seg {
+                a_edge: edge_port_key(link.a),
+                b_edge: edge_port_key(link.b),
+                pts,
+                zs,
                 class: link.feature_class,
-                points: vec![a, mid, b],
-                surface_z: vec![za, zm, zb],
-                half_width_m: half_width_for_class(link.feature_class),
                 sink,
             });
-            next_id += 1;
         }
     }
+
+    let mut by_start: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
+    let mut by_end: FxHashMap<(i32, i32), Vec<usize>> = FxHashMap::default();
+    for (i, seg) in segs.iter().enumerate() {
+        if let Some(k) = seg.a_edge {
+            by_start.entry(k).or_default().push(i);
+        }
+        if let Some(k) = seg.b_edge {
+            by_end.entry(k).or_default().push(i);
+        }
+    }
+
+    let unique_succ = |i: usize| -> Option<usize> {
+        let k = segs[i].b_edge?;
+        let starts = by_start.get(&k)?;
+        let ends = by_end.get(&k)?;
+        if starts.len() == 1 && ends.len() == 1 {
+            Some(starts[0])
+        } else {
+            None
+        }
+    };
+    let unique_pred = |i: usize| -> Option<usize> {
+        let k = segs[i].a_edge?;
+        let starts = by_start.get(&k)?;
+        let ends = by_end.get(&k)?;
+        if starts.len() == 1 && ends.len() == 1 {
+            Some(ends[0])
+        } else {
+            None
+        }
+    };
+
+    let mut used = vec![false; segs.len()];
+    let mut out = Vec::new();
+    let mut next_id = 1_i32;
+    for start in 0..segs.len() {
+        if used[start] {
+            continue;
+        }
+        let mut cur = start;
+        while let Some(pred) = unique_pred(cur) {
+            if used[pred] {
+                break;
+            }
+            cur = pred;
+        }
+        let mut chain = Vec::new();
+        loop {
+            if used[cur] {
+                break;
+            }
+            used[cur] = true;
+            chain.push(cur);
+            match unique_succ(cur) {
+                Some(n) if !used[n] => cur = n,
+                _ => break,
+            }
+        }
+        if chain.is_empty() {
+            continue;
+        }
+
+        let mut points = Vec::new();
+        let mut surface_z = Vec::new();
+        let mut class = 1_i32;
+        let mut sink = segs[chain[0]].sink;
+        for (ci, &si) in chain.iter().enumerate() {
+            let seg = &segs[si];
+            class = class.max(seg.class);
+            sink = seg.sink;
+            let start_j = if ci == 0 { 0 } else { 1 };
+            for j in start_j..seg.pts.len() {
+                points.push(seg.pts[j]);
+                surface_z.push(seg.zs[j]);
+            }
+        }
+        let (points, surface_z) = fluent_open_river(&points, &surface_z, RIVER_CURVE_SPACING_M);
+        if points.len() < 2 {
+            continue;
+        }
+        out.push(RiverPolyline {
+            id: next_id,
+            class,
+            points,
+            surface_z,
+            half_width_m: half_width_for_class(class),
+            sink,
+        });
+        next_id += 1;
+    }
     out
+}
+
+fn edge_port_key(ep: Endpoint) -> Option<(i32, i32)> {
+    match ep.kind {
+        EndpointKind::EdgePort => Some((ep.ref_id, ep.port_id)),
+        _ => None,
+    }
+}
+
+/// Smooth a stitched river control polyline into a continuous open curve.
+fn fluent_open_river(points: &[Vec2], zs: &[f32], spacing_m: f32) -> (Vec<Vec2>, Vec<f32>) {
+    assert_eq!(points.len(), zs.len());
+    if points.len() < 2 {
+        return (points.to_vec(), zs.to_vec());
+    }
+    let (smooth_p, smooth_z) = chaikin_open(points, zs, 2);
+    let curved = catmull_rom_open(&smooth_p, spacing_m.max(12.0));
+    let zs_out = sample_z_along(&smooth_p, &smooth_z, &curved);
+    (curved, zs_out)
+}
+
+fn chaikin_open(points: &[Vec2], zs: &[f32], iters: usize) -> (Vec<Vec2>, Vec<f32>) {
+    if points.len() < 3 {
+        return (points.to_vec(), zs.to_vec());
+    }
+    let mut cur_p = points.to_vec();
+    let mut cur_z = zs.to_vec();
+    for _ in 0..iters {
+        let n = cur_p.len();
+        let mut next_p = Vec::with_capacity(n * 2);
+        let mut next_z = Vec::with_capacity(n * 2);
+        next_p.push(cur_p[0]);
+        next_z.push(cur_z[0]);
+        for i in 0..n - 1 {
+            let a = cur_p[i];
+            let b = cur_p[i + 1];
+            let za = cur_z[i];
+            let zb = cur_z[i + 1];
+            next_p.push(a * 0.75 + b * 0.25);
+            next_z.push(za * 0.75 + zb * 0.25);
+            next_p.push(a * 0.25 + b * 0.75);
+            next_z.push(za * 0.25 + zb * 0.75);
+        }
+        next_p.push(cur_p[n - 1]);
+        next_z.push(cur_z[n - 1]);
+        cur_p = next_p;
+        cur_z = next_z;
+    }
+    (cur_p, cur_z)
+}
+
+fn catmull_rom_open(controls: &[Vec2], spacing_m: f32) -> Vec<Vec2> {
+    let n = controls.len();
+    if n < 2 {
+        return controls.to_vec();
+    }
+    if n == 2 {
+        let mut out = vec![controls[0]];
+        let seg = controls[1] - controls[0];
+        let len = seg.length();
+        if len > spacing_m {
+            let steps = (len / spacing_m).ceil() as usize;
+            for s in 1..steps {
+                out.push(controls[0] + seg * (s as f32 / steps as f32));
+            }
+        }
+        out.push(controls[1]);
+        return out;
+    }
+    let mut out = Vec::new();
+    for i in 0..n - 1 {
+        let p0 = if i == 0 {
+            controls[0] * 2.0 - controls[1]
+        } else {
+            controls[i - 1]
+        };
+        let p1 = controls[i];
+        let p2 = controls[i + 1];
+        let p3 = if i + 2 < n {
+            controls[i + 2]
+        } else {
+            controls[n - 1] * 2.0 - controls[n - 2]
+        };
+        let seg_len = p1.distance(p2).max(1.0);
+        let steps = ((seg_len / spacing_m).ceil() as usize).clamp(2, 48);
+        let s0 = if i == 0 { 0 } else { 1 };
+        for s in s0..steps {
+            let t = s as f32 / steps as f32;
+            out.push(catmull_rom_point(p0, p1, p2, p3, t));
+        }
+    }
+    out.push(controls[n - 1]);
+    out
+}
+
+fn sample_z_along(controls: &[Vec2], zs: &[f32], samples: &[Vec2]) -> Vec<f32> {
+    assert_eq!(controls.len(), zs.len());
+    if controls.len() < 2 {
+        return vec![zs.first().copied().unwrap_or(0.0); samples.len()];
+    }
+    let mut cum = vec![0.0_f32; controls.len()];
+    for i in 1..controls.len() {
+        cum[i] = cum[i - 1] + controls[i].distance(controls[i - 1]);
+    }
+    samples
+        .iter()
+        .map(|p| {
+            // Nearest projection onto control polyline (arc parameter).
+            let mut best_d = f32::MAX;
+            let mut best_s = 0.0_f32;
+            for i in 0..controls.len() - 1 {
+                let a = controls[i];
+                let b = controls[i + 1];
+                let ab = b - a;
+                let len_sq = ab.length_squared().max(1e-8);
+                let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+                let q = a + ab * t;
+                let d = p.distance_squared(q);
+                if d < best_d {
+                    best_d = d;
+                    best_s = cum[i] + (cum[i + 1] - cum[i]) * t;
+                }
+            }
+            // Piecewise-linear z by arc length.
+            let mut i = 0usize;
+            while i + 1 < cum.len() && cum[i + 1] < best_s {
+                i += 1;
+            }
+            if i + 1 >= cum.len() {
+                return *zs.last().expect("non-empty");
+            }
+            let span = (cum[i + 1] - cum[i]).max(1e-6);
+            let u = ((best_s - cum[i]) / span).clamp(0.0, 1.0);
+            zs[i] + (zs[i + 1] - zs[i]) * u
+        })
+        .collect()
 }
 
 fn link_sink(link: &Link) -> Option<HydroSink> {
@@ -205,9 +442,7 @@ fn link_sink(link: &Link) -> Option<HydroSink> {
         match ep.kind {
             EndpointKind::Ocean => return Some(HydroSink::Ocean),
             EndpointKind::Lake => {
-                return Some(HydroSink::Lake {
-                    lake_id: ep.ref_id,
-                });
+                return Some(HydroSink::Lake { lake_id: ep.ref_id });
             }
             _ => {}
         }
@@ -241,18 +476,43 @@ fn sheet_for_endpoint(atlas: &ContinentAtlas, sea: f32, ep: Endpoint, ax: i32, a
     }
 }
 
-fn meander_mid(a: Vec2, b: Vec2, seed: u32, cell_idx: i32, feature_id: i32) -> Vec2 {
+/// Several meander controls between cell endpoints (pinned) for a natural bend.
+fn meander_controls(
+    a: Vec2,
+    b: Vec2,
+    za: f32,
+    zb: f32,
+    seed: u32,
+    cell_idx: i32,
+    feature_id: i32,
+) -> (Vec<Vec2>, Vec<f32>) {
     let ab = b - a;
     let len = ab.length();
-    if len < 1.0 {
-        return (a + b) * 0.5;
+    if len < 8.0 {
+        return (vec![a, b], vec![za, zb]);
     }
     let dir = ab / len;
     let perp = Vec2::new(-dir.y, dir.x);
-    let h = hash_u32(seed, cell_idx as u32, feature_id as u32);
-    let side = if h & 1 == 0 { 1.0 } else { -1.0 };
-    let amp = len * RIVER_MEANDER_FRAC * (0.55 + 0.45 * ((h >> 1) as f32 / u32::MAX as f32));
-    (a + b) * 0.5 + perp * (side * amp)
+    let h0 = hash_u32(seed, cell_idx as u32, feature_id as u32);
+    let mut pts = vec![a];
+    let mut zs = vec![za];
+    // Two interior bends — enough for Catmull to look like a river, not a chevron.
+    for k in 1..=2 {
+        let t = k as f32 / 3.0;
+        let h = hash_u32(h0, k as u32, feature_id as u32);
+        let side = if ((h >> k) & 1) == 0 { 1.0 } else { -1.0 };
+        let amp = len
+            * RIVER_MEANDER_FRAC
+            * (0.45 + 0.55 * ((h >> 3) as f32 / u32::MAX as f32))
+            * (std::f32::consts::PI * t).sin();
+        let phase = ((h >> 8) as f32 / u32::MAX as f32 - 0.5) * 0.15;
+        let tt = (t + phase).clamp(0.12, 0.88);
+        pts.push(a + dir * (len * tt) + perp * (side * amp));
+        zs.push(za + (zb - za) * tt);
+    }
+    pts.push(b);
+    zs.push(zb);
+    (pts, zs)
 }
 
 fn build_lakes(atlas: &ContinentAtlas, seed: u32) -> Vec<LakeOutline> {
@@ -307,7 +567,9 @@ fn build_coasts(atlas: &ContinentAtlas, seed: u32) -> Vec<CoastRing> {
             if !biomes::is_land(biome) {
                 continue;
             }
-            let entry = by_mass.entry(lm).or_insert_with(|| vec![false; size * size]);
+            let entry = by_mass
+                .entry(lm)
+                .or_insert_with(|| vec![false; size * size]);
             entry[idx] = true;
         }
     }
@@ -611,15 +873,13 @@ fn meander_ring(ring: &mut [Vec2], seed: u32, style: ShoreMeander) {
         let coarse_n = noise.fbm2(u_c + wx, 0.17, 3, 2.05, 0.52);
         let mid = noise.fbm2(u_mid * 1.05, 0.91 + wx * 0.5, 2, 2.0, 0.55);
         let fine = noise.fbm2(u_f * 1.15, 1.9 + wx, 2, 2.0, 0.55);
-        let micro = grit.sample2(u_m * 1.4, 3.4) * 0.65
-            + grit.sample2(u_m * 2.7, 5.1) * 0.35;
+        let micro = grit.sample2(u_m * 1.4, 3.4) * 0.65 + grit.sample2(u_m * 2.7, 5.1) * 0.35;
         let lateral = (bay * 0.7 + coarse_n * 0.3) * style.coarse_m
             + mid * style.mid_m
             + fine * style.fine_m
             + micro * style.micro_m;
-        let drift = mid * style.mid_m * 0.18
-            + fine * style.fine_m * 0.25
-            + micro * style.micro_m * 0.2;
+        let drift =
+            mid * style.mid_m * 0.18 + fine * style.fine_m * 0.25 + micro * style.micro_m * 0.2;
         let nrm = normals[i];
         let tang = Vec2::new(-nrm.y, nrm.x);
         let w = tip[i];
@@ -703,14 +963,17 @@ fn build_cell_index(
     let mut cell_coasts = vec![Vec::new(); size * size];
 
     for (ri, river) in rivers.iter().enumerate() {
-        let pad = river.half_width_m + 40.0;
+        // Pad covers outer valley carve (~4× channel / class radii), not just wet width.
+        let pad = (river.half_width_m * 5.0).max(240.0);
         stamp_polyline(&mut cell_rivers, size, ri as u32, &river.points, pad);
     }
     for (li, lake) in lakes.iter().enumerate() {
         stamp_ring_aabb(&mut cell_lakes, size, li as u32, &lake.ring, 80.0);
     }
     for (ci, coast) in coasts.iter().enumerate() {
-        stamp_ring_aabb(&mut cell_coasts, size, ci as u32, &coast.ring, 120.0);
+        // Wide pad so nearshore ocean keeps an indexed coast id. Beyond the
+        // pad, `coast_signed` treats empty index as open ocean (no full-ring scan).
+        stamp_ring_aabb(&mut cell_coasts, size, ci as u32, &coast.ring, 4_000.0);
     }
     (cell_rivers, cell_lakes, cell_coasts)
 }
@@ -807,7 +1070,10 @@ fn endpoint_metres(atlas: &ContinentAtlas, ax: i32, az: i32, ep: Endpoint) -> Ve
 }
 
 fn cell_centre(ax: i32, az: i32) -> Vec2 {
-    Vec2::new((ax as f32 + 0.5) * CELL_METRES, (az as f32 + 0.5) * CELL_METRES)
+    Vec2::new(
+        (ax as f32 + 0.5) * CELL_METRES,
+        (az as f32 + 0.5) * CELL_METRES,
+    )
 }
 
 fn hash_u32(a: u32, b: u32, c: u32) -> u32 {

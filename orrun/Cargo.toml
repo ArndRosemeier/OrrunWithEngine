@@ -18,6 +18,14 @@ path = "src/bin/hamlet_lab.rs"
 name = "continent"
 path = "src/bin/continent.rs"
 
+[[bin]]
+name = "void_walk_diag"
+path = "src/bin/void_walk_diag.rs"
+
+[[bin]]
+name = "chunk_cost"
+path = "src/bin/chunk_cost.rs"
+
 [dependencies]
 engine = { workspace = true }
 glam = { workspace = true }
@@ -25,3 +33,4 @@ thiserror = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rustc-hash = { workspace = true }
+rayon = { workspace = true }

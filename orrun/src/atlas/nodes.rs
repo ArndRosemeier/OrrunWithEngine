@@ -1,8 +1,8 @@
 //! Typed road / settlement node seeding.
 
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rustc_hash::FxHashMap;
 
 use super::biomes;

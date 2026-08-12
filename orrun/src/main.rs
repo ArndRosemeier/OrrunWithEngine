@@ -1,21 +1,29 @@
-//! Orrun atlas viewer — full-screen pan/zoom map.
+//! Orrun — atlas map and walkable continent in one process.
 //!
 //! Usage: `cargo run -p orrun -- [seed] [size]`
-//! Controls: drag to pan, scroll to zoom, F to fit, Escape to quit.
-//! Hover shows cell fields; zoom past ~56 px/cell draws them inside cells.
-//! Right-click a cell to bake & keep its vector sublayer; C clears sublayers.
+//!
+//! Map: drag to pan · scroll to zoom · F fit · left click picks an exact spot ·
+//! Enter or double click walks there · right click reveals a cell overlay ·
+//! C clears overlays.
+//! World: WASD move · Q/E turn · Shift sprint · M back to the map · Esc quit.
+
+use std::sync::Arc;
 
 use engine::egui::{
-    self, Align2, ColorImage, Color32, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
+    self, Align2, Color32, ColorImage, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
 use engine::prelude::*;
-use orrun::atlas::cell_sublayer::{CellSublayer, SublayerStore, WaterBodyKind};
+use orrun::atlas::cell_overlay::{AtlasCellOverlay, OverlayStore, WaterBodyKind};
 use orrun::atlas::features::{edge_owner, Dir};
 use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
+use orrun::world::{
+    AtlasBounds, AtlasCell, ContinentalSurface, MapPoint, SessionState, WorldEntryRequest,
+    WorldSession,
+};
 
 const MIN_ZOOM: f32 = 0.15;
 const MAX_ZOOM: f32 = 384.0;
@@ -24,7 +32,9 @@ const ZOOM_STEP: f32 = 1.15;
 const DETAIL_CELL_PX: f32 = 56.0;
 
 struct AtlasViewer {
-    atlas: ContinentAtlas,
+    atlas: Arc<ContinentAtlas>,
+    surface: Arc<ContinentalSurface>,
+    bounds: AtlasBounds,
     pixels: Vec<u8>,
     texture: Option<TextureHandle>,
     /// Screen pixels per atlas cell.
@@ -32,24 +42,28 @@ struct AtlasViewer {
     /// Top-left of the map in panel coordinates.
     pan: Vec2,
     needs_fit: bool,
-    /// Right-click revealed cell vector sublayers (persisted for the session).
-    sublayers: SublayerStore,
-    last_sublayer_note: Option<String>,
+    overlays: OverlayStore,
+    /// Exact point the player picked to walk to.
+    selection: Option<MapPoint>,
+    note: Option<String>,
 }
 
 impl AtlasViewer {
-    fn new(seed: i32, size: usize) -> Self {
-        let atlas = ContinentAtlas::generate(seed, size);
+    fn new(atlas: Arc<ContinentAtlas>, surface: Arc<ContinentalSurface>) -> Self {
         let pixels = preview::biome_rgba(&atlas);
+        let bounds = surface.bounds();
         Self {
             atlas,
+            surface,
+            bounds,
             pixels,
             texture: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
             needs_fit: true,
-            sublayers: SublayerStore::default(),
-            last_sublayer_note: None,
+            overlays: OverlayStore::default(),
+            selection: None,
+            note: None,
         }
     }
 
@@ -79,15 +93,14 @@ impl AtlasViewer {
         self.pan = screen_in_panel.to_vec2() - before * self.zoom;
     }
 
-    fn screen_to_cell(&self, screen_in_panel: Pos2) -> Option<(i32, i32)> {
+    /// Exact fractional map position under a panel-local point.
+    fn screen_to_map(&self, screen_in_panel: Pos2) -> Option<MapPoint> {
         let map_pos = (screen_in_panel.to_vec2() - self.pan) / self.zoom;
-        let ax = map_pos.x.floor() as i32;
-        let az = map_pos.y.floor() as i32;
-        if self.atlas.in_bounds(ax, az) {
-            Some((ax, az))
-        } else {
-            None
-        }
+        MapPoint::from_cell_units(self.bounds, map_pos.x as f64, map_pos.y as f64).ok()
+    }
+
+    fn screen_to_cell(&self, screen_in_panel: Pos2) -> Option<AtlasCell> {
+        self.screen_to_map(screen_in_panel).map(|p| p.cell())
     }
 
     fn cell_to_panel(&self, ax: i32, az: i32) -> Pos2 {
@@ -183,22 +196,22 @@ impl AtlasViewer {
         let stroke = Stroke::new(line_w, color);
 
         let dist2 = |p: Pos2, q: Pos2| (p - q).length_sq();
-        let points: Vec<Pos2> = if dist2(a, b) < 0.25 || dist2(a, mid) < 0.25 || dist2(b, mid) < 0.25
-        {
-            vec![a, b]
-        } else {
-            let steps = 6;
-            (0..=steps)
-                .map(|step| {
-                    let t = step as f32 / steps as f32;
-                    let omt = 1.0 - t;
-                    Pos2::new(
-                        omt * omt * a.x + 2.0 * omt * t * mid.x + t * t * b.x,
-                        omt * omt * a.y + 2.0 * omt * t * mid.y + t * t * b.y,
-                    )
-                })
-                .collect()
-        };
+        let points: Vec<Pos2> =
+            if dist2(a, b) < 0.25 || dist2(a, mid) < 0.25 || dist2(b, mid) < 0.25 {
+                vec![a, b]
+            } else {
+                let steps = 6;
+                (0..=steps)
+                    .map(|step| {
+                        let t = step as f32 / steps as f32;
+                        let omt = 1.0 - t;
+                        Pos2::new(
+                            omt * omt * a.x + 2.0 * omt * t * mid.x + t * t * b.x,
+                            omt * omt * a.y + 2.0 * omt * t * mid.y + t * t * b.y,
+                        )
+                    })
+                    .collect()
+            };
         for win in points.windows(2) {
             painter.line_segment([win[0], win[1]], stroke);
         }
@@ -268,7 +281,8 @@ impl AtlasViewer {
         }
     }
 
-    fn hover_line(&self, ax: i32, az: i32) -> String {
+    fn hover_line(&self, cell: AtlasCell) -> String {
+        let (ax, az) = (cell.ax(), cell.az());
         let packed = self.atlas.cell_at(ax, az);
         let biome = pack::biome(packed);
         let elev = pack::elevation(packed);
@@ -286,10 +300,10 @@ impl AtlasViewer {
         )
     }
 
-    fn reveal_sublayer(&mut self, ax: i32, az: i32) {
-        let layer = self.sublayers.reveal(&self.atlas, ax, az);
-        self.last_sublayer_note = Some(layer.summary.clone());
-        eprintln!("{}", layer.summary);
+    fn reveal_overlay(&mut self, cell: AtlasCell) {
+        let overlay = self.overlays.reveal(&self.atlas, &self.surface, cell);
+        self.note = Some(overlay.summary.clone());
+        eprintln!("{}", overlay.summary);
     }
 
     fn local_to_panel(&self, panel_origin: Pos2, ax: i32, az: i32, local: [f32; 2]) -> Pos2 {
@@ -300,24 +314,23 @@ impl AtlasViewer {
         )
     }
 
-    fn draw_sublayers(&self, painter: &egui::Painter, panel_origin: Pos2) {
-        for layer in self.sublayers.cells.values() {
-            self.draw_one_sublayer(painter, panel_origin, layer);
+    fn draw_overlays(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        for overlay in self.overlays.cells.values() {
+            self.draw_one_overlay(painter, panel_origin, overlay);
         }
     }
 
-    fn draw_one_sublayer(
+    fn draw_one_overlay(
         &self,
         painter: &egui::Painter,
         panel_origin: Pos2,
-        layer: &CellSublayer,
+        overlay: &AtlasCellOverlay,
     ) {
-        let ax = layer.ax;
-        let az = layer.az;
+        let ax = overlay.ax();
+        let az = overlay.az();
         let cell_origin = panel_origin + self.cell_to_panel(ax, az).to_vec2();
         let cell_rect = Rect::from_min_size(cell_origin, Vec2::splat(self.zoom));
 
-        // Dim cell so vectors read clearly when zoomed out a bit.
         painter.rect_filled(cell_rect, 0.0, Color32::from_black_alpha(40));
         painter.rect_stroke(
             cell_rect,
@@ -326,12 +339,12 @@ impl AtlasViewer {
             StrokeKind::Inside,
         );
 
-        // Hydro shore field: repaint both wet and dry so biome stairs don't show through.
-        if let Some(water) = &layer.water {
+        if let Some(water) = &overlay.water {
             let res = water.res.max(1) as f32;
             let wet_fill = match water.kind {
                 WaterBodyKind::Ocean => Color32::from_rgba_unmultiplied(35, 105, 195, 210),
                 WaterBodyKind::Lake { .. } => Color32::from_rgba_unmultiplied(50, 135, 205, 215),
+                WaterBodyKind::River => Color32::from_rgba_unmultiplied(45, 145, 225, 215),
             };
             let dry_fill = Color32::from_rgba_unmultiplied(118, 145, 88, 200);
             let step = self.zoom / res;
@@ -351,7 +364,6 @@ impl AtlasViewer {
                     );
                 }
             }
-            // Authoritative hydro coast/lake segments (continuous across cell edges).
             for line in &water.shore_lines {
                 let pts: Vec<Pos2> = line
                     .iter()
@@ -366,8 +378,7 @@ impl AtlasViewer {
             }
         }
 
-        // River ribbons (blue waterways) + pale centreline for edge connectivity.
-        for river in &layer.rivers {
+        for river in &overlay.rivers {
             let pts: Vec<Pos2> = river
                 .points
                 .iter()
@@ -388,8 +399,7 @@ impl AtlasViewer {
             }
         }
 
-        // Roads (gold).
-        for road in &layer.roads {
+        for road in &overlay.roads {
             let pts: Vec<Pos2> = road
                 .points
                 .iter()
@@ -403,7 +413,28 @@ impl AtlasViewer {
                 );
             }
         }
+    }
 
+    fn draw_selection(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        let Some(point) = self.selection else {
+            return;
+        };
+        let (fx, fz) = point.fraction();
+        let cell = point.cell();
+        let p = panel_origin
+            + self
+                .local_to_panel(Pos2::ZERO, cell.ax(), cell.az(), [fx, fz])
+                .to_vec2();
+        let r = (self.zoom * 0.12).clamp(5.0, 18.0);
+        painter.circle_stroke(p, r, Stroke::new(2.5_f32, Color32::from_rgb(255, 245, 200)));
+        painter.line_segment(
+            [Pos2::new(p.x - r * 1.6, p.y), Pos2::new(p.x + r * 1.6, p.y)],
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 200)),
+        );
+        painter.line_segment(
+            [Pos2::new(p.x, p.y - r * 1.6), Pos2::new(p.x, p.y + r * 1.6)],
+            Stroke::new(1.5_f32, Color32::from_rgb(255, 245, 200)),
+        );
     }
 
     fn draw_cell_details(&self, painter: &egui::Painter, panel_origin: Pos2, panel_size: Vec2) {
@@ -479,171 +510,330 @@ impl AtlasViewer {
 
 fn parse_args() -> (i32, usize) {
     let mut args = std::env::args().skip(1);
-    let seed = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(20260809);
+    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(20260809);
     let size = args.next().and_then(|s| s.parse().ok()).unwrap_or(256);
     (seed, size.max(32))
+}
+
+fn setup_terrain_material(world: &mut World, seed: i32, sea_surface_z: f32) {
+    let tex_seed = seed as u32;
+    let grass = world
+        .create_terrain_albedo(TerrainAlbedo::Grass, 256, tex_seed)
+        .expect("grass albedo");
+    let sand = world
+        .create_terrain_albedo(TerrainAlbedo::Sand, 256, tex_seed ^ 0x51)
+        .expect("sand albedo");
+    let rock = world
+        .create_terrain_albedo(TerrainAlbedo::Rock, 256, tex_seed ^ 0x20C6)
+        .expect("rock albedo");
+    let material = world
+        .create_terrain_material(TerrainMaterialDesc {
+            grass,
+            sand,
+            rock,
+            metres_per_tile: 7.0,
+            rock_slope_start: 0.36,
+            rock_slope_end: 0.70,
+            sand_height_band: 10.0,
+            sea_surface_z,
+            tint_strength: 0.30,
+        })
+        .expect("terrain material");
+    world.set_default_terrain_material(Some(material));
 }
 
 fn main() {
     let (seed, size) = parse_args();
     eprintln!("generating atlas seed={seed} size={size}…");
-    let mut viewer = AtlasViewer::new(seed, size);
-    if std::env::var_os("ORRUN_REVEAL_SHORES").is_some() {
-        eprintln!("revealing all shore sublayers…");
-        viewer.sublayers.reveal_all_shores(&viewer.atlas);
-        eprintln!("revealed {} cells", viewer.sublayers.len());
-        // Frame a coast for screenshots.
-        if let Some(((ax, az), _)) = viewer
-            .sublayers
-            .cells
-            .iter()
-            .find(|(_, l)| matches!(l.biome, orrun::atlas::Biome::Coast))
-        {
-            viewer.zoom = 120.0;
-            viewer.pan = Vec2::new(
-                400.0 - *ax as f32 * viewer.zoom,
-                300.0 - *az as f32 * viewer.zoom,
-            );
-            viewer.needs_fit = false;
-        }
-    }
+    let atlas = Arc::new(ContinentAtlas::generate(seed, size));
+    let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     eprintln!(
-        "ready: lakes={} nodes={} river_edges={} road_edges={} hash={:#x}",
-        viewer.atlas.lakes.len(),
-        viewer.atlas.nodes.len(),
-        viewer.atlas.river_ports.len(),
-        viewer.atlas.road_ports.len(),
-        viewer.atlas.content_hash as u32,
+        "ready: lakes={} rivers={} coasts={} nodes={} hash={:#x}",
+        atlas.hydro.lakes.len(),
+        atlas.hydro.rivers.len(),
+        atlas.hydro.coasts.len(),
+        atlas.nodes.len(),
+        atlas.content_hash as u32,
     );
 
-    Engine::run("Orrun — Atlas", move |world, frame| {
+    let mut viewer = AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface));
+    let sea = surface.sea_surface_z();
+
+    Engine::run("Orrun", move |world, frame| {
         if frame.first {
-            world.clear_color = engine::Color::rgb(12, 14, 18);
+            world.set_sun((0.7, 0.75, 0.4), 0.12);
+            setup_terrain_material(world, seed, sea);
         }
 
-        let ctx = frame.ui.ctx().clone();
-        let texture = viewer.ensure_texture(&ctx);
+        match session.state() {
+            SessionState::World => world.set_clear_color(rgb(145, 195, 235)),
+            _ => world.set_clear_color(rgb(12, 14, 18)),
+        }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
-            .show(&ctx, |ui| {
-                let panel = ui.available_size();
-                if viewer.needs_fit {
-                    viewer.fit(panel);
-                }
-                if ui.input(|i| i.key_pressed(egui::Key::F)) {
-                    viewer.fit(panel);
-                }
+        if let Err(err) = session.update(world, frame) {
+            panic!("world session failed: {err}");
+        }
 
-                let (rect, response) =
-                    ui.allocate_exact_size(panel, Sense::click_and_drag() | Sense::click());
+        match session.state() {
+            SessionState::Atlas => draw_atlas(&mut viewer, &mut session, world, frame),
+            SessionState::Loading => draw_loading(&viewer, &session, frame),
+            SessionState::World => draw_world_hud(&mut session, frame),
+        }
+    });
+}
 
-                if response.dragged_by(PointerButton::Primary) {
-                    viewer.pan += response.drag_delta();
-                }
+fn draw_atlas(
+    viewer: &mut AtlasViewer,
+    session: &mut WorldSession,
+    world: &mut World,
+    frame: &Frame,
+) {
+    let ctx = frame.ui.ctx().clone();
+    let texture = viewer.ensure_texture(&ctx);
 
-                let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
-                if response.hovered() && scroll_y != 0.0 {
-                    let factor = if scroll_y > 0.0 {
-                        ZOOM_STEP
-                    } else {
-                        1.0 / ZOOM_STEP
-                    };
-                    let pivot = ui
-                        .input(|i| i.pointer.hover_pos())
-                        .unwrap_or_else(|| rect.center());
-                    let local = Pos2::new(pivot.x - rect.min.x, pivot.y - rect.min.y);
-                    viewer.zoom_at(local, factor);
-                }
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
+        .show(&ctx, |ui| {
+            let panel = ui.available_size();
+            if viewer.needs_fit {
+                viewer.fit(panel);
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::F)) {
+                viewer.fit(panel);
+            }
 
-                if ui.input(|i| i.key_pressed(egui::Key::C)) {
-                    viewer.sublayers.clear();
-                    viewer.last_sublayer_note = Some("cleared cell sublayers".into());
-                }
+            let (rect, response) =
+                ui.allocate_exact_size(panel, Sense::click_and_drag() | Sense::click());
 
-                // Right-click: bake & keep vector sublayer for that cell.
-                if response.hovered() {
-                    let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+            if response.dragged_by(PointerButton::Primary) {
+                viewer.pan += response.drag_delta();
+            }
+
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if response.hovered() && scroll_y != 0.0 {
+                let factor = if scroll_y > 0.0 {
+                    ZOOM_STEP
+                } else {
+                    1.0 / ZOOM_STEP
+                };
+                let pivot = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or_else(|| rect.center());
+                let local = Pos2::new(pivot.x - rect.min.x, pivot.y - rect.min.y);
+                viewer.zoom_at(local, factor);
+            }
+
+            if ui.input(|i| i.key_pressed(egui::Key::C)) {
+                viewer.overlays.clear();
+                viewer.note = Some("cleared cell overlays".into());
+            }
+
+            let pointer = ui
+                .input(|i| i.pointer.interact_pos())
+                .map(|p| Pos2::new(p.x - rect.min.x, p.y - rect.min.y));
+
+            // Left click picks the exact spot; right click reveals the overlay.
+            if response.hovered() {
+                let primary = ui.input(|i| i.pointer.button_clicked(PointerButton::Primary));
+                let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
+                if let Some(local) = pointer {
+                    if primary && !response.dragged_by(PointerButton::Primary) {
+                        if let Some(point) = viewer.screen_to_map(local) {
+                            viewer.selection = Some(point);
+                            let g = point.to_global();
+                            let wet = viewer.surface.is_wet(g);
+                            viewer.note = Some(format!(
+                                "selected ({:.0} m, {:.0} m){}  —  Enter to walk there",
+                                g.x,
+                                g.z,
+                                if wet { "  [open water]" } else { "" }
+                            ));
+                        }
+                    }
                     if secondary {
-                        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                            let local = Pos2::new(p.x - rect.min.x, p.y - rect.min.y);
-                            if let Some((ax, az)) = viewer.screen_to_cell(local) {
-                                viewer.reveal_sublayer(ax, az);
-                            }
+                        if let Some(cell) = viewer.screen_to_cell(local) {
+                            viewer.reveal_overlay(cell);
                         }
                     }
                 }
+            }
 
-                let hover_cell = ui
-                    .input(|i| i.pointer.hover_pos())
-                    .filter(|_| response.hovered())
-                    .and_then(|p| {
-                        let local = Pos2::new(p.x - rect.min.x, p.y - rect.min.y);
-                        viewer.screen_to_cell(local)
-                    });
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter))
+                || response.double_clicked_by(PointerButton::Primary);
+            if enter {
+                enter_world(viewer, session, world);
+            }
 
-                let map = viewer.atlas.size as f32;
-                let image_rect =
-                    Rect::from_min_size(rect.min + viewer.pan, Vec2::splat(map * viewer.zoom));
-                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                let painter = ui.painter().with_clip_rect(rect);
-                painter.image(texture.id(), image_rect, uv, Color32::WHITE);
-
-                // Cell text under corridors so rivers/roads stay continuous when zoomed in.
-                if viewer.zoom >= DETAIL_CELL_PX {
-                    viewer.draw_cell_details(&painter, rect.min, panel);
-                }
-                viewer.draw_feature_overlays(&painter, rect.min);
-                viewer.draw_sublayers(&painter, rect.min);
-
-                let status = format!(
-                    "seed {}  |  {} km  |  zoom {:.1} px/cell  |  sublayers {}  |  drag pan  |  scroll zoom  |  F fit  |  RMB cell vector  |  C clear{}",
-                    viewer.atlas.world_seed,
-                    viewer.atlas.size,
-                    viewer.zoom,
-                    viewer.sublayers.len(),
-                    if viewer.zoom < DETAIL_CELL_PX {
-                        "  |  zoom in for cell text"
-                    } else {
-                        ""
-                    },
-                );
-                let hover_text = hover_cell.map(|(ax, az)| {
-                    let base = viewer.hover_line(ax, az);
-                    if viewer.sublayers.cells.contains_key(&(ax, az)) {
-                        format!("{base}  |  SUBLAYER ON")
-                    } else {
-                        format!("{base}  |  RMB → vector sublayer")
-                    }
+            let hover_cell = ui
+                .input(|i| i.pointer.hover_pos())
+                .filter(|_| response.hovered())
+                .and_then(|p| {
+                    let local = Pos2::new(p.x - rect.min.x, p.y - rect.min.y);
+                    viewer.screen_to_cell(local)
                 });
 
-                egui::Area::new(egui::Id::new("atlas_hud"))
-                    .fixed_pos(egui::pos2(12.0, 12.0))
-                    .order(egui::Order::Foreground)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style())
-                            .inner_margin(egui::Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(&status).size(14.0));
-                                if let Some(line) = &hover_text {
-                                    ui.label(
-                                        egui::RichText::new(line)
-                                            .size(13.0)
-                                            .color(Color32::from_rgb(217, 224, 179)),
-                                    );
-                                }
-                                if let Some(note) = &viewer.last_sublayer_note {
-                                    ui.label(
-                                        egui::RichText::new(note)
-                                            .size(12.0)
-                                            .color(Color32::from_rgb(120, 200, 255)),
-                                    );
-                                }
-                            });
-                    });
+            let map = viewer.atlas.size as f32;
+            let image_rect =
+                Rect::from_min_size(rect.min + viewer.pan, Vec2::splat(map * viewer.zoom));
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            let painter = ui.painter().with_clip_rect(rect);
+            painter.image(texture.id(), image_rect, uv, Color32::WHITE);
+
+            if viewer.zoom >= DETAIL_CELL_PX {
+                viewer.draw_cell_details(&painter, rect.min, panel);
+            }
+            viewer.draw_feature_overlays(&painter, rect.min);
+            viewer.draw_overlays(&painter, rect.min);
+            viewer.draw_selection(&painter, rect.min);
+
+            let status = format!(
+                "seed {}  |  {} km  |  zoom {:.1} px/cell  |  overlays {}  |  LMB pick  |  Enter walk  |  RMB overlay  |  C clear{}",
+                viewer.atlas.world_seed,
+                viewer.atlas.size,
+                viewer.zoom,
+                viewer.overlays.len(),
+                if session.spawn().is_some() {
+                    "  |  Enter resumes the loaded world"
+                } else {
+                    ""
+                },
+            );
+            let hover_text = hover_cell.map(|cell| {
+                let base = viewer.hover_line(cell);
+                if viewer.overlays.contains(cell.ax(), cell.az()) {
+                    format!("{base}  |  OVERLAY ON")
+                } else {
+                    format!("{base}  |  RMB → cell overlay")
+                }
             });
-    });
+
+            egui::Area::new(egui::Id::new("atlas_hud"))
+                .fixed_pos(egui::pos2(12.0, 12.0))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(&status).size(14.0));
+                            if let Some(line) = &hover_text {
+                                ui.label(
+                                    egui::RichText::new(line)
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(217, 224, 179)),
+                                );
+                            }
+                            if let Some(note) = &viewer.note {
+                                ui.label(
+                                    egui::RichText::new(note)
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(120, 200, 255)),
+                                );
+                            }
+                        });
+                });
+        });
+}
+
+/// Enter the selected point, or resume a world that is already streamed.
+fn enter_world(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+    let Some(point) = viewer.selection else {
+        if session.spawn().is_some() {
+            session.resume().expect("resume a loaded world");
+        } else {
+            viewer.note = Some("pick a spot on the map first (left click)".into());
+        }
+        return;
+    };
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(pose) => {
+            let g = pose.ground();
+            viewer.note = Some(format!(
+                "entering at ({:.0} m, {:.0} m), {:.0} m from the pick",
+                g.x,
+                g.z,
+                pose.offset_m()
+            ));
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot enter here: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    let progress = session.loading_progress();
+    let where_to = session
+        .spawn()
+        .map(|s| {
+            let g = s.ground();
+            format!("({:.0} m, {:.0} m)", g.x, g.z)
+        })
+        .unwrap_or_default();
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
+        .show(&ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.4);
+                ui.label(
+                    egui::RichText::new(format!("Travelling to {where_to}"))
+                        .size(22.0)
+                        .color(Color32::from_rgb(235, 230, 210)),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "streaming ground… {:.0}%   ({} chunks resident)",
+                        progress * 100.0,
+                        session.stream().resident_count()
+                    ))
+                    .size(14.0)
+                    .color(Color32::from_rgb(150, 200, 240)),
+                );
+                if let Some(note) = &viewer.note {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(note).size(12.0));
+                }
+            });
+        });
+}
+
+fn draw_world_hud(session: &mut WorldSession, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+        session.return_to_atlas();
+        return;
+    }
+    let Some(p) = session.player_position() else {
+        return;
+    };
+    let heading = session
+        .player_heading()
+        .map(|h| h.degrees())
+        .unwrap_or_default();
+    let column = session
+        .surface()
+        .column(engine::space::GlobalXZ::at(p.x, p.z));
+    let text = format!(
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {}  |  chunks {}  |  {:.0} fps  |  M map",
+        p.x,
+        p.z,
+        p.y,
+        if column.is_wet() { "in water" } else { "on land" },
+        session.stream().resident_count(),
+        frame.fps,
+    );
+    egui::Area::new(egui::Id::new("world_hud"))
+        .fixed_pos(egui::pos2(12.0, 12.0))
+        .order(egui::Order::Foreground)
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(text).size(14.0));
+                });
+        });
 }

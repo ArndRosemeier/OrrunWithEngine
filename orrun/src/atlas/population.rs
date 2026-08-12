@@ -220,12 +220,7 @@ pub fn cell_is_settlement_flat(ax: i32, az: i32, size: usize, cells: &[i32]) -> 
         && flatness_fitness(ax, az, size, cells) >= 0.35
 }
 
-fn touches_river(
-    ax: i32,
-    az: i32,
-    size: usize,
-    river_links: &FxHashMap<i32, Vec<Link>>,
-) -> bool {
+fn touches_river(ax: i32, az: i32, size: usize, river_links: &FxHashMap<i32, Vec<Link>>) -> bool {
     for k in 0..8 {
         let nx = ax + NEIGHBOR_DX[k];
         let nz = az + NEIGHBOR_DZ[k];

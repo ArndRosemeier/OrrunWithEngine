@@ -2,8 +2,8 @@
 
 use engine::proc::Noise;
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 use super::landmask::collar_cells;
 use super::{layer_seed, lerp, smoothstep};
@@ -23,14 +23,7 @@ pub fn apply_orogens(
     let mut rng = ChaCha8Rng::seed_from_u64(u64::from(layer_seed(world_seed, "atlas_orogens")));
     let belt_count = if size < 500 { 1 } else { 2 };
     for belt in 0..belt_count {
-        stamp_orogen_arc(
-            world_seed,
-            size,
-            &mut dist,
-            &mut pass_field,
-            &mut rng,
-            belt,
-        );
+        stamp_orogen_arc(world_seed, size, &mut dist, &mut pass_field, &mut rng, belt);
     }
 
     let core_r = 6.0f32.max(size as f32 * 0.024);
@@ -71,7 +64,8 @@ pub fn apply_orogens(
         let mut massif = massif_n.ridged2(cx * 0.085, cz * 0.085, 4, 2.0, 0.5) * 0.5 + 0.5;
         massif = massif.powf(1.28);
         let dissect = valley_n.fbm2(cz * 1.15 * 0.05, cx * 0.92 * 0.05, 3, 2.0, 0.5);
-        let mut needle = peak_n.ridged2(cx * 1.35 * 0.16, cz * 1.35 * 0.16, 3, 2.0, 0.5) * 0.5 + 0.5;
+        let mut needle =
+            peak_n.ridged2(cx * 1.35 * 0.16, cz * 1.35 * 0.16, 3, 2.0, 0.5) * 0.5 + 0.5;
         needle = needle.powf(1.65);
 
         let belt_w = smoothstep(0.08, 0.55, loft);
@@ -89,9 +83,8 @@ pub fn apply_orogens(
         }
 
         if loft > 0.35 {
-            let incision = (1.0 - massif)
-                * smoothstep(0.10, -0.45, dissect)
-                * lerp(6.0, 48.0, loft);
+            let incision =
+                (1.0 - massif) * smoothstep(0.10, -0.45, dissect) * lerp(6.0, 48.0, loft);
             code_f -= incision;
         }
 
@@ -125,7 +118,11 @@ fn stamp_orogen_arc(
     }
     let radius = size as f32 * lerp(0.32, 0.44, rng.gen());
     let angle0 = rng.gen::<f32>() * std::f32::consts::TAU;
-    let span = lerp(std::f32::consts::PI * 0.70, std::f32::consts::PI * 1.05, rng.gen());
+    let span = lerp(
+        std::f32::consts::PI * 0.70,
+        std::f32::consts::PI * 1.05,
+        rng.gen(),
+    );
     let steps = 32.max((radius * span * 1.15) as i32);
     let foot_r = 22.0f32.max(size as f32 * 0.085);
     let pass_name = format!("atlas_orogen_pass_{belt}");
@@ -138,8 +135,7 @@ fn stamp_orogen_arc(
         let u = s as f32 / steps as f32;
         let ang = angle0 + span * u;
         let rad = radius
-            * (1.0
-                + warp_n.fbm2(ang * 3.0 * 0.03, belt as f32 * 7.0 * 0.03, 3, 2.0, 0.5) * 0.08);
+            * (1.0 + warp_n.fbm2(ang * 3.0 * 0.03, belt as f32 * 7.0 * 0.03, 3, 2.0, 0.5) * 0.08);
         let mut px = cx + ang.cos() * rad;
         let mut pz = cz + ang.sin() * rad;
         px = px.clamp(collar, size as f32 - 1.0 - collar);

@@ -84,8 +84,8 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
                 continue;
             }
 
-            let ridge = mountain.ridged2(wx * 0.9 * 0.0045, wz * 0.9 * 0.0045, 4, 2.0, 0.5) * 0.5
-                + 0.5;
+            let ridge =
+                mountain.ridged2(wx * 0.9 * 0.0045, wz * 0.9 * 0.0045, 4, 2.0, 0.5) * 0.5 + 0.5;
             let alpine = ridge.powf(1.35) * smoothstep(0.2, 0.7, landness);
             let mut code_f = 48.0 + landness * 70.0 + alpine * 130.0;
             code_f += relief_n.fbm2(wx * 0.008, wz * 0.008, 3, 2.0, 0.5) * 10.0;

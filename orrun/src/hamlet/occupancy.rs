@@ -42,21 +42,10 @@ impl Occupancy {
     }
 
     pub fn cell_center(&self, ix: isize, iy: isize) -> Vec2 {
-        self.origin
-            + Vec2::new(
-                (ix as f32 + 0.5) * self.cell,
-                (iy as f32 + 0.5) * self.cell,
-            )
+        self.origin + Vec2::new((ix as f32 + 0.5) * self.cell, (iy as f32 + 0.5) * self.cell)
     }
 
-    pub fn fits_obb(
-        &self,
-        center: Vec2,
-        half_x: f32,
-        half_z: f32,
-        yaw: f32,
-        inflate: f32,
-    ) -> bool {
+    pub fn fits_obb(&self, center: Vec2, half_x: f32, half_z: f32, yaw: f32, inflate: f32) -> bool {
         !self.obb_hits_occupied(center, half_x, half_z, yaw, inflate)
     }
 

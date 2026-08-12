@@ -64,24 +64,36 @@ impl AtlasFields {
         a + (b - a) * tz
     }
 
-    pub fn sample_smooth(&self, field: &[f32], world_x: f32, world_z: f32) -> f32 {
-        let mut sum = 0.0;
-        let mut wsum = 0.0;
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let w = if dx == 0 && dz == 0 {
-                    4.0
-                } else if dx == 0 || dz == 0 {
-                    2.0
-                } else {
-                    1.0
-                };
-                let sx = world_x + dx as f32 * CELL_METRES * 0.35;
-                let sz = world_z + dz as f32 * CELL_METRES * 0.35;
-                sum += self.sample_bilinear(field, sx, sz) * w;
-                wsum += w;
+    /// Catmull-Rom bicubic — C1-ish atlas sampling so km cells don't shade as flat slabs.
+    pub fn sample_bicubic(&self, field: &[f32], world_x: f32, world_z: f32) -> f32 {
+        let fx = world_x / CELL_METRES - 0.5;
+        let fz = world_z / CELL_METRES - 0.5;
+        let x0 = fx.floor() as i32;
+        let z0 = fz.floor() as i32;
+        let tx = fx - x0 as f32;
+        let tz = fz - z0 as f32;
+        let mut col = [0.0_f32; 4];
+        for j in 0..4 {
+            let mut row = [0.0_f32; 4];
+            for i in 0..4 {
+                row[i] = field[self.index(x0 + i as i32 - 1, z0 + j as i32 - 1)];
             }
+            col[j] = catmull_rom(row[0], row[1], row[2], row[3], tx);
         }
-        sum / wsum
+        catmull_rom(col[0], col[1], col[2], col[3], tz)
     }
+
+    pub fn sample_smooth(&self, field: &[f32], world_x: f32, world_z: f32) -> f32 {
+        self.sample_bicubic(field, world_x, world_z)
+    }
+}
+
+#[inline]
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 }

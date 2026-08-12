@@ -6,8 +6,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
 use super::biomes::{self, Biome};
+use super::cardinal;
 use super::classify;
 use super::features::{Dir, EndpointKind, Kind};
+use super::hydro::HydroVectors;
 use super::lakes::{self, LakeScratch};
 use super::landmask::{self, collar_cells};
 use super::nodes;
@@ -16,9 +18,7 @@ use super::pack;
 use super::population;
 use super::rivers::{self, RiverGraph};
 use super::roads::{self, RoadGraph};
-use super::hydro::HydroVectors;
 use super::types::{Crossing, GraphNode, Lake, Link, Port};
-use super::cardinal;
 
 pub const SIZE: usize = 1000;
 pub const CELL_METRES: f32 = 1000.0;
@@ -353,8 +353,7 @@ impl ContinentAtlas {
                     continue;
                 }
                 for i in 0..a.len() {
-                    if (a[i].t - b[i].t).abs() > 0.001 || a[i].feature_class != b[i].feature_class
-                    {
+                    if (a[i].t - b[i].t).abs() > 0.001 || a[i].feature_class != b[i].feature_class {
                         errors.push(format!("port payload mismatch at {ax},{az} east #{i}"));
                     }
                 }
@@ -429,10 +428,8 @@ impl ContinentAtlas {
                     }
                     let nxt = self.river_receiver[walk as usize];
                     if nxt < 0 {
-                        reached = matches!(
-                            self.receiver_sink_biome(walk),
-                            Biome::Ocean | Biome::Lake
-                        );
+                        reached =
+                            matches!(self.receiver_sink_biome(walk), Biome::Ocean | Biome::Lake);
                         break;
                     }
                     let nxt_biome = pack::biome(self.cells[nxt as usize]);
@@ -690,12 +687,22 @@ impl ContinentAtlas {
         h = h.wrapping_mul(31).wrapping_add(self.schema_version as i64);
         h = h.wrapping_mul(31).wrapping_add(self.lakes.len() as i64);
         h = h.wrapping_mul(31).wrapping_add(self.nodes.len() as i64);
-        h = h.wrapping_mul(31).wrapping_add(self.river_ports.len() as i64);
-        h = h.wrapping_mul(31).wrapping_add(self.road_ports.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.river_ports.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.road_ports.len() as i64);
         h = h.wrapping_mul(31).wrapping_add(self.crossings.len() as i64);
-        h = h.wrapping_mul(31).wrapping_add(self.hydro.rivers.len() as i64);
-        h = h.wrapping_mul(31).wrapping_add(self.hydro.lakes.len() as i64);
-        h = h.wrapping_mul(31).wrapping_add(self.hydro.coasts.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.hydro.rivers.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.hydro.lakes.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.hydro.coasts.len() as i64);
         let step = (self.size / 32).max(1);
         for az in (0..self.size).step_by(step) {
             for ax in (0..self.size).step_by(step) {

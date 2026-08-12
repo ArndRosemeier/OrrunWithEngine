@@ -2,14 +2,14 @@
 
 use engine::proc::Noise;
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rustc_hash::FxHashSet;
 
 use super::landmask::collar_cells;
-use super::types::Lake;
-use super::{layer_seed, lerp, cardinal, NEIGHBOR_DX, NEIGHBOR_DZ};
 use super::pack;
+use super::types::Lake;
+use super::{cardinal, layer_seed, lerp, NEIGHBOR_DX, NEIGHBOR_DZ};
 
 const SIZE_FULL: i32 = 1000;
 const LAKE_MIN_CELLS: usize = 6;
@@ -51,8 +51,10 @@ pub fn build_lakes(
     while ax < size as i32 - collar && scratch.lakes.len() < want {
         let mut az = collar + step / 2;
         while az < size as i32 - collar && scratch.lakes.len() < want {
-            let jx = (ax + rng.gen_range(-step / 3..=step / 3)).clamp(collar, size as i32 - collar - 1);
-            let jz = (az + rng.gen_range(-step / 3..=step / 3)).clamp(collar, size as i32 - collar - 1);
+            let jx =
+                (ax + rng.gen_range(-step / 3..=step / 3)).clamp(collar, size as i32 - collar - 1);
+            let jz =
+                (az + rng.gen_range(-step / 3..=step / 3)).clamp(collar, size as i32 - collar - 1);
             try_place_lake(world_seed, size, jx, jz, land, elev_code, scratch, &mut rng);
             az += step;
         }
@@ -161,18 +163,7 @@ fn try_place_lake(
             elev_code[idx] as i32 + depth_carve,
         );
     } else if basin.len() > target {
-        basin = trim_lake_basin(
-            &basin,
-            target,
-            size,
-            ax,
-            az,
-            rx,
-            rz,
-            cos_r,
-            sin_r,
-            &noise,
-        );
+        basin = trim_lake_basin(&basin, target, size, ax, az, rx, rz, cos_r, sin_r, &noise);
         if basin.len() < target {
             grow_lake_basin(
                 &mut basin,
@@ -247,10 +238,7 @@ fn try_place_lake(
         let bed = surface_code - 2 - (depth_carve - dist as i32).clamp(0, depth_carve);
         elev_code[cell as usize] = bed.clamp(33, surface_code - 1) as u8;
     }
-    if spill_out >= 0
-        && land[spill_out as usize] != 0
-        && scratch.lake_id[spill_out as usize] < 0
-    {
+    if spill_out >= 0 && land[spill_out as usize] != 0 && scratch.lake_id[spill_out as usize] < 0 {
         elev_code[spill_out as usize] = (elev_code[spill_out as usize] as i32)
             .min(surface_code + 1)
             .clamp(33, 255) as u8;
@@ -366,7 +354,8 @@ fn trim_lake_basin(
         let mut best_i = 0;
         let mut best_score = 1.0e12;
         for (i, &candidate) in frontier.iter().enumerate() {
-            let score = lake_trim_score(candidate, size, ax, az, rx, rz, cos_r, sin_r, noise, phase);
+            let score =
+                lake_trim_score(candidate, size, ax, az, rx, rz, cos_r, sin_r, noise, phase);
             if score < best_score {
                 best_score = score;
                 best_i = i;
@@ -474,10 +463,7 @@ pub fn merge_coastal_lakes_into_ocean(
                         continue;
                     }
                     let other_id = scratch.lake_id[index_of(nx, nz, size)];
-                    if other_id >= 0
-                        && other_id != lake.id
-                        && coastal[other_id as usize] != 0
-                    {
+                    if other_id >= 0 && other_id != lake.id && coastal[other_id as usize] != 0 {
                         coastal[lake.id as usize] = 1;
                         changed = true;
                         break 'outer;
@@ -555,11 +541,7 @@ pub fn promote_inland_seas_to_lakes(
 
     let mut seen = vec![false; count];
     for start in 0..count {
-        if land[start] != 0
-            || scratch.lake_id[start] >= 0
-            || ocean[start]
-            || seen[start]
-        {
+        if land[start] != 0 || scratch.lake_id[start] >= 0 || ocean[start] || seen[start] {
             continue;
         }
         let mut basin = Vec::new();
@@ -578,11 +560,7 @@ pub fn promote_inland_seas_to_lakes(
                     continue;
                 }
                 let nb = index_of(nx, nz, size);
-                if seen[nb]
-                    || land[nb] != 0
-                    || scratch.lake_id[nb] >= 0
-                    || ocean[nb]
-                {
+                if seen[nb] || land[nb] != 0 || scratch.lake_id[nb] >= 0 || ocean[nb] {
                     continue;
                 }
                 seen[nb] = true;
@@ -652,12 +630,7 @@ fn commit_inland_sea_as_lake(
     }
 }
 
-pub fn label_landmasses(
-    size: usize,
-    land: &[u8],
-    lake_id: &[i32],
-    landmass_id: &mut [i32],
-) {
+pub fn label_landmasses(size: usize, land: &[u8], lake_id: &[i32], landmass_id: &mut [i32]) {
     let count = size * size;
     let mut seen = vec![0u8; count];
     let mut stack = Vec::new();

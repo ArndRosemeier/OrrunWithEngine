@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use rand::Rng;
-use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::biomes::{self, Biome};
@@ -125,7 +125,11 @@ pub fn build_roads(
                 best.push((road_pair_weight(ni, group[j], cells), j));
             }
             best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-            let spur_budget = if ni.kind == NodeKind::Settlement { 3 } else { 2 };
+            let spur_budget = if ni.kind == NodeKind::Settlement {
+                3
+            } else {
+                2
+            };
             let mut added = 0;
             for &(_w, j) in &best {
                 if added >= spur_budget {
@@ -182,9 +186,7 @@ fn river_adjacency_mask(
                 continue;
             }
             let nb = nz as usize * size + nx as usize;
-            if !river_links.contains_key(&(nb as i32))
-                && biomes::is_land(pack::biome(cells[nb]))
-            {
+            if !river_links.contains_key(&(nb as i32)) && biomes::is_land(pack::biome(cells[nb])) {
                 mask[nb] = 1;
             }
         }
@@ -250,7 +252,9 @@ fn route_and_stamp_road(
     if path.len() < 2 {
         return false;
     }
-    stamp_road_path(world_seed, size, cells, &path, road_class, a.id, b.id, serial, graph);
+    stamp_road_path(
+        world_seed, size, cells, &path, road_class, a.id, b.id, serial, graph,
+    );
     true
 }
 
@@ -291,11 +295,7 @@ pub fn road_astar(
     goal: i32,
 ) -> Vec<i32> {
     let count = size * size;
-    if start < 0
-        || goal < 0
-        || start as usize >= count
-        || goal as usize >= count
-    {
+    if start < 0 || goal < 0 || start as usize >= count || goal as usize >= count {
         return Vec::new();
     }
     if start == goal {
@@ -387,14 +387,7 @@ fn reconstruct(came: &[i32], mut current: i32) -> Vec<i32> {
     path
 }
 
-fn road_bresenham(
-    size: usize,
-    cells: &[i32],
-    ax0: i32,
-    az0: i32,
-    ax1: i32,
-    az1: i32,
-) -> Vec<i32> {
+fn road_bresenham(size: usize, cells: &[i32], ax0: i32, az0: i32, ax1: i32, az1: i32) -> Vec<i32> {
     let mut path = Vec::new();
     let mut x = ax0;
     let mut z = az0;
@@ -450,8 +443,7 @@ fn stamp_road_path(
         let cell = path[i];
         let ax = cell % size as i32;
         let az = cell / size as i32;
-        let surface_z =
-            pack::elevation_to_metres(pack::elevation(cells[cell as usize]));
+        let surface_z = pack::elevation_to_metres(pack::elevation(cells[cell as usize]));
         let ea = if i == 0 {
             Endpoint::node(node_a)
         } else {
@@ -461,8 +453,16 @@ fn stamp_road_path(
             else {
                 continue;
             };
-            let in_port =
-                ensure_road_port(world_seed, size, ax, az, back_dir, road_class, surface_z, &mut graph.ports);
+            let in_port = ensure_road_port(
+                world_seed,
+                size,
+                ax,
+                az,
+                back_dir,
+                road_class,
+                surface_z,
+                &mut graph.ports,
+            );
             Endpoint::edge_port(edge_key(ax, az, back_dir, size), in_port.id)
         };
         let eb = if i + 1 == path.len() {
@@ -475,8 +475,16 @@ fn stamp_road_path(
             ) else {
                 continue;
             };
-            let out_port =
-                ensure_road_port(world_seed, size, ax, az, forward, road_class, surface_z, &mut graph.ports);
+            let out_port = ensure_road_port(
+                world_seed,
+                size,
+                ax,
+                az,
+                forward,
+                road_class,
+                surface_z,
+                &mut graph.ports,
+            );
             Endpoint::edge_port(edge_key(ax, az, forward, size), out_port.id)
         };
         let link = Link {
@@ -535,12 +543,7 @@ fn ensure_road_port(
         feature_class: road_class as i32,
         flow_sign: 0,
         surface_z,
-        feature_id: feature_hash(&[
-            &world_seed.to_string(),
-            "rport",
-            &key.to_string(),
-            "0",
-        ]),
+        feature_id: feature_hash(&[&world_seed.to_string(), "rport", &key.to_string(), "0"]),
     };
     entry.push(port);
     port

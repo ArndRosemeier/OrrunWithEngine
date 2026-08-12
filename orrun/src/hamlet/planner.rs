@@ -77,11 +77,7 @@ pub fn plan(config: &HamletLabConfig) -> Result<Plan2D, HamletError> {
     for i in 0..out.markets.len() {
         let extent = polygon_extent_from(out.market_centers[i], &out.markets[i]);
         frontier_r = frontier_r.max(
-            out.market_centers[i].length()
-                + extent
-                + config.market_front_gap
-                + max_depth
-                + 4.0,
+            out.market_centers[i].length() + extent + config.market_front_gap + max_depth + 4.0,
         );
     }
     let expand_step = max_depth * 0.65 + config.alley;
@@ -209,26 +205,13 @@ fn place_building(
             config, plan, occ, houses, rng, half_x, half_z, local_max, tries,
         );
         let free_scored = sample_settler_candidates(
-            config,
-            plan,
-            occ,
-            houses,
-            rng,
-            half_x,
-            half_z,
-            yaw_offset,
-            local_max,
-            tries,
+            config, plan, occ, houses, rng, half_x, half_z, yaw_offset, local_max, tries,
         );
         let hug_pick = best_scored(&hug_scored);
         let free_pick = if free_scored.is_empty() {
             None
         } else {
-            Some(softmax_pick(
-                &free_scored,
-                config.select_temperature,
-                rng,
-            ))
+            Some(softmax_pick(&free_scored, config.select_temperature, rng))
         };
         pick = match (hug_pick, free_pick) {
             (Some(h), Some(f)) => {
@@ -639,20 +622,8 @@ fn wall_share_pose(
     let hx = h.half_x;
     let hz = h.half_z;
     let (yaw, mut center, tangent, half_t_h, half_t_n) = match side {
-        0 => (
-            yaw_h,
-            h.center + x_axis * (hx + half_x),
-            z_axis,
-            hz,
-            half_z,
-        ),
-        1 => (
-            yaw_h,
-            h.center - x_axis * (hx + half_x),
-            z_axis,
-            hz,
-            half_z,
-        ),
+        0 => (yaw_h, h.center + x_axis * (hx + half_x), z_axis, hz, half_z),
+        1 => (yaw_h, h.center - x_axis * (hx + half_x), z_axis, hz, half_z),
         2 => (
             yaw_h + std::f32::consts::PI,
             h.center + z_axis * (hz + half_z),
@@ -761,7 +732,10 @@ fn fitness(
 }
 
 fn best_scored(scored: &[Candidate]) -> Option<Candidate> {
-    scored.iter().max_by(|a, b| a.score.total_cmp(&b.score)).cloned()
+    scored
+        .iter()
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+        .cloned()
 }
 
 fn softmax_pick(scored: &[Candidate], temperature: f32, rng: &mut ChaCha8Rng) -> Candidate {
@@ -795,14 +769,7 @@ fn houses_obb_overlap(
 ) -> bool {
     houses.iter().any(|h| {
         obb_overlap(
-            center,
-            half_x,
-            half_z,
-            yaw,
-            h.center,
-            h.half_x,
-            h.half_z,
-            h.yaw,
+            center, half_x, half_z, yaw, h.center, h.half_x, h.half_z, h.yaw,
         )
     })
 }
