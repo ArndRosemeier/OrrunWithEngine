@@ -13,10 +13,12 @@ mod coords;
 mod entry;
 mod hydro_geom;
 mod look;
+mod paths;
 mod ring_field;
 mod rng;
 mod scatter;
 mod session;
+mod settlement;
 mod surface;
 mod world_stream;
 
@@ -35,12 +37,15 @@ pub use coords::{
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use look::{install_daylight, install_materials};
+pub use paths::PathLayer;
 pub use scatter::{
     Fall, GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer, PROP_CLASSES,
 };
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
+pub use settlement::{HamletStand, SettlementError, SettlementLayer};
 pub use surface::{
-    ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
+    classify_settlement, ContinentalSurface, SettlementPin, SurfaceColumn, SurfaceError,
+    SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
 };
 pub use world_stream::{
     TerrainTier, WorldStream, DISTANT, ENTRY_RING, FAR, FAR_VIEW_M, MEDIUM, NEAR,

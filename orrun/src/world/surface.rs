@@ -29,7 +29,7 @@ use super::atlas_fields::AtlasFields;
 use super::coords::AtlasBounds;
 use super::hydro_geom::{HydroIndex, OCEAN_SHELF_DEPTH, SHORE_BAND_M};
 use crate::atlas::hydro::HydroVectors;
-use crate::atlas::ContinentAtlas;
+use crate::atlas::{bake_road_paths, cell_population, ContinentAtlas, NodeKind, RoadPath, CELL_METRES};
 
 /// Minimum water depth wherever a sheet is present.
 pub const MIN_WATER_DEPTH: f32 = 0.35;
@@ -354,6 +354,51 @@ impl TerrainDetail {
     }
 }
 
+/// Atlas settlement node, in world metres. The 3D layer plants a layout here.
+#[derive(Clone, Copy, Debug)]
+pub struct SettlementPin {
+    pub id: i32,
+    pub at: GlobalXZ,
+    /// 0=hamlet … 3=port, from population and river-mouth distance.
+    pub tier: u8,
+    pub population: i32,
+}
+
+/// Godot `VillageTier.classify`: inland low-pop is a hamlet; a river mouth is a port.
+pub fn classify_settlement(population: i32, mouth_dist: i32) -> u8 {
+    if mouth_dist == 0 && population >= 10 {
+        3
+    } else if mouth_dist == 0 || population >= 11 {
+        2
+    } else if population >= 9 || mouth_dist > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[SettlementPin]> {
+    atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Settlement)
+        .map(|n| {
+            let at = GlobalXZ::at(
+                (n.ax as f64 + 0.5) * f64::from(CELL_METRES),
+                (n.az as f64 + 0.5) * f64::from(CELL_METRES),
+            );
+            let pop = cell_population(atlas.cell_at(n.ax, n.az));
+            let mouth = atlas.mouth_distance[atlas.index_of(n.ax, n.az)];
+            SettlementPin {
+                id: n.id,
+                at,
+                tier: classify_settlement(pop, mouth),
+                population: pop,
+            }
+        })
+        .collect()
+}
+
 /// Single authority for terrain and hydrology in world metres.
 #[derive(Clone)]
 pub struct ContinentalSurface {
@@ -364,6 +409,8 @@ pub struct ContinentalSurface {
     sea_surface_z: f32,
     world_seed: i32,
     detail: TerrainDetail,
+    settlements: Arc<[SettlementPin]>,
+    roads: Arc<[RoadPath]>,
 }
 
 impl ContinentalSurface {
@@ -385,6 +432,8 @@ impl ContinentalSurface {
             sea_surface_z: atlas.hydro.sea_surface_z,
             world_seed: atlas.world_seed,
             detail: TerrainDetail::new(atlas.world_seed),
+            settlements: pins_from_atlas(atlas),
+            roads: bake_road_paths(atlas).into(),
         };
         surface.validate()?;
         Ok(surface)
@@ -462,6 +511,27 @@ impl ContinentalSurface {
 
     pub fn sea_surface_z(&self) -> f32 {
         self.sea_surface_z
+    }
+
+    /// Settlement nodes on this continent, in world metres.
+    pub fn settlements(&self) -> &[SettlementPin] {
+        &self.settlements
+    }
+
+    /// Highest-tier settlement, then highest population, then stable id.
+    ///
+    /// Same order as Godot `SettlementLayout.spawn_plaza_largest`: port before
+    /// town before village before hamlet.
+    pub fn largest_settlement(&self) -> Option<SettlementPin> {
+        self.settlements
+            .iter()
+            .copied()
+            .max_by_key(|pin| (pin.tier, pin.population, pin.id))
+    }
+
+    /// Atlas roads in world metres, meandered like the map overlay.
+    pub fn roads(&self) -> &[RoadPath] {
+        &self.roads
     }
 
     /// Dry structural height with no hydro carving (used for bank references).

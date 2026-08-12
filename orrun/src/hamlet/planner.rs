@@ -8,6 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use super::catalog::{self, BuildingRole};
 use super::config::{self, HamletLabConfig};
 use super::occupancy::{point_in_polygon, Occupancy};
+use super::seat::{self, Plot};
 use super::{HamletError, PlacedBuilding, Plan2D, Shape, ShapeKind};
 
 #[derive(Clone, Debug)]
@@ -20,6 +21,12 @@ struct Candidate {
 }
 
 pub fn plan(config: &HamletLabConfig) -> Result<Plan2D, HamletError> {
+    plan_on(config, None)
+}
+
+/// Pack a hamlet. When `plot` is set, wet / steep / high-relief candidates lose
+/// and flatter ground is preferred. The 2D lab passes `None` and is unchanged.
+pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan2D, HamletError> {
     let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
     let mut out = Plan2D {
         plaza: Vec2::ZERO,
@@ -93,6 +100,7 @@ pub fn plan(config: &HamletLabConfig) -> Result<Plan2D, HamletError> {
             frontier_r,
             expand_step,
             true,
+            plot,
         )?
         .expect("civic placement required");
         frontier_r = frontier_r.max(placed);
@@ -111,6 +119,7 @@ pub fn plan(config: &HamletLabConfig) -> Result<Plan2D, HamletError> {
             frontier_r,
             expand_step,
             false,
+            plot,
         )? {
             frontier_r = frontier_r.max(new_r);
         }
@@ -184,6 +193,7 @@ fn place_building(
     frontier_r: f32,
     expand_step: f32,
     require_place: bool,
+    plot: Option<&dyn Plot>,
 ) -> Result<Option<f32>, HamletError> {
     let spec = catalog::spec_for(catalog_id).ok_or_else(|| HamletError::UnknownCatalogId {
         id: catalog_id.to_string(),
@@ -202,10 +212,31 @@ fn place_building(
             tries *= 3;
         }
         let hug_scored = sample_wall_share_candidates(
-            config, plan, occ, houses, rng, half_x, half_z, local_max, tries,
+            config,
+            plan,
+            occ,
+            houses,
+            rng,
+            half_x,
+            half_z,
+            spec.foundation_m,
+            local_max,
+            tries,
+            plot,
         );
         let free_scored = sample_settler_candidates(
-            config, plan, occ, houses, rng, half_x, half_z, yaw_offset, local_max, tries,
+            config,
+            plan,
+            occ,
+            houses,
+            rng,
+            half_x,
+            half_z,
+            yaw_offset,
+            spec.foundation_m,
+            local_max,
+            tries,
+            plot,
         );
         let hug_pick = best_scored(&hug_scored);
         let free_pick = if free_scored.is_empty() {
@@ -566,8 +597,10 @@ fn sample_wall_share_candidates(
     rng: &mut ChaCha8Rng,
     half_x: f32,
     half_z: f32,
+    foundation_m: f32,
     max_center_r: f32,
     candidate_tries: usize,
+    plot: Option<&dyn Plot>,
 ) -> Vec<Candidate> {
     let mut scored = Vec::new();
     if houses.is_empty() {
@@ -597,7 +630,21 @@ fn sample_wall_share_candidates(
         if signed_distance_to_markets(center, &plan.markets) < half_z {
             continue;
         }
-        let score = fitness(config, &plan.markets, door, rng) + config.wall_share_boost;
+        let Some(score) = scored_plot(
+            config,
+            &plan.markets,
+            door,
+            center,
+            half_x,
+            half_z,
+            yaw,
+            foundation_m,
+            plot,
+            rng,
+            config.wall_share_boost,
+        ) else {
+            continue;
+        };
         scored.push(Candidate {
             score,
             center,
@@ -650,8 +697,10 @@ fn sample_settler_candidates(
     half_x: f32,
     half_z: f32,
     yaw_offset: f32,
+    foundation_m: f32,
     max_center_r: f32,
     candidate_tries: usize,
+    plot: Option<&dyn Plot>,
 ) -> Vec<Candidate> {
     let mut scored = Vec::new();
     let tries = candidate_tries.max(1);
@@ -707,7 +756,21 @@ fn sample_settler_candidates(
             continue;
         }
 
-        let score = fitness(config, &plan.markets, door, rng);
+        let Some(score) = scored_plot(
+            config,
+            &plan.markets,
+            door,
+            center,
+            half_x,
+            half_z,
+            yaw,
+            foundation_m,
+            plot,
+            rng,
+            0.0,
+        ) else {
+            continue;
+        };
         scored.push(Candidate {
             score,
             center,
@@ -729,6 +792,30 @@ fn fitness(
     let market_score = (-rim_dist / (config.market_front_gap * 1.1).max(1.8)).exp();
     let noise = rng.gen_range(-config.fitness_noise..=config.fitness_noise);
     config.weight_market * market_score + noise
+}
+
+fn scored_plot(
+    config: &HamletLabConfig,
+    markets: &[Vec<Vec2>],
+    door: Vec2,
+    center: Vec2,
+    half_x: f32,
+    half_z: f32,
+    yaw: f32,
+    foundation_m: f32,
+    plot: Option<&dyn Plot>,
+    rng: &mut ChaCha8Rng,
+    extra: f32,
+) -> Option<f32> {
+    let mut score = fitness(config, markets, door, rng) + extra;
+    if let Some(plot) = plot {
+        let sample = seat::sample_footprint(plot, center, half_x, half_z, yaw);
+        if !seat::accept(&sample, foundation_m) {
+            return None;
+        }
+        score += config.weight_ground * seat::ground_score(&sample);
+    }
+    Some(score)
 }
 
 fn best_scored(scored: &[Candidate]) -> Option<Candidate> {

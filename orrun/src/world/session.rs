@@ -23,7 +23,9 @@ use thiserror::Error;
 use super::brooks::{BrookField, BrookWindow};
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+use super::paths::PathLayer;
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
+use super::settlement::{SettlementError, SettlementLayer};
 use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 
@@ -49,6 +51,9 @@ pub enum SessionError {
 
     #[error(transparent)]
     Scatter(#[from] ScatterError),
+
+    #[error(transparent)]
+    Settlement(#[from] SettlementError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -195,6 +200,10 @@ pub struct WorldSession {
     stream: WorldStream,
     /// Ground cover, once the prop meshes have been uploaded.
     scatter: Option<ScatterLayer>,
+    /// Hamlets around the player, once the house meshes have been uploaded.
+    settlements: Option<SettlementLayer>,
+    /// Draped roads and measured bridges.
+    paths: Option<PathLayer>,
     state: SessionState,
     /// The request being loaded, until the water under it has been traced and
     /// the spawn it resolves to is known.
@@ -212,6 +221,8 @@ impl WorldSession {
             brooks,
             stream,
             scatter: None,
+            settlements: None,
+            paths: None,
             state: SessionState::Atlas,
             entering: None,
             spawn: None,
@@ -272,6 +283,12 @@ impl WorldSession {
 
         if let Some(scatter) = self.scatter.as_mut() {
             scatter.clear(world)?;
+        }
+        if let Some(settlements) = self.settlements.as_mut() {
+            settlements.clear(world)?;
+        }
+        if let Some(paths) = self.paths.as_mut() {
+            paths.clear(world)?;
         }
 
         self.stream.reset(world);
@@ -363,6 +380,8 @@ impl WorldSession {
                     &catalog,
                     self.surface.world_seed(),
                 )?);
+                self.settlements = Some(SettlementLayer::install(world, self.surface.world_seed())?);
+                self.paths = Some(PathLayer::new());
                 return Ok(());
             }
             if !self.brooks.traced(request.requested()) {
@@ -437,13 +456,47 @@ impl WorldSession {
                 rebased,
             )?;
         }
+        if let Some(settlements) = self.settlements.as_mut() {
+            settlements.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                self.brooks.field().as_ref(),
+                foot,
+                rebased,
+            )?;
+        }
+        let hamlets = self
+            .settlements
+            .as_ref()
+            .map(|s| s.hamlets().to_vec())
+            .unwrap_or_default();
+        if let Some(paths) = self.paths.as_mut() {
+            paths.follow(
+                world,
+                &self.surface,
+                &self.brooks.field(),
+                &hamlets,
+                foot,
+                self.stream.resident_count(),
+                self.stream.walked_pending_count(),
+                rebased,
+            )?;
+        }
 
         match player.mode {
             // Only the resident bake may move the player vertically: falling
             // back to a fresh surface query here would put the feet on a
             // different surface than the one being drawn.
             Locomotion::Walk => {
-                if let Some(ground) = self.stream.contact_height(foot) {
+                let terrain = self.stream.contact_height(foot);
+                let deck = self.paths.as_ref().and_then(|p| p.deck_height(foot));
+                if let Some(ground) = match (terrain, deck) {
+                    (Some(t), Some(d)) => Some(t.max(d)),
+                    (Some(t), None) => Some(t),
+                    (None, Some(d)) => Some(d),
+                    (None, None) => None,
+                } {
                     player.position.y = (ground + FOOT_CLEARANCE_M) as f64;
                 }
             }
@@ -480,6 +533,13 @@ impl WorldSession {
     /// Grass, stones, and trees standing around the player.
     pub fn scattered_count(&self) -> usize {
         self.scatter.as_ref().map_or(0, ScatterLayer::placed_count)
+    }
+
+    /// Houses and wells standing around the player.
+    pub fn settlement_count(&self) -> usize {
+        self.settlements
+            .as_ref()
+            .map_or(0, SettlementLayer::placed_count)
     }
 
     /// What the last sow of ground cover took on its own thread.

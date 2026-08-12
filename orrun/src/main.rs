@@ -4,7 +4,7 @@
 //!
 //! Map: drag to pan · scroll to zoom · F fit · left click travels there ·
 //! right click reveals a cell overlay · C clears overlays · M returns to where
-//! you were standing.
+//! you were standing · the largest-town button enters at the biggest settlement.
 //! World (first person): click to look · Esc hands the mouse back · W/S walk ·
 //! Q/E sidestep · A/D turn · Shift sprint · F fly (Space up, Ctrl down) ·
 //! M summons the map · Esc with a free cursor quits.
@@ -646,6 +646,21 @@ fn draw_atlas(
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
         .show(&ctx, |ui| {
+            let mut go_largest = false;
+            let town_btn = egui::Area::new(egui::Id::new("atlas_town_btn"))
+                .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            if ui.button("Go to largest town").clicked() {
+                                go_largest = true;
+                            }
+                        });
+                });
+            let btn_hit = town_btn.response.contains_pointer();
+
             let panel = ui.available_size();
             if viewer.needs_fit {
                 viewer.fit(panel);
@@ -657,12 +672,12 @@ fn draw_atlas(
             let (rect, response) =
                 ui.allocate_exact_size(panel, Sense::click_and_drag() | Sense::click());
 
-            if response.dragged_by(PointerButton::Primary) {
+            if !btn_hit && response.dragged_by(PointerButton::Primary) {
                 viewer.pan += response.drag_delta();
             }
 
             let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
-            if response.hovered() && scroll_y != 0.0 {
+            if !btn_hit && response.hovered() && scroll_y != 0.0 {
                 let factor = if scroll_y > 0.0 {
                     ZOOM_STEP
                 } else {
@@ -686,7 +701,7 @@ fn draw_atlas(
 
             // Left click travels there; right click reveals the overlay. A
             // click that came out of a drag was the player panning the map.
-            if response.hovered() {
+            if !btn_hit && response.hovered() {
                 let primary = ui.input(|i| i.pointer.button_clicked(PointerButton::Primary));
                 let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
                 if let Some(local) = pointer {
@@ -702,6 +717,10 @@ fn draw_atlas(
                         }
                     }
                 }
+            }
+
+            if go_largest {
+                travel_to_largest_town(viewer, session, world);
             }
 
             // Enter still travels to the last pick, and M puts a summoned map
@@ -809,6 +828,45 @@ fn travel_to(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut W
             viewer.note = Some(format!("cannot land there: {err}"));
             eprintln!("entry refused: {err}");
         }
+    }
+}
+
+fn travel_to_largest_town(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+    let Some(pin) = viewer.surface.largest_settlement() else {
+        viewer.note = Some("this continent has no settlements".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, pin.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("largest settlement is off the map: {err}"));
+            return;
+        }
+    };
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some(format!(
+                "travelling to the largest {} (pop {})",
+                settlement_tier_name(pin.tier),
+                pin.population
+            ));
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at the largest town: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn settlement_tier_name(tier: u8) -> &'static str {
+    match tier {
+        0 => "hamlet",
+        1 => "village",
+        2 => "town",
+        3 => "port",
+        other => panic!("settlement tier {other} is not 0..=3"),
     }
 }
 

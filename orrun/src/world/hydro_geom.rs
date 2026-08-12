@@ -29,6 +29,10 @@ pub struct RiverHit {
     pub half_width: f32,
     pub sheet_z: f32,
     pub class: i32,
+    /// Closest point on the centreline.
+    pub at: Vec2,
+    /// Unit along-river heading at [`Self::at`].
+    pub tangent: Vec2,
 }
 
 /// Spatial indices over the atlas hydro outlines.
@@ -124,6 +128,8 @@ impl HydroIndex {
                 continue;
             };
             if best.map(|b| hit.distance < b.dist).unwrap_or(true) {
+                let a = river.points[hit.segment];
+                let b = river.points[hit.segment + 1];
                 let za = river.surface_z[hit.segment];
                 let zb = river.surface_z[hit.segment + 1];
                 best = Some(RiverHit {
@@ -131,6 +137,8 @@ impl HydroIndex {
                     half_width: river.half_width_m,
                     sheet_z: za + (zb - za) * hit.t,
                     class: river.class,
+                    at: a.lerp(b, hit.t),
+                    tangent: (b - a).normalize_or_zero(),
                 });
             }
         }

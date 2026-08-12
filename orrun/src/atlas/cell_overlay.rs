@@ -405,7 +405,16 @@ fn bake_roads(atlas: &ContinentAtlas, ax: i32, az: i32, seed: u32) -> Vec<Overla
     for link in best.into_values() {
         let a = endpoint_local(atlas, ax, az, link.a);
         let b = endpoint_local(atlas, ax, az, link.b);
-        let points = dense_corridor(a, b, seed ^ 0xA0AD, cell_idx, link.feature_id);
+        let points = super::road_geom::meander_cell_corridor(
+            Vec2::new(a[0], a[1]),
+            Vec2::new(b[0], b[1]),
+            seed ^ 0xA0AD,
+            cell_idx,
+            link.feature_id,
+        )
+        .into_iter()
+        .map(|p| [p.x, p.y])
+        .collect();
         out.push(OverlayRoad {
             feature_id: link.feature_id,
             class: link.feature_class,
@@ -414,71 +423,6 @@ fn bake_roads(atlas: &ContinentAtlas, ax: i32, az: i32, seed: u32) -> Vec<Overla
     }
     out.sort_by_key(|r| (r.class, r.feature_id));
     out
-}
-
-fn dense_corridor(
-    a: [f32; 2],
-    b: [f32; 2],
-    seed: u32,
-    cell_idx: i32,
-    feature_id: i32,
-) -> Vec<[f32; 2]> {
-    const STEP_LOCAL: f32 = 0.04;
-    const MIN_SAMPLES: usize = 10;
-    const MAX_SAMPLES: usize = 36;
-    const AMP_COARSE: f32 = 0.05;
-    const AMP_FINE: f32 = 0.018;
-    const AMP_MICRO: f32 = 0.006;
-
-    let dx = b[0] - a[0];
-    let dy = b[1] - a[1];
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-4 {
-        return vec![a, b];
-    }
-    let dir = [dx / len, dy / len];
-    let perp = [-dir[1], dir[0]];
-    let n = ((len / STEP_LOCAL).ceil() as usize).clamp(MIN_SAMPLES, MAX_SAMPLES);
-
-    let mut pts = Vec::with_capacity(n + 1);
-    for i in 0..=n {
-        let t = i as f32 / n as f32;
-        if i == 0 {
-            pts.push(a);
-            continue;
-        }
-        if i == n {
-            pts.push(b);
-            continue;
-        }
-        let envelope = (std::f32::consts::PI * t).sin();
-        let h0 = hash_unit(seed, cell_idx as u32, feature_id as u32, i as u32);
-        let h1 = hash_unit(
-            seed ^ 0x9E37,
-            cell_idx as u32,
-            feature_id as u32,
-            (i * 3) as u32,
-        );
-        let h2 = hash_unit(
-            seed ^ 0x85EB,
-            cell_idx as u32,
-            feature_id as u32,
-            (i * 7) as u32,
-        );
-        let h0b = hash_unit(seed, cell_idx as u32, feature_id as u32, (i + 1) as u32);
-        let coarse = (h0 * 2.0 - 1.0) * 0.65 + (h0b * 2.0 - 1.0) * 0.35;
-        let fine = (h1 * 2.0 - 1.0) * (0.5 + 0.5 * (t * 11.0).sin());
-        let micro = (h2 * 2.0 - 1.0) * (0.5 + 0.5 * (t * 29.0).cos());
-        let lateral = envelope * len * (coarse * AMP_COARSE + fine * AMP_FINE + micro * AMP_MICRO);
-        let x = a[0] + dx * t + perp[0] * lateral;
-        let y = a[1] + dy * t + perp[1] * lateral;
-        pts.push([x.clamp(0.02, 0.98), y.clamp(0.02, 0.98)]);
-    }
-    pts
-}
-
-fn hash_unit(a: u32, b: u32, c: u32, d: u32) -> f32 {
-    hash_u32(a ^ d.wrapping_mul(0x27D4_EB2D), b, c) as f32 / u32::MAX as f32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -558,18 +502,6 @@ fn edge_mid_toward(
         }
     }
     None
-}
-
-fn hash_u32(a: u32, b: u32, c: u32) -> u32 {
-    let mut x = a
-        .wrapping_mul(0x9E37_79B9)
-        .wrapping_add(b)
-        .wrapping_mul(0x85EB_CA6B)
-        .wrapping_add(c);
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x7FEB_352D);
-    x ^= x >> 15;
-    x
 }
 
 #[cfg(test)]

@@ -6,6 +6,6 @@ pub mod save;
 pub mod world;
 
 pub use atlas::{AtlasError, ContinentAtlas};
-pub use hamlet::{plan as plan_hamlet, HamletLabConfig, Plan2D};
+pub use hamlet::{plan as plan_hamlet, plan_on as plan_hamlet_on, HamletLabConfig, Plan2D};
 pub use save::{SaveError, SavedStand};
 pub use world::{AtlasFields, ContinentalSurface};

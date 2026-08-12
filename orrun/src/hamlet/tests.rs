@@ -3,7 +3,7 @@ use glam::Vec2;
 use super::catalog::{self, BuildingRole};
 use super::config::HamletLabConfig;
 use super::planner::plan;
-use super::{Shape, ShapeKind};
+use super::{Plot, Shape, ShapeKind};
 
 fn house_obb_overlap(a: &Shape, b: &Shape) -> bool {
     if a.kind != ShapeKind::House || b.kind != ShapeKind::House {
@@ -150,4 +150,113 @@ fn higher_tier_has_more_market_sides() {
     assert!(super::tier_market_sides(1) < super::tier_market_sides(2));
     assert_eq!(super::tier_market_sides(3), 24);
     assert!(!catalog::ids_with_role(BuildingRole::Dwelling, 0).is_empty());
+}
+
+struct Flat;
+impl Plot for Flat {
+    fn height(&self, _: Vec2) -> f32 {
+        10.0
+    }
+    fn wetness(&self, _: Vec2) -> f32 {
+        -5.0
+    }
+}
+
+/// Height rises with +Z. Yaw 0 puts the door at −Z, so the door is downhill.
+struct DownhillDoor {
+    grade: f32,
+}
+impl Plot for DownhillDoor {
+    fn height(&self, p: Vec2) -> f32 {
+        p.y * self.grade
+    }
+    fn wetness(&self, _: Vec2) -> f32 {
+        -5.0
+    }
+}
+
+/// Height falls with +Z. Yaw 0 puts the door uphill — the Godot min-corner trap.
+struct UphillDoor {
+    grade: f32,
+}
+impl Plot for UphillDoor {
+    fn height(&self, p: Vec2) -> f32 {
+        -p.y * self.grade
+    }
+    fn wetness(&self, _: Vec2) -> f32 {
+        -5.0
+    }
+}
+
+struct Wet;
+impl Plot for Wet {
+    fn height(&self, _: Vec2) -> f32 {
+        4.0
+    }
+    fn wetness(&self, _: Vec2) -> f32 {
+        1.0
+    }
+}
+
+#[test]
+fn door_sill_matches_the_ground_at_the_door() {
+    let plot = UphillDoor { grade: 0.22 };
+    let center = Vec2::ZERO;
+    let half_x = 2.1;
+    let half_z = 2.5;
+    let yaw = 0.0;
+    let sample = super::sample_footprint(&plot, center, half_x, half_z, yaw);
+    let door = super::door_point(center, half_z, yaw);
+    assert!((sample.door_z - plot.height(door)).abs() < 1e-4);
+    let seat = super::seat_building(&sample, 0.7).expect("gentle uphill door is a plot");
+    assert!(
+        (seat.floor_z - sample.door_z).abs() < 1e-4,
+        "floor must be the door, not the lowest corner"
+    );
+    let min_corner_sit = sample.min_z;
+    assert!(
+        sample.door_z - min_corner_sit > 0.6,
+        "this slope would bury the door if we sat on the lowest corner"
+    );
+    assert!(
+        seat.skirt_height > sample.door_z - sample.min_z,
+        "skirt must cover the downhill air under the floor"
+    );
+}
+
+#[test]
+fn downhill_door_does_not_need_a_tall_skirt() {
+    let plot = DownhillDoor { grade: 0.22 };
+    let sample = super::sample_footprint(&plot, Vec2::ZERO, 2.1, 2.5, 0.0);
+    let seat = super::seat_building(&sample, 0.7).expect("gentle downhill door");
+    assert!((seat.floor_z - sample.door_z).abs() < 1e-4);
+    assert!(seat.skirt_height < 0.5, "door is already the low corner");
+}
+
+#[test]
+fn wet_and_cliff_plots_are_refused() {
+    let wet = super::sample_footprint(&Wet, Vec2::ZERO, 2.0, 2.5, 0.0);
+    assert!(super::seat_building(&wet, 0.7).is_none());
+
+    let cliff = super::sample_footprint(&UphillDoor { grade: 0.8 }, Vec2::ZERO, 2.1, 2.5, 0.0);
+    assert!(super::seat_building(&cliff, 0.7).is_none());
+}
+
+#[test]
+fn plan_on_flat_ground_still_places_a_hamlet() {
+    let mut cfg = HamletLabConfig::default();
+    cfg.apply_tier_defaults(0);
+    cfg.seed = 1;
+    let plan = super::plan_on(&cfg, Some(&Flat)).expect("plan");
+    assert!(plan.house_count >= 3);
+    assert!(plan.civic_count >= 1);
+}
+
+#[test]
+fn plan_on_water_cannot_place_the_well() {
+    let mut cfg = HamletLabConfig::default();
+    cfg.apply_tier_defaults(0);
+    cfg.seed = 1;
+    let err = super::plan_on(&cfg, Some(&Wet)).expect_err("well cannot sit in water");
+    assert!(err.to_string().contains("Well"), "{err}");
 }

@@ -58,6 +58,12 @@ WANTED: dict[str, tuple[str, ...]] = {
         "bush_alpine_low",
         "bush_sparse",
     ),
+    "houses": (
+        "house_hut_thatch",
+        "house_cabin_timber",
+        "house_cottage_stone",
+        "house_hall_large",
+    ),
 }
 
 

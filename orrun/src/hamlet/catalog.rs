@@ -1,4 +1,4 @@
-//! Minimal village footprints (from Orrun `assets/catalog/village.json`).
+//! Village footprints. Dwellings match Asset Lab cabins; civics keep lab sizes.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildingRole {
@@ -14,6 +14,8 @@ pub struct BuildingSpec {
     pub size_x: f32,
     pub size_z: f32,
     pub yaw_offset: f32,
+    /// Authored plinth height. Door-sill seating may bury this much of the back wall.
+    pub foundation_m: f32,
 }
 
 impl BuildingSpec {
@@ -36,44 +38,49 @@ impl BuildingSpec {
 
 const SPECS: &[BuildingSpec] = &[
     BuildingSpec {
-        id: "House_1",
+        id: "house_hut_thatch",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 9.18,
-        size_z: 11.39,
+        size_x: 4.2,
+        size_z: 5.0,
         yaw_offset: 0.0,
+        foundation_m: 0.7,
     },
     BuildingSpec {
-        id: "House_2",
+        id: "house_cabin_timber",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 9.51,
-        size_z: 14.65,
+        size_x: 6.0,
+        size_z: 7.5,
         yaw_offset: 0.0,
+        foundation_m: 0.75,
     },
     BuildingSpec {
-        id: "House_3",
+        id: "house_cottage_stone",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 8.3,
-        size_z: 9.09,
+        size_x: 7.2,
+        size_z: 8.0,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
-        id: "House_4",
+        id: "house_hall_large",
         role: BuildingRole::Dwelling,
-        min_tier: 0,
-        size_x: 8.3,
-        size_z: 9.09,
+        min_tier: 1,
+        size_x: 12.0,
+        size_z: 16.0,
         yaw_offset: 0.0,
+        foundation_m: 0.95,
     },
     BuildingSpec {
         id: "Well",
         role: BuildingRole::Civic,
         min_tier: 0,
-        size_x: 2.85,
-        size_z: 4.3,
+        size_x: 2.2,
+        size_z: 2.2,
         yaw_offset: 0.0,
+        foundation_m: 0.4,
     },
     BuildingSpec {
         id: "Inn",
@@ -82,6 +89,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 17.26,
         size_z: 17.22,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Blacksmith",
@@ -90,6 +98,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 16.66,
         size_z: 14.06,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Mill",
@@ -98,6 +107,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 14.55,
         size_z: 11.21,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Sawmill",
@@ -106,6 +116,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 18.84,
         size_z: 14.06,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Stable",
@@ -114,6 +125,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 20.13,
         size_z: 14.25,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Bell_Tower",
@@ -122,6 +134,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 8.3,
         size_z: 9.54,
         yaw_offset: 0.0,
+        foundation_m: 0.8,
     },
     BuildingSpec {
         id: "Gazebo",
@@ -130,6 +143,7 @@ const SPECS: &[BuildingSpec] = &[
         size_x: 4.44,
         size_z: 5.39,
         yaw_offset: 0.0,
+        foundation_m: 0.5,
     },
 ];
 

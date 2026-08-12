@@ -45,6 +45,8 @@ pub struct HamletLabConfig {
     pub select_temperature: f32,
     /// Weight: closer door-to-market is better.
     pub weight_market: f32,
+    /// Weight: flatter, drier ground is better. Unused when no plot is given.
+    pub weight_ground: f32,
     /// Score bump when a candidate shares a wall.
     pub wall_share_boost: f32,
     /// Small random noise on fitness.
@@ -71,6 +73,7 @@ impl Default for HamletLabConfig {
             candidates_per_settler: 80,
             select_temperature: 0.18,
             weight_market: 2.2,
+            weight_ground: 1.6,
             wall_share_boost: 0.12,
             fitness_noise: 0.08,
             show_occupancy: false,

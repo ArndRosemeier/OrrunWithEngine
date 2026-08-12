@@ -729,6 +729,12 @@ impl BrookWindow {
     }
 
     /// Keep the window around the player, without ever blocking on it.
+    ///
+    /// Tracing a window costs as long as a hitch. The replacement is started
+    /// here and installed when it finishes. If the player outruns the field in
+    /// hand, the next trace is still a background job — never [`Self::settle`].
+    /// Chunks baked in that gap may miss a brook at the medium ring until the
+    /// new field lands; a freeze is worse.
     pub fn follow(&mut self, focus: GlobalXZ) {
         if let Some((_, handle)) = self.pending.take() {
             if handle.is_finished() {
@@ -739,19 +745,13 @@ impl BrookWindow {
             }
         }
         let current = self.field();
-        if !current.covers(focus, MEDIUM.reach_m()) {
-            // The field no longer speaks for ground the streamer is baking, so
-            // there is nothing to do but wait for one that does.
-            self.settle(focus);
-            return;
-        }
-        let drift = {
+        let uncovered = !current.covers(focus, MEDIUM.reach_m());
+        if !uncovered {
             let dx = focus.x - current.centre().x;
             let dz = focus.z - current.centre().z;
-            (dx * dx + dz * dz).sqrt()
-        };
-        if drift < REBUILD_M {
-            return;
+            if (dx * dx + dz * dz).sqrt() < REBUILD_M {
+                return;
+            }
         }
         self.trace(focus);
     }

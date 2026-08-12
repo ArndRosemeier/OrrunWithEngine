@@ -458,28 +458,7 @@ impl ScatterCatalog {
     /// `ORRUN_ASSETS` wins, then the folder next to the executable (a shipped
     /// build), then the crate's own assets (a `cargo run`).
     pub fn discover() -> Result<Self, ScatterError> {
-        let mut tried = Vec::new();
-        if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
-            tried.push(PathBuf::from(dir).join("props"));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                tried.push(dir.join("assets").join("props"));
-            }
-        }
-        tried.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("assets")
-                .join("props"),
-        );
-        for root in &tried {
-            if root.is_dir() {
-                return Self::load(root);
-            }
-        }
-        Err(ScatterError::NoAssets(
-            tried.into_iter().next().unwrap_or_default(),
-        ))
+        Self::load(props_dir()?)
     }
 
     /// Collect every prop under `root`, sorted by name so the variant a lattice
@@ -523,6 +502,32 @@ impl ScatterCatalog {
     pub fn count_of(&self, class: PropClass) -> usize {
         self.assets.iter().filter(|a| a.class == class).count()
     }
+}
+
+/// Folder that holds the vendored prop glbs (`grass/`, `houses/`, …).
+pub(super) fn props_dir() -> Result<PathBuf, ScatterError> {
+    let mut tried = Vec::new();
+    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
+        tried.push(PathBuf::from(dir).join("props"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            tried.push(dir.join("assets").join("props"));
+        }
+    }
+    tried.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("props"),
+    );
+    for root in &tried {
+        if root.is_dir() {
+            return Ok(root.clone());
+        }
+    }
+    Err(ScatterError::NoAssets(
+        tried.into_iter().next().unwrap_or_default(),
+    ))
 }
 
 /// One prop variant that has been uploaded and can be placed.

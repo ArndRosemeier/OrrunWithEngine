@@ -1,18 +1,25 @@
 //! 2D marketplace hamlet lab (port of Godot HamletLabPlanner).
 //!
-//! Height-agnostic packing only. Plaza seating and 3D buildable pads are later stages.
+//! Packing is still 2D. When a [`Plot`] is supplied, candidates on wet, steep,
+//! or high-relief ground lose, and the door is later seated at grade rather than
+//! on the lowest corner.
 
 mod catalog;
 mod config;
 mod occupancy;
 mod planner;
+mod seat;
 
 #[cfg(test)]
 mod tests;
 
 pub use catalog::{ids_with_role, spec_for, BuildingRole, BuildingSpec};
 pub use config::{tier_market_radius, tier_market_sides, HamletLabConfig, CIVIC_BY_TIER};
-pub use planner::plan;
+pub use planner::{plan, plan_on};
+pub use seat::{
+    accept, door_point, ground_score, sample_footprint, seat_building, FootprintSample, Plot, Seat,
+    BANK_EXTRA_M, DOOR_SINK_M, MAX_SKIRT_M, MIN_UPNESS, SEAT_INSET, SKIRT_BITE_M, WATERLINE_MARGIN,
+};
 
 use glam::Vec2;
 use thiserror::Error;

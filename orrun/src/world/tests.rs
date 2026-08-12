@@ -16,9 +16,9 @@ use glam::{Vec2, Vec3};
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
     chunk_span, resolve_spawn, AtlasBounds, AtlasCell, Brook, BrookField, BrookWindow,
-    ContinentalSurface, EntryError, Locomotion, MapPoint, PropClass, ScatterCatalog, SessionState,
-    Terminus, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession, WorldStream,
-    CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
+    ContinentalSurface, EntryError, HamletStand, Locomotion, MapPoint, PropClass, ScatterCatalog,
+    SessionState, Terminus, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession,
+    WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH, classify_settlement, MEDIUM,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
@@ -46,6 +46,151 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
         .iter()
         .all(|c| c.y > c.x + 0.1 && c.y > c.z + 0.1);
     assert!(green, "grass tuft is not green: {:?}", tuft.colors.first());
+}
+
+#[test]
+fn vendored_houses_stand_on_their_plinth() {
+    let hut = engine::model::Model::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/props/houses/house_hut_thatch.glb"),
+    )
+    .expect("thatch hut loads")
+    .build();
+    let min_y = hut
+        .positions
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = hut
+        .positions
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        min_y.abs() < 0.05,
+        "hut base should sit on y=0 after Y-up export, got {min_y}"
+    );
+    assert!(max_y > 3.0, "hut should stand upright; max y is {max_y}");
+}
+
+#[test]
+fn inland_low_pop_is_a_hamlet() {
+    assert_eq!(classify_settlement(7, -1), 0);
+    assert_eq!(classify_settlement(9, -1), 1);
+    assert_eq!(classify_settlement(12, -1), 2);
+    assert_eq!(classify_settlement(11, 0), 3);
+}
+
+#[test]
+fn surface_carries_every_atlas_settlement_pin() {
+    let (atlas, surface) = world_of(20260809, 64);
+    let nodes = atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == crate::atlas::NodeKind::Settlement)
+        .count();
+    assert_eq!(surface.settlements().len(), nodes);
+}
+
+#[test]
+fn largest_settlement_is_the_highest_tier_then_pop() {
+    let (_, surface) = world_of(20260809, 64);
+    let Some(best) = surface.largest_settlement() else {
+        return;
+    };
+    for pin in surface.settlements() {
+        assert!(
+            (best.tier, best.population, best.id) >= (pin.tier, pin.population, pin.id),
+            "pin {} tier {} pop {} outranks the reported largest",
+            pin.id,
+            pin.tier,
+            pin.population
+        );
+    }
+}
+
+#[test]
+fn surface_bakes_atlas_roads_into_world_metres() {
+    let (atlas, surface) = world_of(20260809, 64);
+    assert!(
+        !atlas.road_links.is_empty(),
+        "this seed is supposed to have roads"
+    );
+    assert!(
+        !surface.roads().is_empty(),
+        "atlas road links must become world-metre polylines"
+    );
+    let extent = atlas.size as f32 * CELL_METRES;
+    for road in surface.roads() {
+        assert!(
+            road.points.len() >= 2,
+            "road {} is a path, not a point",
+            road.id
+        );
+        for p in &road.points {
+            assert!(
+                p.x >= -1.0 && p.y >= -1.0 && p.x <= extent + 1.0 && p.y <= extent + 1.0,
+                "road {} left the continent at {p:?}",
+                road.id
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hamlet_split_across_a_river_gets_a_footbridge() {
+    let (_, surface) = world_of(20260809, 64);
+    let brooks = BrookField::empty(GlobalXZ::at(0.0, 0.0));
+    let mut span = None;
+    for pin in surface.settlements() {
+        let plaza = Vec2::new(pin.at.x as f32, pin.at.z as f32);
+        let Some(river) = surface.hydro_index().nearest_river(surface.hydro(), plaza) else {
+            continue;
+        };
+        if river.dist > 180.0 || river.tangent.length_squared() < 1e-6 {
+            continue;
+        }
+        let perp = Vec2::new(-river.tangent.y, river.tangent.x).normalize_or_zero();
+        let offset = (river.half_width + 25.0).max(30.0);
+        let left = river.at + perp * offset;
+        let right = river.at - perp * offset;
+        let hamlet = HamletStand {
+            at: pin.at,
+            houses: vec![
+                GlobalXZ::at(f64::from(left.x), f64::from(left.y)),
+                GlobalXZ::at(f64::from(right.x), f64::from(right.y)),
+            ],
+        };
+        if let Some(found) = super::paths::hamlet_span(&surface, &brooks, &hamlet) {
+            span = Some(found);
+            break;
+        }
+    }
+    let span = span.expect("houses on both banks of a nearby river must get a footbridge");
+    assert_eq!(span.kind, super::paths::SpanKind::Bridge);
+    assert!(
+        span.a.distance(span.b) >= 4.0,
+        "footbridge too short: {}",
+        span.a.distance(span.b)
+    );
+}
+
+#[test]
+fn following_the_brook_window_does_not_trace_on_the_game_thread() {
+    let surface = surface_of(20260809);
+    let mut window = BrookWindow::new(Arc::clone(&surface));
+    let focus = GlobalXZ::at(20_000.0, 20_000.0);
+    let started = Instant::now();
+    window.follow(focus);
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(200),
+        "follow blocked for {took:?}; it must only start a thread"
+    );
+    assert!(
+        !window.field().covers(focus, MEDIUM.reach_m()),
+        "the placeholder field must stay in hand until the thread finishes"
+    );
 }
 
 #[test]
