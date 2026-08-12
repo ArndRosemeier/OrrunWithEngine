@@ -45,6 +45,15 @@ WANTED: dict[str, tuple[str, ...]] = {
         "pine_spruce_narrow",
         "pine_young_sapling",
     ),
+    "reeds": (
+        "reed_tall",
+        "reed_clump",
+    ),
+    "bushes": (
+        "bush_round_lush",
+        "bush_berries",
+        "bush_dry",
+    ),
 }
 
 

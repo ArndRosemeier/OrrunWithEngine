@@ -15,9 +15,10 @@ use glam::Vec2;
 
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
-    chunk_span, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface, EntryError, Locomotion,
-    MapPoint, PropClass, ScatterCatalog, SessionState, TerrainChunkBuilder, WalkInput,
-    WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
+    chunk_span, resolve_spawn, AtlasBounds, AtlasCell, Brook, BrookField, BrookWindow,
+    ContinentalSurface, EntryError, Locomotion, MapPoint, PropClass, ScatterCatalog, SessionState,
+    Terminus, TerrainChunkBuilder, WalkInput, WorldEntryRequest, WorldSession, WorldStream,
+    CHUNK_SAMPLE_M, CHUNK_SPAN_M, MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
@@ -44,6 +45,29 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
         .iter()
         .all(|c| c.y > c.x + 0.1 && c.y > c.z + 0.1);
     assert!(green, "grass tuft is not green: {:?}", tuft.colors.first());
+}
+
+#[test]
+#[ignore = "diagnostic: what a window of brooks costs and what it holds"]
+fn what_a_brook_window_costs() {
+    for seed in [3, 20260809] {
+        let surface = surface_of(seed);
+        let mid = surface.bounds().metres() / 2.0;
+        let started = Instant::now();
+        let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+        let took = started.elapsed().as_secs_f32() * 1000.0;
+        let mut ends: std::collections::BTreeMap<String, usize> = Default::default();
+        for brook in field.brooks() {
+            *ends.entry(format!("{:?}", brook.terminus())).or_default() += 1;
+        }
+        let length: f32 = field.brooks().iter().map(Brook::length_m).sum();
+        eprintln!(
+            "seed {seed}: {} brooks ({:.1} km), {} ponds in {took:.0} ms — {ends:?}",
+            field.brooks().len(),
+            length / 1000.0,
+            field.ponds().len(),
+        );
+    }
 }
 
 #[test]
@@ -130,6 +154,439 @@ fn a_distant_tier_stays_under_the_ground_the_player_walks_on() {
             );
         }
     }
+}
+
+#[test]
+fn a_brook_is_the_same_brook_whichever_window_found_it() {
+    // The whole basis of a moving window: a chunk baked before a rebuild and
+    // its neighbour baked after must be looking at the same water. Two windows
+    // a kilometre and a half apart share a lot of ground, and every brook on
+    // that ground has to come out identical in both.
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let here = GlobalXZ::at(mid, mid);
+    let there = GlobalXZ::at(mid + 1_500.0, mid - 900.0);
+    let a = BrookField::build(&surface, here);
+    let b = BrookField::build(&surface, there);
+
+    let shared = Vec2::new(mid as f32 + 700.0, mid as f32 - 400.0);
+    let near = |field: &BrookField| -> Vec<Vec<[f32; 3]>> {
+        let mut found: Vec<Vec<[f32; 3]>> = field
+            .brooks()
+            .iter()
+            .filter(|brook| brook.points().iter().any(|p| p.distance(shared) < 1_500.0))
+            .map(|brook| {
+                brook
+                    .points()
+                    .iter()
+                    .zip(brook.sheets())
+                    .map(|(p, z)| [p.x, p.y, *z])
+                    .collect()
+            })
+            .collect();
+        found.sort_by(|l, r| l[0].partial_cmp(&r[0]).expect("finite brooks"));
+        found
+    };
+    let (from_here, from_there) = (near(&a), near(&b));
+    assert!(
+        from_here.len() > 10,
+        "expected a good sample of brooks, got {}",
+        from_here.len()
+    );
+    assert_eq!(
+        from_here, from_there,
+        "the two windows disagree about the brooks on the ground they share"
+    );
+}
+
+#[test]
+fn a_brook_never_runs_uphill_and_always_ends_somewhere() {
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+    assert!(field.brooks().len() > 100);
+
+    for brook in field.brooks() {
+        for (i, pair) in brook.sheets().windows(2).enumerate() {
+            if i + 2 == brook.sheets().len() && brook.terminus() != Terminus::Soaks {
+                continue;
+            }
+            assert!(
+                pair[1] <= pair[0],
+                "a sheet rose {:.2} m at step {i} of a {:?} brook",
+                pair[1] - pair[0],
+                brook.terminus()
+            );
+        }
+        assert!(
+            brook.length_m() <= super::MAX_BROOK_LEN_M as f32 * 1.05,
+            "a brook ran {:.0} m past its cap",
+            brook.length_m()
+        );
+    }
+
+    // Soaking away is a real end for a small brook, but it is the least
+    // convincing one, so it must not be what most of them do.
+    let soaks = field
+        .brooks()
+        .iter()
+        .filter(|b| b.terminus() == Terminus::Soaks)
+        .count();
+    assert!(
+        soaks * 2 < field.brooks().len(),
+        "{soaks} of {} brooks just stop",
+        field.brooks().len()
+    );
+}
+
+#[test]
+fn a_brook_lies_in_the_ground_it_runs_through() {
+    // The landform the trace follows is a 90 m average, which in a valley is
+    // the height of the hills around it. The sheet used to sit on that average,
+    // and the water hung in the air. It has to sit on the ground that is there.
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+    assert!(field.brooks().len() > 100);
+
+    for brook in field.brooks() {
+        let n = brook.points().len();
+        for (i, (p, sheet)) in brook.points().iter().zip(brook.sheets()).enumerate() {
+            if i + 1 == n && brook.terminus() != Terminus::Soaks {
+                continue;
+            }
+            let ground = surface.base_ground(GlobalXZ::at(p.x as f64, p.y as f64));
+            assert!(
+                *sheet <= ground,
+                "a {:?} brook's sheet sits {:.2} m above the ground at ({:.0}, {:.0})",
+                brook.terminus(),
+                *sheet - ground,
+                p.x,
+                p.y
+            );
+        }
+    }
+}
+
+#[test]
+fn a_brook_meets_the_water_it_runs_into_without_a_step() {
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+    let mut checked = 0;
+    for brook in field.brooks() {
+        if brook.terminus() != Terminus::Water {
+            continue;
+        }
+        let mouth = *brook.points().last().expect("a brook has points");
+        let sheet = *brook.sheets().last().expect("a brook has sheets");
+        let column = surface.column(GlobalXZ::at(mouth.x as f64, mouth.y as f64));
+        let top = column.water_top().expect("a brook stopped at water");
+        assert!(
+            (sheet - top).abs() < 1e-3,
+            "a brook arrives {:.2} m {} the body it joins",
+            (sheet - top).abs(),
+            if sheet > top { "above" } else { "below" }
+        );
+        checked += 1;
+    }
+    assert!(checked > 5, "only {checked} brooks reached open water");
+}
+
+#[test]
+fn a_pond_holds_water_over_its_whole_floor() {
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+    assert!(field.ponds().len() > 20);
+
+    let mut floor = 0;
+    for pond in field.ponds() {
+        for iz in -8..=8 {
+            for ix in -8..=8 {
+                let p = pond.centre() + Vec2::new(ix as f32 * 6.0, iz as f32 * 6.0);
+                if !pond.contains(p) {
+                    continue;
+                }
+                let mut column = surface.column(GlobalXZ::at(p.x as f64, p.y as f64));
+                if column.is_wet() {
+                    // Atlas water was already here and wins outright.
+                    continue;
+                }
+                field.carve(
+                    GlobalXZ::at(p.x as f64, p.y as f64),
+                    &mut column,
+                    super::BrookDetail::Basins,
+                );
+                assert!(
+                    column.ground() <= pond.sheet_z() - MIN_WATER_DEPTH,
+                    "a pond floor stands {:.2} m above its own surface",
+                    column.ground() - pond.sheet_z()
+                );
+                assert_eq!(column.water_top(), Some(pond.sheet_z()));
+                floor += 1;
+            }
+        }
+    }
+    assert!(floor > 200, "only {floor} points fell inside a pond");
+}
+
+#[test]
+fn a_window_rebuild_leaves_the_ground_and_the_water_where_they_were() {
+    // The seam contract, from the one direction the sub-atlas layer can break
+    // it: a chunk baked while the window sat one place and its neighbour baked
+    // after the window moved. Both windows cover this ground, so both have to
+    // cut it identically or there is a step in the streambed at the seam.
+    let (_atlas, surface) = world_of(20260809, 48);
+    let mid = surface.bounds().metres() / 2.0;
+    let here = GlobalXZ::at(mid, mid);
+    let shared: super::SharedBrooks = Arc::new(std::sync::RwLock::new(Arc::new(
+        BrookField::build(&surface, here),
+    )));
+    let builder = TerrainChunkBuilder::new(Arc::clone(&surface))
+        .with_brooks(Arc::clone(&shared), super::BrookDetail::Channels);
+
+    let coord = busiest_chunk(&shared.read().expect("field"), here);
+    let before = builder.build(coord).expect("build").expect("content");
+
+    // Move the window as far as it can go while still speaking for this chunk.
+    let there = GlobalXZ::at(mid + 2_000.0, mid + 1_200.0);
+    *shared.write().expect("field") = Arc::new(BrookField::build(&surface, there));
+    let after = builder.build(coord).expect("build").expect("content");
+
+    let (land_a, water_a) = split_layers(&before);
+    let (land_b, water_b) = split_layers(&after);
+    assert_eq!(land_a.positions, land_b.positions, "the ground moved");
+    let (water_a, water_b) = (
+        water_a.expect("channels in the busiest chunk"),
+        water_b.expect("channels in the busiest chunk"),
+    );
+    assert_eq!(water_a.positions, water_b.positions, "the water moved");
+}
+
+/// The chunk near `focus` with the most channel running through it.
+///
+/// A seam test over ground with no brook on it proves nothing, so the test
+/// picks its own subject rather than hoping.
+fn busiest_chunk(field: &BrookField, focus: GlobalXZ) -> ChunkCoord {
+    let span = chunk_span();
+    let centre = ChunkCoord::containing(focus, span);
+    let mut best = (0usize, centre);
+    for dz in -3..=3 {
+        for dx in -3..=3 {
+            let coord = ChunkCoord::new(centre.x + dx, centre.z + dz);
+            let origin = coord.origin(span);
+            let min = Vec2::new(origin.x as f32, origin.z as f32);
+            let steps = field.channels_in(min, min + Vec2::splat(span.metres() as f32));
+            if steps > best.0 {
+                best = (steps, coord);
+            }
+        }
+    }
+    assert!(best.0 > 0, "no chunk near the window centre has a brook");
+    best.1
+}
+
+#[test]
+fn a_channel_is_contoured_with_the_rest_of_the_water() {
+    // A brook is seated on the same 4 m columns as the land, so the marching
+    // squares that draw every other body have to see it as wet. Hiding it from
+    // them was what forced a second mesh, and that mesh is what floated.
+    let (_atlas, surface) = world_of(20260809, 48);
+    let mid = surface.bounds().metres() / 2.0;
+    let here = GlobalXZ::at(mid, mid);
+    let field = Arc::new(BrookField::build(&surface, here));
+
+    let mut carved = 0;
+    for brook in field.brooks().iter().take(40) {
+        for point in brook.points() {
+            let p = GlobalXZ::at(point.x as f64, point.y as f64);
+            let mut column = surface.column(p);
+            if column.is_wet() {
+                continue;
+            }
+            field.carve(p, &mut column, super::BrookDetail::Channels);
+            let Some(super::WaterBody::Brook) = column.body() else {
+                continue;
+            };
+            assert!(column.wetness() >= 0.0, "a channel is not wet");
+            assert!(
+                column.contour_wetness() >= 0.0,
+                "a channel would be hidden from the contour that draws it"
+            );
+            let top = column.water_top().expect("a wet channel has a sheet");
+            assert!(
+                column.ground() < top,
+                "a channel's sheet sits in the ground, not over it"
+            );
+            assert!(
+                top <= surface.base_ground(p),
+                "a channel's sheet floats {:.2} m above the uncarved ground",
+                top - surface.base_ground(p)
+            );
+            carved += 1;
+        }
+    }
+    assert!(carved > 100, "only {carved} points landed in a channel");
+
+    // The floating mouth: the centreline can sit on a terrace while the
+    // channel's width covers the bank dropping into a river. Those columns
+    // have to glue too, or the contour is a pane over dry dirt.
+    let mut beside = 0;
+    for brook in field
+        .brooks()
+        .iter()
+        .filter(|b| b.terminus() == Terminus::Water)
+    {
+        for point in brook.points().iter().rev().take(12) {
+            for (dx, dz) in [
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (-4.0, 0.0),
+                (0.0, 4.0),
+                (0.0, -4.0),
+                (8.0, 0.0),
+                (-8.0, 0.0),
+                (0.0, 8.0),
+                (0.0, -8.0),
+            ] {
+                let p = GlobalXZ::at(point.x as f64 + dx, point.y as f64 + dz);
+                let mut column = surface.column(p);
+                if column.is_wet() {
+                    continue;
+                }
+                let atlas_ground = column.ground();
+                field.carve(p, &mut column, super::BrookDetail::Channels);
+                if column.body() != Some(super::WaterBody::Brook) {
+                    continue;
+                }
+                let top = column.water_top().expect("a wet channel has a sheet");
+                assert!(
+                    column.ground() < top,
+                    "a mouth bed sits above its own sheet at ({:.0}, {:.0})",
+                    p.x,
+                    p.z
+                );
+                assert!(
+                    top - column.ground() < 2.0,
+                    "a mouth is a {:.2} m chasm at ({:.0}, {:.0})",
+                    top - column.ground(),
+                    p.x,
+                    p.z
+                );
+                assert!(
+                    top <= atlas_ground + 2.5 + 0.05,
+                    "a mouth sheet floats {:.2} m above the ground at ({:.0}, {:.0})",
+                    top - atlas_ground,
+                    p.x,
+                    p.z
+                );
+                beside += 1;
+            }
+        }
+    }
+    assert!(beside > 20, "only {beside} mouth columns were in a channel");
+
+    let shared: super::SharedBrooks = Arc::new(std::sync::RwLock::new(Arc::clone(&field)));
+    let builder = TerrainChunkBuilder::new(Arc::clone(&surface))
+        .with_brooks(shared, super::BrookDetail::Channels);
+    let coord = busiest_chunk(&field, here);
+    let payload = builder.build(coord).expect("build").expect("content");
+    let water = split_layers(&payload).1.expect("a drawn channel");
+    assert!(
+        water.indices.len() >= 6,
+        "the busiest chunk on the map has no water triangles"
+    );
+}
+
+#[test]
+fn only_reeds_stand_in_the_shallows_and_no_tree_stands_in_a_channel() {
+    assert!(
+        PropClass::Reed.stands_in(0.5),
+        "a reed belongs in the water"
+    );
+    assert!(!PropClass::Reed.stands_in(1.6), "a reed cannot swim");
+    assert!(
+        !PropClass::Reed.stands_in(-6.0),
+        "a reed does not grow up the bank"
+    );
+    for class in super::PROP_CLASSES {
+        if class == PropClass::Reed {
+            continue;
+        }
+        assert!(
+            !class.stands_in(0.3),
+            "{class:?} would stand in standing water"
+        );
+    }
+    // A brook's own margin is a metre or two, so keeping trees out of the
+    // channel is exactly the tree margin.
+    assert!(!PropClass::Tree.stands_in(-1.0));
+    assert!(PropClass::Tree.stands_in(-8.0));
+}
+
+#[test]
+fn bank_cover_needs_a_bank() {
+    let (_atlas, surface) = world_of(20260809, 48);
+    let p = dry_inland(&surface);
+    let ground = surface.column(p).ground();
+    let dry = super::GroundCover::sample(&surface, p, ground, super::Fall::default(), 0.0)
+        .with_water(-500.0);
+    let wet = super::GroundCover::sample(&surface, p, ground, super::Fall::default(), 0.0)
+        .with_water(0.0);
+    assert_eq!(dry.reed, 0.0, "reeds grew half a kilometre from any water");
+    assert_eq!(dry.bank, 0.0);
+    assert!(wet.reed > 0.3, "no reeds at the waterline");
+    assert!(wet.bush > dry.bush, "scrub is no thicker along a bank");
+    assert!(wet.tree > dry.tree, "no gallery woodland along the water");
+}
+
+/// The scatter settles most of its lattice on `water_reach` alone, and skips
+/// the column entirely when it reads dry. If the bound could ever come in under
+/// the real figure, a tree would stand in a river and nothing would catch it.
+#[test]
+fn the_cheap_water_bound_never_claims_ground_is_drier_than_it_is() {
+    let (_atlas, surface) = world_of(20260809, 48);
+    let field = BrookField::build(&surface, dry_inland(&surface));
+    let probe = 220usize;
+    let step = surface.bounds().metres() / probe as f64;
+    let mut wet = 0usize;
+    for iz in 0..probe {
+        for ix in 0..probe {
+            let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+            let mut column = surface.column(p);
+            field.carve(p, &mut column, super::BrookDetail::Channels);
+            let bound = surface
+                .water_reach(p)
+                .max(field.water_reach(Vec2::new(p.x as f32, p.z as f32)));
+            assert!(
+                bound >= column.wetness() - 1e-3,
+                "at ({:.0}, {:.0}) the bound reads {bound:.2} m but the column is {:.2} m",
+                p.x,
+                p.z,
+                column.wetness()
+            );
+            wet += usize::from(column.is_wet());
+        }
+    }
+    assert!(wet > 100, "only {wet} wet samples: nothing was proved");
+}
+
+/// Ordinary dry ground well above the beach, for judging cover on.
+fn dry_inland(surface: &ContinentalSurface) -> GlobalXZ {
+    let probe = 96usize;
+    let step = surface.bounds().metres() / probe as f64;
+    let sea = surface.sea_surface_z();
+    for iz in 0..probe {
+        for ix in 0..probe {
+            let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+            let column = surface.column(p);
+            if !column.is_wet() && column.ground() > sea + 40.0 && column.ground() < 400.0 {
+                return p;
+            }
+        }
+    }
+    panic!("the continent has no ordinary dry ground on it");
 }
 
 #[test]
@@ -563,15 +1020,18 @@ fn entry_resolves_to_dry_ground_near_the_requested_point() {
     let point = MapPoint::from_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
         .expect("river point");
     let request = WorldEntryRequest::at(point);
-    let pose = resolve_spawn(&surface, request).expect("spawn beside the river");
+    let brooks = BrookField::build(&surface, request.requested());
+    let pose = resolve_spawn(&surface, &brooks, request).expect("spawn beside the river");
 
-    assert!(!surface.column(pose.ground()).is_wet(), "spawned in water");
+    let mut standing = surface.column(pose.ground());
+    brooks.carve(pose.ground(), &mut standing, super::BrookDetail::Channels);
+    assert!(!standing.is_wet(), "spawned in water");
     assert!(
         pose.offset_m() <= 480.0,
         "resolver wandered {} m from the request",
         pose.offset_m()
     );
-    let again = resolve_spawn(&surface, request).expect("spawn");
+    let again = resolve_spawn(&surface, &brooks, request).expect("spawn");
     assert_eq!(pose.ground().x, again.ground().x);
     assert_eq!(pose.ground().z, again.ground().z);
     assert_eq!(pose.heading().degrees(), again.heading().degrees());
@@ -603,8 +1063,10 @@ fn entry_into_open_ocean_fails_loudly() {
         return;
     };
     let request = WorldEntryRequest::at_global(bounds, p).expect("in bounds");
+    // No brook has ever reached open ocean, so an empty window is the truth
+    // here and saves tracing a continent to prove it.
     assert!(matches!(
-        resolve_spawn(&surface, request),
+        resolve_spawn(&surface, &BrookField::empty(p), request),
         Err(EntryError::NoSpawn { .. })
     ));
 }
@@ -684,8 +1146,11 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
     let mut world = World::new();
     let mut session = WorldSession::new(Arc::clone(&surface));
     assert_eq!(session.state(), SessionState::Atlas);
-    let pose = session.begin_entry(&mut world, request).expect("entry");
+    session.begin_entry(&mut world, request).expect("entry");
     assert_eq!(session.state(), SessionState::Loading);
+    // The spawn is not known at the moment of the request: the water under it has
+    // to be traced first, and that happens behind the loading screen.
+    assert!(session.spawn().is_none());
 
     for _ in 0..600 {
         session.step(&mut world, WalkInput::IDLE).expect("update");
@@ -708,6 +1173,9 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
         (feet.y as f32 - contact).abs() < 0.2,
         "the player must stand on the drawn ground"
     );
+    let pose = session
+        .spawn()
+        .expect("a spawn, once the world is standing");
     assert!(
         (feet.y - pose.position().y).abs() < 5.0,
         "resolved and resident spawn heights disagree"
@@ -878,10 +1346,15 @@ fn walking_never_leaves_the_ground_missing_underfoot() {
     };
     let request = WorldEntryRequest::at_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
         .expect("river point");
-    let pose = resolve_spawn(&surface, request).expect("spawn");
+    let brooks = BrookField::build(&surface, GlobalXZ::at(mid.x as f64, mid.y as f64));
+    let pose = resolve_spawn(&surface, &brooks, request).expect("spawn");
 
     let mut world = World::new();
-    let mut stream = WorldStream::new(Arc::clone(&surface)).with_visual_ring(2);
+    let mut stream = WorldStream::new(
+        Arc::clone(&surface),
+        BrookWindow::new(Arc::clone(&surface)).shared(),
+    )
+    .with_visual_ring(2);
     let mut p = pose.ground();
     stream.prepare_entry(&mut world, p).expect("entry ring");
 
@@ -902,7 +1375,11 @@ fn walking_never_leaves_the_ground_missing_underfoot() {
 fn rebasing_keeps_the_world_where_it_was() {
     let (_atlas, surface) = world_of(1, 48);
     let mut world = World::new();
-    let mut stream = WorldStream::new(Arc::clone(&surface)).with_visual_ring(1);
+    let mut stream = WorldStream::new(
+        Arc::clone(&surface),
+        BrookWindow::new(Arc::clone(&surface)).shared(),
+    )
+    .with_visual_ring(1);
     let near = GlobalXZ::at(20_000.0, 20_000.0);
     world
         .set_render_origin(engine::space::RenderOrigin::snapped(near, CHUNK_SPAN_M).unwrap())

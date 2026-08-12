@@ -557,12 +557,9 @@ fn resume_saved_stand(
         }
     };
     let heading = Heading::from_degrees(stand.yaw_degrees).expect("a saved heading is finite");
+    let at = stand.at();
     match session.begin_entry(world, WorldEntryRequest::at(point).facing(heading)) {
-        Ok(pose) => eprintln!(
-            "resuming at ({:.0} m, {:.0} m)",
-            pose.ground().x,
-            pose.ground().z
-        ),
+        Ok(()) => eprintln!("resuming at ({:.0} m, {:.0} m)", at.x, at.z),
         Err(err) => eprintln!("cannot resume the saved stand: {err}"),
     }
 }
@@ -803,14 +800,9 @@ fn travel_to(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut W
         return;
     };
     match session.begin_entry(world, WorldEntryRequest::at(point)) {
-        Ok(pose) => {
-            let g = pose.ground();
-            viewer.note = Some(format!(
-                "travelling to ({:.0} m, {:.0} m), {:.0} m from the pick",
-                g.x,
-                g.z,
-                pose.offset_m()
-            ));
+        Ok(()) => {
+            let g = point.to_global();
+            viewer.note = Some(format!("travelling to ({:.0} m, {:.0} m)", g.x, g.z));
             eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
         }
         Err(err) => {
@@ -824,11 +816,8 @@ fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     let progress = session.loading_progress();
     let where_to = session
-        .spawn()
-        .map(|s| {
-            let g = s.ground();
-            format!("({:.0} m, {:.0} m)", g.x, g.z)
-        })
+        .destination()
+        .map(|g| format!("({:.0} m, {:.0} m)", g.x, g.z))
         .unwrap_or_default();
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))

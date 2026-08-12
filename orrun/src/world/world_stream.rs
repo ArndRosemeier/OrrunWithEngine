@@ -26,10 +26,12 @@
 use std::sync::Arc;
 
 use engine::chunk_stream::ChunkStream;
+use engine::contact::ContactSnapshot;
 use engine::error::EngineResult;
 use engine::space::{ChunkLevel, ChunkSpan, GlobalXZ, RenderOrigin};
 use engine::world::World;
 
+use super::brooks::{BrookDetail, SharedBrooks};
 use super::chunk_mesh::TerrainChunkBuilder;
 use super::coords::{CHUNK_SAMPLE_M, CHUNK_SPAN_M};
 use super::surface::ContinentalSurface;
@@ -145,8 +147,16 @@ pub struct WorldStream {
 }
 
 impl WorldStream {
-    pub fn new(surface: Arc<ContinentalSurface>) -> Self {
-        let builder = Arc::new(TerrainChunkBuilder::new(Arc::clone(&surface)));
+    /// Stream the walked tier and the distance tiers off one surface.
+    ///
+    /// The sub-atlas water window goes to the two closest tiers only. The far
+    /// tier samples every hundred and twenty-five metres, where a pond is one
+    /// sample wide and a brook a twentieth of one.
+    pub fn new(surface: Arc<ContinentalSurface>, brooks: SharedBrooks) -> Self {
+        let builder = Arc::new(
+            TerrainChunkBuilder::new(Arc::clone(&surface))
+                .with_brooks(Arc::clone(&brooks), BrookDetail::Channels),
+        );
         let near = ChunkStream::new(builder, NEAR.radius)
             .with_required_radius(ENTRY_RING)
             .with_keep_margin(2)
@@ -154,12 +164,16 @@ impl WorldStream {
 
         let mut distant = Vec::with_capacity(DISTANT.len());
         for tier in DISTANT {
-            let builder = Arc::new(TerrainChunkBuilder::distant(
+            let mut builder = TerrainChunkBuilder::distant(
                 Arc::clone(&surface),
                 tier.span(),
                 tier.sample_m,
                 tier.sink_m,
-            ));
+            );
+            if tier.level == MEDIUM.level {
+                builder = builder.with_brooks(Arc::clone(&brooks), BrookDetail::Basins);
+            }
+            let builder = Arc::new(builder);
             distant.push(
                 ChunkStream::new(builder, tier.radius)
                     .with_level(ChunkLevel::new(tier.level))
@@ -223,6 +237,17 @@ impl WorldStream {
     /// on purpose and standing on one would drop the player through the world.
     pub fn contact_height(&self, p: GlobalXZ) -> Option<f32> {
         self.near.contact_height(p)
+    }
+
+    /// The walked ground as it stands, for a worker thread to sow cover on.
+    pub fn contact_snapshot(&self) -> ContactSnapshot {
+        self.near.contact_snapshot()
+    }
+
+    /// Walked chunks still being baked. The coarse tiers do not count: nothing
+    /// stands on them.
+    pub fn walked_pending_count(&self) -> usize {
+        self.near.pending_count()
     }
 
     /// Bake the entry ring on this thread. Used while the loading screen is up.

@@ -9,8 +9,9 @@ use engine::space::{GlobalPosition, GlobalXZ};
 use glam::Vec2;
 use thiserror::Error;
 
+use super::brooks::{BrookDetail, BrookField};
 use super::coords::{AtlasBounds, CoordError, Heading, MapPoint};
-use super::surface::ContinentalSurface;
+use super::surface::{ContinentalSurface, SurfaceColumn};
 
 /// Spacing of candidate spawn positions.
 pub const SEARCH_STEP_M: f64 = 8.0;
@@ -106,8 +107,14 @@ impl SpawnPose {
 ///
 /// Candidates are visited in rings of increasing radius and, within a ring, in
 /// a fixed angular order, so the same request always yields the same spawn.
+///
+/// Takes the brook window as well as the surface because this is the one place
+/// where the difference matters to a person rather than to a mesh: the surface
+/// alone would happily put the player waist deep in a pond it has never heard
+/// of.
 pub fn resolve_spawn(
     surface: &ContinentalSurface,
+    brooks: &BrookField,
     request: WorldEntryRequest,
 ) -> Result<SpawnPose, EntryError> {
     let wanted = request.requested();
@@ -126,12 +133,12 @@ pub fn resolve_spawn(
             if !bounds.contains_point(p) {
                 continue;
             }
-            let Some(ground) = standable_height(surface, p) else {
+            let Some(ground) = standable_height(surface, brooks, p) else {
                 continue;
             };
             let heading = request
                 .heading
-                .unwrap_or_else(|| face_nearest_water(surface, p));
+                .unwrap_or_else(|| face_nearest_water(surface, brooks, p));
             return Ok(SpawnPose {
                 position: GlobalPosition::at(p.x, ground as f64, p.z),
                 heading,
@@ -147,9 +154,17 @@ pub fn resolve_spawn(
     })
 }
 
+/// The column as the player will meet it: landform plus whatever sub-atlas
+/// water runs through it.
+fn walked_column(surface: &ContinentalSurface, brooks: &BrookField, p: GlobalXZ) -> SurfaceColumn {
+    let mut column = surface.column(p);
+    brooks.carve(p, &mut column, BrookDetail::Channels);
+    column
+}
+
 /// Ground height at `p` when a player can stand there, else `None`.
-fn standable_height(surface: &ContinentalSurface, p: GlobalXZ) -> Option<f32> {
-    let column = surface.column(p);
+fn standable_height(surface: &ContinentalSurface, brooks: &BrookField, p: GlobalXZ) -> Option<f32> {
+    let column = walked_column(surface, brooks, p);
     if column.is_wet() || column.wetness() > -MIN_FREEBOARD_M {
         return None;
     }
@@ -157,10 +172,11 @@ fn standable_height(surface: &ContinentalSurface, p: GlobalXZ) -> Option<f32> {
     if !ground.is_finite() {
         return None;
     }
-    let east = surface.column(GlobalXZ::at(p.x + PROBE_M, p.z)).ground();
-    let west = surface.column(GlobalXZ::at(p.x - PROBE_M, p.z)).ground();
-    let north = surface.column(GlobalXZ::at(p.x, p.z + PROBE_M)).ground();
-    let south = surface.column(GlobalXZ::at(p.x, p.z - PROBE_M)).ground();
+    let at = |x: f64, z: f64| walked_column(surface, brooks, GlobalXZ::at(x, z)).ground();
+    let east = at(p.x + PROBE_M, p.z);
+    let west = at(p.x - PROBE_M, p.z);
+    let north = at(p.x, p.z + PROBE_M);
+    let south = at(p.x, p.z - PROBE_M);
     let slope_x = (east - west).abs() / (2.0 * PROBE_M as f32);
     let slope_z = (north - south).abs() / (2.0 * PROBE_M as f32);
     if slope_x.max(slope_z) > MAX_SPAWN_SLOPE {
@@ -169,8 +185,9 @@ fn standable_height(surface: &ContinentalSurface, p: GlobalXZ) -> Option<f32> {
     Some(ground)
 }
 
-/// Look at the nearest water, so arriving at a river or coast shows the water.
-fn face_nearest_water(surface: &ContinentalSurface, p: GlobalXZ) -> Heading {
+/// Look at the nearest water, so arriving at a river, a coast or a pond shows
+/// the water.
+fn face_nearest_water(surface: &ContinentalSurface, brooks: &BrookField, p: GlobalXZ) -> Heading {
     const LOOK_M: f64 = 60.0;
     let mut best = f32::NEG_INFINITY;
     let mut dir = Vec2::ZERO;
@@ -178,7 +195,7 @@ fn face_nearest_water(surface: &ContinentalSurface, p: GlobalXZ) -> Heading {
         let angle = std::f64::consts::TAU * k as f64 / RING_SAMPLES as f64;
         let d = Vec2::new(angle.cos() as f32, angle.sin() as f32);
         let q = GlobalXZ::at(p.x + LOOK_M * angle.cos(), p.z + LOOK_M * angle.sin());
-        let wetness = surface.column(q).wetness();
+        let wetness = walked_column(surface, brooks, q).wetness();
         if wetness > best {
             best = wetness;
             dir = d;

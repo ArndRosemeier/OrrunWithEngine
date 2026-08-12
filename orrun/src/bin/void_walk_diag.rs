@@ -11,7 +11,8 @@ use engine::world::World;
 use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
 use orrun::world::{
-    resolve_spawn, AtlasBounds, ContinentalSurface, MapPoint, WorldEntryRequest, WorldStream,
+    resolve_spawn, AtlasBounds, BrookWindow, ContinentalSurface, MapPoint, ScatterCatalog,
+    ScatterLayer, WorldEntryRequest, WorldStream,
 };
 
 fn entry_point(atlas: &ContinentAtlas, bounds: AtlasBounds) -> MapPoint {
@@ -43,7 +44,9 @@ fn main() {
     let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     let bounds = surface.bounds();
     let request = WorldEntryRequest::at(entry_point(&atlas, bounds));
-    let pose = resolve_spawn(&surface, request).expect("spawn");
+    let mut brooks = BrookWindow::new(Arc::clone(&surface));
+    brooks.settle(request.requested());
+    let pose = resolve_spawn(&surface, &brooks.field(), request).expect("spawn");
     let dir = pose.heading().direction();
     eprintln!(
         "spawn=({:.0},{:.0}) yaw={:.0}° offset={:.0}m",
@@ -54,7 +57,16 @@ fn main() {
     );
 
     let mut world = World::new();
-    let mut stream = WorldStream::new(Arc::clone(&surface));
+    let mut stream = WorldStream::new(Arc::clone(&surface), brooks.shared());
+    // Cover as well as ground: sowing a window is the heaviest thing that
+    // happens while walking, and the point of this walk is that nothing heavy
+    // happens on the frame it is asked for.
+    let mut scatter = ScatterLayer::install(
+        &mut world,
+        &ScatterCatalog::discover().expect("prop catalogue"),
+        seed,
+    )
+    .expect("prop meshes");
     let mut p = pose.ground();
 
     let t0 = Instant::now();
@@ -66,21 +78,35 @@ fn main() {
     );
 
     // A sprint at 28 m/s on a paced clock: streaming has to keep up with real
-    // time, not with however fast this loop can spin.
+    // time, not with however fast this loop can spin. Long enough to leave the
+    // brook window behind and be handed a new one, which is the last thing in
+    // this pipeline that could block a frame.
+    const FRAMES: usize = 1_800;
     let step = 28.0 / 60.0;
     let frame_budget = Duration::from_micros(16_667);
     let mut rebases = 0usize;
-    for i in 0..900 {
+    let mut worst = (Duration::ZERO, 0usize);
+    for i in 0..FRAMES {
         let tick = Instant::now();
         p = GlobalXZ::at(p.x + dir.x as f64 * step, p.z + dir.y as f64 * step);
         let frame_t0 = Instant::now();
-        if stream.maybe_rebase(&mut world, p).expect("rebase") {
+        brooks.follow(p);
+        let rebased = stream.maybe_rebase(&mut world, p).expect("rebase");
+        if rebased {
             rebases += 1;
         }
         stream
             .sync(&mut world, p, Some(Vec2::new(dir.x, dir.y)))
             .expect("sync");
+        scatter
+            .follow(&mut world, &stream, &surface, &brooks.field(), p, rebased)
+            .expect("cover");
         let dt = frame_t0.elapsed();
+        // The first sow happens on the calling thread on purpose, behind what
+        // would be a loading screen; after that nothing may.
+        if i > 0 && dt > worst.0 {
+            worst = (dt, i);
+        }
 
         if dt > Duration::from_millis(250) {
             eprintln!("STALL frame={i} dt={dt:?}");
@@ -101,11 +127,13 @@ fn main() {
         }
         if i % 180 == 0 {
             eprintln!(
-                "frame {i} pos=({:.0},{:.0}) chunks={} pending={} dt={dt:?}",
+                "frame {i} pos=({:.0},{:.0}) chunks={} pending={} props={} sow={:.0}ms dt={dt:?}",
                 p.x,
                 p.z,
                 stream.resident_count(),
-                stream.pending_count()
+                stream.pending_count(),
+                scatter.placed_count(),
+                scatter.sow_ms(),
             );
         }
         if let Some(rest) = frame_budget.checked_sub(tick.elapsed()) {
@@ -113,10 +141,12 @@ fn main() {
         }
     }
     eprintln!(
-        "OK chunks={} rebases={} end=({:.0},{:.0})",
+        "OK chunks={} rebases={} end=({:.0},{:.0}) worst frame {:?} at {}",
         stream.resident_count(),
         rebases,
         p.x,
-        p.z
+        p.z,
+        worst.0,
+        worst.1,
     );
 }

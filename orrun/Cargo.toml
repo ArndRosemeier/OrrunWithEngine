@@ -26,6 +26,10 @@ path = "src/bin/void_walk_diag.rs"
 name = "chunk_cost"
 path = "src/bin/chunk_cost.rs"
 
+[[bin]]
+name = "brook_map"
+path = "src/bin/brook_map.rs"
+
 [dependencies]
 engine = { workspace = true }
 glam = { workspace = true }

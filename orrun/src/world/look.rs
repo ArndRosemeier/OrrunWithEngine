@@ -32,12 +32,16 @@ fn sky() -> engine::color::Color {
 /// peaks two or three times further out.
 const VISIBILITY_M: f32 = 12_000.0;
 
+/// Where the light comes from. Also decides which hillsides are the dry ones,
+/// so the scatter reads it rather than guessing.
+pub const SUN_DIR: (f32, f32, f32) = (0.62, 0.68, 0.38);
+
 /// Mid-morning sun, and enough sky light that a north slope is still readable.
 ///
 /// Nothing casts shadows yet, so ambient is doing the work of bounced light:
 /// too little and the ground turns to mud wherever it faces away from the sun.
 pub fn install_daylight(world: &mut World) {
-    world.set_sun((0.62, 0.68, 0.38), 0.34);
+    world.set_sun(SUN_DIR, 0.34);
     world.set_clear_color(sky());
     // Thick air near sea level thinning over 1.4 km of altitude: valleys go
     // milky within a few kilometres while a 3 km summit still reads as rock.

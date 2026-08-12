@@ -31,11 +31,17 @@ pub struct SegmentHit {
     pub distance: f32,
 }
 
-/// Uniform grid over the segments of a polyline or closed ring.
+/// Uniform grid over the segments of one or more polylines, or a closed ring.
 #[derive(Debug)]
 pub struct SegmentField {
     points: Vec<Vec2>,
-    closed: bool,
+    /// The point pair each segment runs between.
+    ///
+    /// Explicit rather than implied by "index and index + 1", so several
+    /// separate polylines can share one grid: a brook network is a few hundred
+    /// short traces, and indexing each on its own grid would mean asking every
+    /// one of them how far away it is.
+    ends: Vec<[u32; 2]>,
     min: Vec2,
     max: Vec2,
     origin: Vec2,
@@ -55,15 +61,40 @@ impl SegmentField {
     /// `None` when there are too few points to form a segment.
     pub fn build(points: &[Vec2], closed: bool) -> Option<Self> {
         let needed = if closed { 3 } else { 2 };
-        if points.len() < needed || points.iter().any(|p| !p.is_finite()) {
+        if points.len() < needed {
             return None;
         }
-        let (min, max) = aabb(points);
-        let segments = if closed {
-            points.len()
-        } else {
-            points.len() - 1
-        };
+        let n = points.len() as u32;
+        let last = if closed { n } else { n - 1 };
+        let ends = (0..last).map(|i| [i, (i + 1) % n]).collect();
+        Self::from_parts(points.to_vec(), ends)
+    }
+
+    /// One grid over several open polylines, indexed end to end.
+    ///
+    /// Segment indices run through the paths in order; [`Self::segment_ends`]
+    /// gives back the point indices, which is how a caller finds which path a
+    /// hit belongs to.
+    pub fn build_paths(paths: &[Vec<Vec2>]) -> Option<Self> {
+        let mut points = Vec::new();
+        let mut ends = Vec::new();
+        for path in paths {
+            if path.len() < 2 {
+                continue;
+            }
+            let base = points.len() as u32;
+            points.extend_from_slice(path);
+            ends.extend((0..path.len() as u32 - 1).map(|i| [base + i, base + i + 1]));
+        }
+        Self::from_parts(points, ends)
+    }
+
+    fn from_parts(points: Vec<Vec2>, ends: Vec<[u32; 2]>) -> Option<Self> {
+        if ends.is_empty() || points.iter().any(|p| !p.is_finite()) {
+            return None;
+        }
+        let (min, max) = aabb(&points);
+        let segments = ends.len();
         let cell_m = choose_cell(min, max, segments);
         // One cell of padding keeps every segment away from the border, so a
         // query inside the grid can always compare against the cell it lands in.
@@ -72,7 +103,7 @@ impl SegmentField {
         let nz = (((max.y - min.y) / cell_m).ceil() as usize) + 3;
 
         let span_of = |seg: usize| {
-            let (a, b) = segment_points(points, closed, seg);
+            let (a, b) = (points[ends[seg][0] as usize], points[ends[seg][1] as usize]);
             (
                 cell_of(a.min(b), origin, cell_m, nx, nz),
                 cell_of(a.max(b), origin, cell_m, nx, nz),
@@ -117,8 +148,8 @@ impl SegmentField {
         }
 
         Some(Self {
-            points: points.to_vec(),
-            closed,
+            points,
+            ends,
             min,
             max,
             origin,
@@ -130,6 +161,20 @@ impl SegmentField {
             coarse,
             coarse_nx,
         })
+    }
+
+    /// The two points segment `seg` runs between.
+    #[inline]
+    pub fn segment(&self, seg: usize) -> (Vec2, Vec2) {
+        let [a, b] = self.ends[seg];
+        (self.points[a as usize], self.points[b as usize])
+    }
+
+    /// Point indices of segment `seg`, for callers carrying per-point data.
+    #[inline]
+    pub fn segment_ends(&self, seg: usize) -> (usize, usize) {
+        let [a, b] = self.ends[seg];
+        (a as usize, b as usize)
     }
 
     /// Distance from `p` to the geometry's bounding box; `0` when inside it.
@@ -171,7 +216,7 @@ impl SegmentField {
             for (gx, gz) in self.ring_cells(cx, cz, radius) {
                 touched = true;
                 for &seg in self.cell_edges(gx, gz) {
-                    let (a, b) = segment_points(&self.points, self.closed, seg as usize);
+                    let (a, b) = self.segment(seg as usize);
                     let (t, distance) = point_segment_dist(p, a, b);
                     if best.map(|h| distance < h.distance).unwrap_or(true) {
                         best = Some(SegmentHit {
@@ -319,7 +364,7 @@ impl RingField {
         let centre = self.field.cell_centre(cx, cz);
         let mut inside = self.inside[cz * self.field.nx + cx];
         for &seg in self.field.cell_edges(cx, cz) {
-            let (a, b) = segment_points(&self.field.points, true, seg as usize);
+            let (a, b) = self.field.segment(seg as usize);
             if segments_cross(p, centre, a, b) {
                 inside = !inside;
             }
@@ -331,12 +376,11 @@ impl RingField {
 /// Scanline fill of the ring at cell-centre resolution.
 fn rasterize_inside(field: &SegmentField) -> Vec<bool> {
     let mut inside = vec![false; field.nx * field.nz];
-    let n = field.points.len();
 
     // Bucket segments by the rows they span so each row only sees its own.
     let mut rows: Vec<Vec<u32>> = vec![Vec::new(); field.nz];
-    for seg in 0..n {
-        let (a, b) = segment_points(&field.points, true, seg);
+    for seg in 0..field.ends.len() {
+        let (a, b) = field.segment(seg);
         let lo = row_of(a.y.min(b.y), field);
         let hi = row_of(a.y.max(b.y), field);
         for row in rows.iter_mut().take(hi + 1).skip(lo) {
@@ -349,7 +393,7 @@ fn rasterize_inside(field: &SegmentField) -> Vec<bool> {
         let y = field.origin.y + (cz as f32 + 0.5) * field.cell_m;
         crossings.clear();
         for &seg in &rows[cz] {
-            let (a, b) = segment_points(&field.points, true, seg as usize);
+            let (a, b) = field.segment(seg as usize);
             if (a.y > y) != (b.y > y) {
                 let t = (y - a.y) / (b.y - a.y);
                 crossings.push(a.x + (b.x - a.x) * t);
@@ -405,17 +449,6 @@ fn cell_of(p: Vec2, origin: Vec2, cell_m: f32, nx: usize, nz: usize) -> (usize, 
     let x = ((p.x - origin.x) / cell_m).floor().max(0.0) as usize;
     let z = ((p.y - origin.y) / cell_m).floor().max(0.0) as usize;
     (x.min(nx - 1), z.min(nz - 1))
-}
-
-#[inline]
-fn segment_points(points: &[Vec2], closed: bool, seg: usize) -> (Vec2, Vec2) {
-    let a = points[seg];
-    let b = if closed {
-        points[(seg + 1) % points.len()]
-    } else {
-        points[seg + 1]
-    };
-    (a, b)
 }
 
 /// Distance from `p` to segment `a..b`, with the parameter of the closest point.
@@ -511,6 +544,33 @@ mod tests {
             }
         }
         assert!(checked > 500, "expected a dense comparison, got {checked}");
+    }
+
+    #[test]
+    fn separate_paths_in_one_grid_do_not_join_up() {
+        // The whole reason for `build_paths`: a naive concatenation would leave
+        // a segment bridging the gap between two brooks, and a query in that gap
+        // would be told it is standing in water.
+        let left = vec![Vec2::new(0.0, 0.0), Vec2::new(0.0, 100.0)];
+        let right = vec![Vec2::new(400.0, 0.0), Vec2::new(400.0, 100.0)];
+        let field = SegmentField::build_paths(&[left, right]).expect("two paths");
+        let middle = Vec2::new(200.0, 50.0);
+        let hit = field
+            .nearest_within(middle, 300.0)
+            .expect("both are in range");
+        assert!(
+            (hit.distance - 200.0).abs() < 0.01,
+            "the gap must measure to the nearer path, got {}",
+            hit.distance
+        );
+        assert!(field.nearest_within(middle, 150.0).is_none());
+
+        // Point indices come back so a caller can find which path was hit.
+        let hit = field
+            .nearest_within(Vec2::new(402.0, 50.0), 10.0)
+            .expect("right path");
+        let (a, b) = field.segment_ends(hit.segment);
+        assert_eq!((a, b), (2, 3));
     }
 
     #[test]

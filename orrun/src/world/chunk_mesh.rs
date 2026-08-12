@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use engine::chunk_stream::{ChunkBuilder, ChunkPayload};
-use engine::color::{rgba, Color};
+use engine::color::{rgb, rgba, Color};
 use engine::contact::ContactGrid;
 use engine::error::EngineResult;
 use engine::mesh::BuiltMesh;
@@ -19,8 +19,10 @@ use engine::space::{ChunkCoord, ChunkLayer, ChunkSpan, GlobalXZ};
 use engine::SurfaceMeshStyle;
 use glam::{Vec3, Vec4};
 
+use super::brooks::{BrookDetail, SharedBrooks};
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
-use super::surface::{ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
+use super::scatter::{canopy_noise, Fall, GroundCover};
+use super::surface::{lerp, ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
 
 /// Depth that a fully opaque water vertex stands for.
 ///
@@ -29,12 +31,29 @@ use super::surface::{ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBo
 /// while a channel goes dark without any second geometry pass.
 pub const WATER_DEPTH_SCALE_M: f32 = 9.0;
 
+/// Ground seen through a closed stand: shaded, and much less yellow than the
+/// open grass the same cell would otherwise be.
+const CANOPY_TINT: [u8; 3] = [46, 74, 42];
+/// The green strip along a bank, wetter and ranker than the ground behind it.
+const RIPARIAN_TINT: [u8; 3] = [74, 126, 66];
+/// Standing-wet ground: sedge and peat rather than grass.
+const BOG_TINT: [u8; 3] = [98, 104, 64];
+
+/// sRGB bytes as the linear colour the meshes carry.
+fn tint(c: [u8; 3]) -> Vec4 {
+    rgb(c[0], c[1], c[2]).into()
+}
+
 /// Body tint, around the neutral 0.45 the water shader expects.
 fn water_tint(body: Option<WaterBody>) -> Color {
     match body {
         Some(WaterBody::Ocean) | None => rgba(104, 116, 130, 255),
         Some(WaterBody::Lake { .. }) => rgba(104, 126, 122, 255),
         Some(WaterBody::River { .. }) => rgba(112, 122, 104, 255),
+        // Sub-atlas water is shallow and moving over its own bed, so it reads
+        // browner and clearer than a river does.
+        Some(WaterBody::Brook) => rgba(118, 120, 96, 255),
+        Some(WaterBody::Pond) => rgba(100, 122, 112, 255),
     }
 }
 
@@ -86,6 +105,9 @@ impl ChunkSamples {
 /// Builds land, water, and contact for one chunk from [`ContinentalSurface`].
 pub struct TerrainChunkBuilder {
     surface: Arc<ContinentalSurface>,
+    /// The scatter seed, so the ground tint tears its canopy edges in exactly
+    /// the places the trees stand.
+    seed: u64,
     span: ChunkSpan,
     sample_m: f64,
     style: SurfaceMeshStyle,
@@ -99,12 +121,15 @@ pub struct TerrainChunkBuilder {
     sink_m: f32,
     /// Whether this tier bakes the CPU grid the player stands on.
     contact: bool,
+    /// Sub-atlas water, for the tiers close enough to resolve any of it.
+    brooks: Option<(SharedBrooks, BrookDetail)>,
 }
 
 impl TerrainChunkBuilder {
     /// The tier the player walks on: full detail, real collision.
     pub fn new(surface: Arc<ContinentalSurface>) -> Self {
         Self {
+            seed: surface.world_seed() as u32 as u64,
             surface,
             span: chunk_span(),
             sample_m: CHUNK_SAMPLE_M,
@@ -114,7 +139,15 @@ impl TerrainChunkBuilder {
             },
             sink_m: 0.0,
             contact: true,
+            brooks: None,
         }
+    }
+
+    /// Read the sub-atlas water layer while baking, at the detail this tier can
+    /// carry.
+    pub fn with_brooks(mut self, brooks: SharedBrooks, detail: BrookDetail) -> Self {
+        self.brooks = Some((brooks, detail));
+        self
     }
 
     /// A distance tier: bigger chunks, coarser samples, no collision.
@@ -166,11 +199,22 @@ impl TerrainChunkBuilder {
         let stride = verts + 2;
         let step = self.sample_m;
         let origin = coord.origin(self.span);
+        // Taken once for the whole chunk, never per column: the window may be
+        // swapped for a freshly traced one at any moment, and half a chunk with
+        // brooks and half without would show as a seam through the water.
+        let brooks = self
+            .brooks
+            .as_ref()
+            .map(|(shared, detail)| (Arc::clone(&shared.read().expect("brook window")), *detail));
         let mut columns: Vec<SurfaceColumn> = Vec::with_capacity(stride * stride);
         for sz in -1..(stride as i32 - 1) {
             for sx in -1..(stride as i32 - 1) {
                 let p = GlobalXZ::at(origin.x + sx as f64 * step, origin.z + sz as f64 * step);
-                columns.push(self.surface.column(p));
+                let mut column = self.surface.column(p);
+                if let Some((field, detail)) = &brooks {
+                    field.carve(p, &mut column, *detail);
+                }
+                columns.push(column);
             }
         }
         ChunkSamples {
@@ -209,9 +253,13 @@ impl TerrainChunkBuilder {
                     Vec3::Y
                 };
                 let (lx, lz) = s.local(ix, iz);
+                let p = GlobalXZ::at(
+                    s.origin.x + ix as f64 * s.step,
+                    s.origin.z + iz as f64 * s.step,
+                );
                 positions.push(Vec3::new(lx, column.ground() - self.sink_m, lz));
                 normals.push(normal);
-                colors.push(self.vertex_color(column, normal, sea));
+                colors.push(self.vertex_color(column, normal, sea, p));
             }
         }
 
@@ -237,7 +285,15 @@ impl TerrainChunkBuilder {
         }
     }
 
-    fn vertex_color(&self, column: SurfaceColumn, normal: Vec3, sea: f32) -> Vec4 {
+    /// The colour of one land vertex: material, relief, and what grows on it.
+    ///
+    /// The cover terms matter far past the range anything is scattered at. Props
+    /// stop at a few hundred metres, and without this a forest that fills the
+    /// valley is grass-green ground from the far side of it — the landform reads
+    /// at ten kilometres but the land does not. Cover comes from the same
+    /// [`GroundCover`] the props are placed from, so the tint and the trees are
+    /// never in different places.
+    fn vertex_color(&self, column: SurfaceColumn, normal: Vec3, sea: f32, p: GlobalXZ) -> Vec4 {
         let base = match column.material(sea) {
             SurfaceMaterial::Bed => self.style.bed,
             SurfaceMaterial::Sand => self.style.sand,
@@ -245,14 +301,36 @@ impl TerrainChunkBuilder {
             SurfaceMaterial::Rock => self.style.rock,
         };
         let mut color: Vec4 = base.into();
-        if !column.is_wet() {
-            let slope = (1.0 - normal.y).clamp(0.0, 1.0);
-            let lift = ((column.ground() * 0.015).sin() * 0.04) + slope * 0.06;
-            color.x = (color.x * (1.0 - slope * 0.15) + lift * 0.35).clamp(0.0, 1.0);
-            color.y = (color.y * (1.0 - slope * 0.05) + lift * 0.15).clamp(0.0, 1.0);
-            color.z = (color.z * (1.0 - lift * 0.2)).clamp(0.0, 1.0);
+        // Alpha is soil, not opacity: the shader draws a bed as mud, and only
+        // the columns that actually carry water are one.
+        color.w = 1.0;
+        if column.is_wet() {
+            color.w = 0.0;
+            return color;
         }
-        color
+        let slope = (1.0 - normal.y).clamp(0.0, 1.0);
+        let lift = ((column.ground() * 0.015).sin() * 0.04) + slope * 0.06;
+        color.x = (color.x * (1.0 - slope * 0.15) + lift * 0.35).clamp(0.0, 1.0);
+        color.y = (color.y * (1.0 - slope * 0.05) + lift * 0.15).clamp(0.0, 1.0);
+        color.z = (color.z * (1.0 - lift * 0.2)).clamp(0.0, 1.0);
+
+        let cover = GroundCover::sample(
+            &self.surface,
+            p,
+            column.ground(),
+            Fall::of(normal),
+            canopy_noise(self.seed, p),
+        )
+        .with_water(column.wetness());
+        // Bare rock and sand keep their own colour: a stand thins out to nothing
+        // on a scree slope, and tinting one green would be inventing a forest
+        // the props then fail to put there.
+        let soil = matches!(column.material(sea), SurfaceMaterial::Grass) as u8 as f32;
+        color = color.lerp(tint(CANOPY_TINT), soil * cover.tree * 0.72);
+        color = color.lerp(tint(RIPARIAN_TINT), soil * cover.bank * 0.55);
+        // Poor drainage: wet ground with nowhere to run to.
+        let boggy = cover.bank * cover.moisture * (1.0 - slope / 0.08).clamp(0.0, 1.0);
+        color.lerp(tint(BOG_TINT), soil * boggy * 0.5)
     }
 
     /// Water is the `wetness >= 0` region of the surface, contoured with
@@ -343,10 +421,10 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
         s.column(ix + CORNERS[3].0, iz + CORNERS[3].1),
     ];
     let wet: [bool; 4] = [
-        cols[0].wetness() >= 0.0,
-        cols[1].wetness() >= 0.0,
-        cols[2].wetness() >= 0.0,
-        cols[3].wetness() >= 0.0,
+        cols[0].contour_wetness() >= 0.0,
+        cols[1].contour_wetness() >= 0.0,
+        cols[2].contour_wetness() >= 0.0,
+        cols[3].contour_wetness() >= 0.0,
     ];
     let inside = wet.iter().filter(|w| **w).count();
     if inside == 0 {
@@ -363,30 +441,36 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
             body: cols[k].body(),
         }
     };
-    // The crossing sits at zero depth, so it takes the wet side's sheet height:
-    // interpolating towards a dry column would tilt the water surface.
-    //
     // The pair is ordered by global lattice index first, so the cell on the
     // other side of an edge evaluates the identical expression and the two
     // shorelines meet bit-for-bit.
+    //
+    // Atlas water keeps a level sheet at the rim: lakes and rivers already
+    // meet the bank by construction. A brook on a hillside does not — the wet
+    // sample's sheet can sit metres above the dirt under the crossing, and the
+    // contour draws a pane in the air. Drop that edge onto the land.
     let crossing = |a: usize, b: usize| -> WaterVertex {
         let (a, b) = if (CORNERS[b].1, CORNERS[b].0) < (CORNERS[a].1, CORNERS[a].0) {
             (b, a)
         } else {
             (a, b)
         };
-        let wa = cols[a].wetness();
-        let wb = cols[b].wetness();
+        let wa = cols[a].contour_wetness();
+        let wb = cols[b].contour_wetness();
         let t = (wa / (wa - wb)).clamp(0.0, 1.0);
         let pa = corner(a).position;
         let pb = corner(b).position;
         let inside = if wet[a] { a } else { b };
+        let sheet = cols[inside].sheet_hint();
+        let y = match cols[inside].body() {
+            Some(WaterBody::Brook) => {
+                let land = lerp(cols[a].ground(), cols[b].ground(), t);
+                sheet.min(land)
+            }
+            _ => sheet,
+        };
         WaterVertex {
-            position: Vec3::new(
-                pa.x + (pb.x - pa.x) * t,
-                cols[inside].sheet_hint(),
-                pa.z + (pb.z - pa.z) * t,
-            ),
+            position: Vec3::new(pa.x + (pb.x - pa.x) * t, y, pa.z + (pb.z - pa.z) * t),
             // The contour is the waterline, so the sheet has run out here.
             depth_m: 0.0,
             body: cols[inside].body(),
@@ -398,8 +482,11 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
     // and tear the shoreline.
     let saddle = inside == 2 && ((wet[0] && wet[2]) || (wet[1] && wet[3]));
     if saddle {
-        let centre =
-            0.25 * (cols[0].wetness() + cols[1].wetness() + cols[2].wetness() + cols[3].wetness());
+        let centre = 0.25
+            * (cols[0].contour_wetness()
+                + cols[1].contour_wetness()
+                + cols[2].contour_wetness()
+                + cols[3].contour_wetness());
         if centre < 0.0 {
             let lobe = |k: usize| -> WaterPoly {
                 let prev = (k + 3) % 4;

@@ -20,6 +20,7 @@ use engine::{Key, MouseButton};
 use glam::Vec2;
 use thiserror::Error;
 
+use super::brooks::{BrookField, BrookWindow};
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
@@ -189,22 +190,30 @@ impl Player {
 
 pub struct WorldSession {
     surface: Arc<ContinentalSurface>,
+    /// Sub-atlas water around the player, traced off the main thread.
+    brooks: BrookWindow,
     stream: WorldStream,
     /// Ground cover, once the prop meshes have been uploaded.
     scatter: Option<ScatterLayer>,
     state: SessionState,
+    /// The request being loaded, until the water under it has been traced and
+    /// the spawn it resolves to is known.
+    entering: Option<WorldEntryRequest>,
     spawn: Option<SpawnPose>,
     player: Option<Player>,
 }
 
 impl WorldSession {
     pub fn new(surface: Arc<ContinentalSurface>) -> Self {
-        let stream = WorldStream::new(Arc::clone(&surface));
+        let brooks = BrookWindow::new(Arc::clone(&surface));
+        let stream = WorldStream::new(Arc::clone(&surface), brooks.shared());
         Self {
             surface,
+            brooks,
             stream,
             scatter: None,
             state: SessionState::Atlas,
+            entering: None,
             spawn: None,
             player: None,
         }
@@ -222,8 +231,21 @@ impl WorldSession {
         self.spawn
     }
 
+    /// Where the session is taking the player: the resolved spawn once it is
+    /// known, and until then the point that was asked for.
+    pub fn destination(&self) -> Option<GlobalXZ> {
+        self.spawn
+            .map(|pose| pose.ground())
+            .or_else(|| self.entering.map(|request| request.requested()))
+    }
+
     pub fn stream(&self) -> &WorldStream {
         &self.stream
+    }
+
+    /// The sub-atlas water the world is currently being cut with.
+    pub fn brooks(&self) -> Arc<BrookField> {
+        self.brooks.field()
     }
 
     /// Global position of the player, once they exist.
@@ -239,35 +261,26 @@ impl WorldSession {
         &mut self,
         world: &mut World,
         request: WorldEntryRequest,
-    ) -> Result<SpawnPose, SessionError> {
-        let pose = resolve_spawn(&self.surface, request)?;
+    ) -> Result<(), SessionError> {
+        // The spawn this resolves to is not the one the player gets: the water
+        // under it is not traced yet, and a pond the resolver cannot see is a
+        // pond it will stand them in. It is here to answer the one question that
+        // has to be answered before anything is torn down — whether the request
+        // has any walkable ground at all — and to say where the render origin
+        // goes, which the true spawn will be a few metres from.
+        let approach = resolve_spawn(&self.surface, &self.brooks.field(), request)?;
 
-        // Prop meshes are uploaded once, on the first entry, so a player who
-        // never leaves the map never pays for them.
-        if self.scatter.is_none() {
-            let catalog = ScatterCatalog::discover()?;
-            self.scatter = Some(ScatterLayer::install(
-                world,
-                &catalog,
-                self.surface.world_seed(),
-            )?);
-        }
         if let Some(scatter) = self.scatter.as_mut() {
             scatter.clear(world)?;
         }
 
         self.stream.reset(world);
-        world.set_render_origin(RenderOrigin::snapped(pose.ground(), CHUNK_SPAN_M)?)?;
-        self.spawn = Some(pose);
-        self.player = Some(Player {
-            position: pose.position(),
-            yaw_degrees: pose.heading().degrees(),
-            pitch_degrees: 0.0,
-            mode: Locomotion::Walk,
-            heading: pose.heading().direction(),
-        });
+        world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
+        self.spawn = None;
+        self.player = None;
+        self.entering = Some(request);
         self.state = SessionState::Loading;
-        Ok(pose)
+        Ok(())
     }
 
     /// Go back to the map without discarding the loaded world.
@@ -333,6 +346,39 @@ impl WorldSession {
     }
 
     fn update_loading(&mut self, world: &mut World) -> Result<(), SessionError> {
+        // Water first, and off this thread. Ground baked before the brooks were
+        // known would have to be thrown away, so nothing else starts until the
+        // window covers the spawn. The window reaches kilometres and the resolver
+        // searches metres, so the requested point centres both.
+        if let Some(request) = self.entering {
+            // Prop meshes are read off disk and uploaded once, on the first
+            // entry, so a player who never leaves the map never pays for them.
+            // It happens here, a frame to itself, while the brook thread runs:
+            // done during the request it lands on the frame that still has the
+            // map on it, which is the one frame that must not stall.
+            if self.scatter.is_none() {
+                let catalog = ScatterCatalog::discover()?;
+                self.scatter = Some(ScatterLayer::install(
+                    world,
+                    &catalog,
+                    self.surface.world_seed(),
+                )?);
+                return Ok(());
+            }
+            if !self.brooks.traced(request.requested()) {
+                return Ok(());
+            }
+            let pose = resolve_spawn(&self.surface, &self.brooks.field(), request)?;
+            self.spawn = Some(pose);
+            self.player = Some(Player {
+                position: pose.position(),
+                yaw_degrees: pose.heading().degrees(),
+                pitch_degrees: 0.0,
+                mode: Locomotion::Walk,
+                heading: pose.heading().direction(),
+            });
+            self.entering = None;
+        }
         let spawn = self.spawn.ok_or(SessionError::NoWorld)?;
         let focus = spawn.ground();
         self.stream.sync(world, focus, None)?;
@@ -376,10 +422,20 @@ impl WorldSession {
         }
 
         let foot = player.position.horizontal();
+        // Before the streamer, so a chunk is never baked against a window that
+        // has stopped reaching it.
+        self.brooks.follow(foot);
         let rebased = self.stream.maybe_rebase(world, foot)?;
         self.stream.sync(world, foot, Some(player.heading))?;
         if let Some(scatter) = self.scatter.as_mut() {
-            scatter.follow(world, &self.stream, &self.surface, foot, rebased)?;
+            scatter.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                &self.brooks.field(),
+                foot,
+                rebased,
+            )?;
         }
 
         match player.mode {
@@ -424,6 +480,11 @@ impl WorldSession {
     /// Grass, stones, and trees standing around the player.
     pub fn scattered_count(&self) -> usize {
         self.scatter.as_ref().map_or(0, ScatterLayer::placed_count)
+    }
+
+    /// What the last sow of ground cover took on its own thread.
+    pub fn sow_ms(&self) -> f32 {
+        self.scatter.as_ref().map_or(0.0, ScatterLayer::sow_ms)
     }
 }
 

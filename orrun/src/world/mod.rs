@@ -7,12 +7,14 @@
 //! * [`WorldSession`] runs atlas → loading → walking in one process.
 
 mod atlas_fields;
+mod brooks;
 mod chunk_mesh;
 mod coords;
 mod entry;
 mod hydro_geom;
 mod look;
 mod ring_field;
+mod rng;
 mod scatter;
 mod session;
 mod surface;
@@ -22,6 +24,10 @@ mod world_stream;
 mod tests;
 
 pub use atlas_fields::AtlasFields;
+pub use brooks::{
+    Brook, BrookDetail, BrookField, BrookHit, BrookWindow, Pond, SharedBrooks, Terminus,
+    CHANNEL_WIDTH_M, COVERS_M, MAX_BROOK_LEN_M, REBUILD_M, SEED_RADIUS_M,
+};
 pub use chunk_mesh::TerrainChunkBuilder;
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
@@ -29,7 +35,9 @@ pub use coords::{
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use look::{install_daylight, install_materials};
-pub use scatter::{GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer};
+pub use scatter::{
+    Fall, GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer, PROP_CLASSES,
+};
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
 pub use surface::{
     ContinentalSurface, SurfaceColumn, SurfaceError, SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,

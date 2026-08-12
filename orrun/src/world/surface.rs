@@ -80,8 +80,36 @@ pub enum SurfaceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaterBody {
     Ocean,
-    Lake { id: i32 },
-    River { class: i32 },
+    Lake {
+        id: i32,
+    },
+    River {
+        class: i32,
+    },
+    /// A sub-atlas channel, seated and drawn on the same lattice as the land.
+    Brook,
+    /// A sub-atlas basin, filled to the height it would spill at.
+    Pond,
+}
+
+/// What the sub-atlas water layer asks of a column it runs through.
+///
+/// The layer knows its own geometry and nothing about the landform, so it
+/// states the sheet, how far the bed sits under it here, and how far inside the
+/// water this point is. Everything else — which body wins, the clearance
+/// contract — stays with the column.
+#[derive(Clone, Copy, Debug)]
+pub struct WaterCarve {
+    pub sheet_z: f32,
+    /// Bed below the sheet at this exact spot; negative on the bank above it.
+    pub depth_m: f32,
+    /// Metres into the water; negative outside it, in the bank blend.
+    pub margin_m: f32,
+    pub body: WaterBody,
+    /// Cut or fill to the profile. A brook on a hillside has to raise a floor
+    /// on the downhill side or the sheet is a pane over the slope; a pond
+    /// never fills, it only cuts.
+    pub seat: bool,
 }
 
 /// Albedo class for chunk vertex tinting.
@@ -112,6 +140,46 @@ impl SurfaceColumn {
     /// Signed water field used for contouring; `>= 0` means standing water.
     pub fn wetness(self) -> f32 {
         self.wetness
+    }
+
+    /// The same field as the marching squares see it.
+    pub fn contour_wetness(self) -> f32 {
+        self.wetness
+    }
+
+    /// Sink a sub-atlas channel or basin into this column.
+    ///
+    /// Atlas hydrology wins outright: where an ocean, lake or river already
+    /// stands, a brook has no business arguing about the sheet height — it was
+    /// traced until it reached exactly this water and stopped.
+    pub(super) fn carve(&mut self, carve: WaterCarve) {
+        if self.body.is_some() {
+            return;
+        }
+        let target = carve.sheet_z - carve.depth_m;
+        if carve.seat {
+            self.ground = target;
+        } else {
+            self.ground = self.ground.min(target);
+        }
+        if carve.margin_m < 0.0 {
+            // Still report the distance to the bank. The contour that draws a
+            // pond interpolates against the dry side, and the atlas figure out
+            // here is the distance to the sea — kilometres — which would pull
+            // every crossing onto the wet lattice point and shrink the pond to
+            // the cells it happens to cover.
+            self.wetness = self.wetness.max(carve.margin_m);
+            if carve.seat {
+                self.sheet = carve.sheet_z;
+            }
+            return;
+        }
+        self.sheet = carve.sheet_z;
+        self.body = Some(carve.body);
+        self.ground = self
+            .ground
+            .min(self.sheet - MIN_WATER_DEPTH.max(WATER_CLEARANCE));
+        self.wetness = (self.sheet - self.ground).min(carve.margin_m);
     }
 
     pub fn is_wet(self) -> bool {
@@ -479,6 +547,26 @@ impl ContinentalSurface {
         self.column(p).wetness()
     }
 
+    /// An upper bound on `column(p).wetness()`, from the outlines alone.
+    ///
+    /// Every body contributes `min(depth, distance)` to the signed water field,
+    /// so the distance halves on their own can only overstate it. That makes
+    /// this a sound way to prove a spot dry, and it costs three index lookups
+    /// where a column costs several octaves of noise on top of them — which is
+    /// the difference between forty thousand reed candidates being affordable
+    /// and not.
+    pub fn water_reach(&self, p: GlobalXZ) -> f32 {
+        let xz = Vec2::new(p.x as f32, p.z as f32);
+        let mut reach = -self.index.coast_signed(&self.hydro, xz);
+        if let Some((_, sd)) = self.index.nearest_lake(&self.hydro, xz) {
+            reach = reach.max(sd);
+        }
+        if let Some(hit) = self.index.nearest_river(&self.hydro, xz) {
+            reach = reach.max(hit.half_width.max(1.0) - hit.dist);
+        }
+        reach
+    }
+
     pub fn is_wet(&self, p: GlobalXZ) -> bool {
         self.column(p).is_wet()
     }
@@ -519,12 +607,12 @@ fn valley_radius(class: i32, channel_w: f32) -> f32 {
 }
 
 #[inline]
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
+pub(super) fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
 #[inline]
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(super) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0 + 1e-6)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
