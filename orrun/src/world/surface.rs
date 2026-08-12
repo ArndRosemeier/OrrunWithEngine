@@ -58,8 +58,21 @@ const SWELL_HEIGHT: f32 = 12.0;
 const HILL_HEIGHT: f32 = 38.0;
 const RIPPLE_HEIGHT: f32 = 8.0;
 const GRIT_HEIGHT: f32 = 2.2;
-const MOUNTAIN_DETAIL: f32 = 55.0;
+const MOUNTAIN_DETAIL: f32 = 90.0;
+/// Secondary crests and hanging valleys, shorter than the loft wave.
+const SPUR_DETAIL: f32 = 48.0;
 const WARP_STRENGTH: f32 = 70.0;
+/// Extra domain warp of the loft in high relief. Without it the kilometre
+/// interpolant, the neighbourhood contrast, and the swell all share one
+/// wavelength and the range reads as a sine.
+const ALPINE_WARP_M: f32 = 340.0;
+const MACRO_NEAR_M: f32 = 880.0;
+const MACRO_FAR_M: f32 = 2_150.0;
+/// How hard high-relief loft is pulled away from that neighbourhood.
+const MACRO_CONTRAST: f32 = 2.45;
+/// Height where the land starts to read alpine, and where that is complete.
+const ALPINE_M: f32 = 450.0;
+const ALPINE_FULL_M: f32 = 1_500.0;
 
 #[derive(Debug, Error)]
 pub enum SurfaceError {
@@ -238,6 +251,7 @@ struct TerrainDetail {
     ripples: Noise,
     grit: Noise,
     mountain: Noise,
+    spurs: Noise,
     warp_a: Noise,
     warp_b: Noise,
 }
@@ -251,37 +265,92 @@ impl TerrainDetail {
             ripples: Noise::new(seed ^ 0x2199_1E55),
             grit: Noise::new(seed ^ 0x6717_0001),
             mountain: Noise::new(seed ^ 0xB01D),
+            spurs: Noise::new(seed ^ 0x5B09),
             warp_a: Noise::new(seed ^ 0xC0DE),
             warp_b: Noise::new(seed ^ 0xD00D),
         }
     }
 
     fn elevation(&self, fields: &AtlasFields, x: f32, z: f32, detail_amt: f32) -> f32 {
-        let warp_x = self.warp_a.sample2(x * 0.00035, z * 0.00035) * WARP_STRENGTH;
-        let warp_z = self.warp_b.sample2(x * 0.00035 + 40.0, z * 0.00035) * WARP_STRENGTH;
+        let relief = fields.sample_smooth(&fields.relief01, x, z).clamp(0.0, 1.0);
+        let e_atlas = fields.sample_smooth(&fields.elevation_m, x, z);
+        let alpine_hint = smoothstep(ALPINE_M, ALPINE_FULL_M, e_atlas) * relief;
+        let warp_m = WARP_STRENGTH + ALPINE_WARP_M * alpine_hint;
+        let warp_x = self.warp_a.sample2(x * 0.00032, z * 0.00032) * warp_m;
+        let warp_z = self.warp_b.sample2(x * 0.00032 + 40.0, z * 0.00032) * warp_m;
         let px = x + warp_x;
         let pz = z + warp_z;
 
-        let relief = fields.sample_smooth(&fields.relief01, x, z).clamp(0.0, 1.0);
-        let base = fields.sample_smooth(&fields.elevation_m, x, z);
-        let swell =
-            self.swell.sample2(px * 0.0008, pz * 0.0008) * SWELL_HEIGHT * lerp(1.0, 0.4, relief);
+        let base = self.steepen_base(fields, px, pz, relief);
+        let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, base);
+        let swell = self.swell.sample2(px * 0.0008, pz * 0.0008)
+            * SWELL_HEIGHT
+            * lerp(1.0, 0.4, relief)
+            * lerp(1.0, 0.12, alpine);
         let hills = self.hills.fbm2(px * 0.0024, pz * 0.0024, 4, 2.05, 0.5)
             * HILL_HEIGHT
             * lerp(0.55, 1.0, relief)
+            * lerp(1.0, 0.22, alpine)
             * lerp(0.35, 1.0, detail_amt);
         let ripples = self.ripples.fbm2(px * 0.006, pz * 0.006, 3, 2.1, 0.5)
             * RIPPLE_HEIGHT
             * lerp(0.7, 1.0, relief)
             * detail_amt;
         let grit = self.grit.fbm2(px * 0.02, pz * 0.02, 2, 2.2, 0.5) * GRIT_HEIGHT * detail_amt;
-        let ridge01 = self.mountain.sample2(px * 0.0009, pz * 0.0009) * 0.5 + 0.5;
-        let shaped = ridge01.clamp(0.0, 1.0).powf(1.35);
-        let ridge = (shaped - 0.35)
+        // Crests sit off the loft wavelength (~700 m, not 1.4 km) so amplifying
+        // the atlas cannot keep a parallel wave.
+        let ridge01 = self.mountain.ridged2(px * 0.0014, pz * 0.0014, 4, 2.18, 0.46) * 0.5 + 0.5;
+        let shaped = ridge01.clamp(0.0, 1.0).powf(lerp(1.45, 2.15, alpine));
+        let ridge = (shaped - 0.40)
             * MOUNTAIN_DETAIL
             * lerp(0.35, 1.0, relief)
+            * lerp(0.50, 1.85, alpine)
             * lerp(0.25, 1.0, detail_amt);
-        base + swell + hills + ripples + grit + ridge
+        let spur01 = self.spurs.ridged2(px * 0.0038, pz * 0.0038, 3, 2.25, 0.5) * 0.5 + 0.5;
+        let spur = (spur01.clamp(0.0, 1.0).powf(1.85) - 0.38)
+            * SPUR_DETAIL
+            * relief
+            * alpine
+            * lerp(0.20, 1.0, detail_amt);
+        base + swell + hills + ripples + grit + ridge + spur
+    }
+
+    /// Pull atlas loft away from a neighbourhood in high relief.
+    ///
+    /// Two radii, rotated by the warp, so the contrast is not a 1.4 km Laplacian
+    /// of a bicubic field — which is a sine.
+    fn steepen_base(&self, fields: &AtlasFields, x: f32, z: f32, relief: f32) -> f32 {
+        let e0 = fields.sample_smooth(&fields.elevation_m, x, z);
+        if relief < 0.04 || e0 < 8.0 {
+            return e0;
+        }
+        let turn = self.warp_b.sample2(x * 0.00019, z * 0.00019) * std::f32::consts::PI;
+        let jitter = self.warp_a.sample2(x * 0.00021, z * 0.00021);
+        let near = self.arm_avg(fields, x, z, MACRO_NEAR_M * (1.0 + 0.16 * jitter), turn);
+        let far = self.arm_avg(
+            fields,
+            x,
+            z,
+            MACRO_FAR_M * (1.0 + 0.10 * jitter),
+            turn + 0.7,
+        );
+        let e_avg = 0.58 * near + 0.42 * far;
+        let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, e0.max(e_avg));
+        let contrast = lerp(1.0, MACRO_CONTRAST, relief) * lerp(1.0, 1.22, alpine);
+        let delta = e0 - e_avg;
+        let amount = if delta >= 0.0 {
+            contrast
+        } else {
+            lerp(1.0, contrast, 0.55)
+        };
+        let steep = e_avg + delta * amount;
+        steep.max(e0 - 280.0)
+    }
+
+    fn arm_avg(&self, fields: &AtlasFields, x: f32, z: f32, r: f32, angle: f32) -> f32 {
+        let (c, s) = (angle.cos(), angle.sin());
+        let at = |dx: f32, dz: f32| fields.sample_bilinear(&fields.elevation_m, x + dx, z + dz);
+        0.25 * (at(c * r, s * r) + at(-c * r, -s * r) + at(-s * r, c * r) + at(s * r, -c * r))
     }
 }
 

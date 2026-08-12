@@ -53,6 +53,10 @@ WANTED: dict[str, tuple[str, ...]] = {
         "bush_round_lush",
         "bush_berries",
         "bush_dry",
+        "bush_broad_lush",
+        "bush_tall_open",
+        "bush_alpine_low",
+        "bush_sparse",
     ),
 }
 

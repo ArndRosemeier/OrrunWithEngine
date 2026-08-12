@@ -7,7 +7,7 @@ use engine::proc::Noise;
 use glam::Vec2;
 use rustc_hash::FxHashMap;
 
-use super::biomes;
+use super::biomes::{self, Biome};
 use super::features::{edge_owner, Dir, EndpointKind, Kind};
 use super::pack;
 use super::types::{Endpoint, Link};
@@ -21,6 +21,9 @@ const LAKE_SMOOTH_ITERS: usize = 9;
 const LAKE_SMOOTH_HALF_WIN: usize = 3;
 const RIVER_MEANDER_FRAC: f32 = 0.18;
 const RIVER_CURVE_SPACING_M: f32 = 36.0;
+/// How far a mouth may walk past the last land cell to meet the meandered shore.
+const MOUTH_MAX_M: f32 = 700.0;
+const MOUTH_STEP_M: f32 = 24.0;
 
 /// River-like shore meander: amplitudes (m) and wavelengths along the perimeter (m).
 #[derive(Clone, Copy)]
@@ -78,6 +81,8 @@ pub struct RiverPolyline {
     pub surface_z: Vec<f32>,
     pub half_width_m: f32,
     pub sink: HydroSink,
+    /// Last point is an ocean or lake endpoint, not a confluence with another reach.
+    pub(crate) at_sink: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,9 +117,13 @@ impl HydroVectors {
     pub fn bake(atlas: &ContinentAtlas) -> Self {
         let sea = atlas.sea_surface_z as f32;
         let seed = layer_seed(atlas.world_seed, "hydro_vectors");
-        let rivers = build_rivers(atlas, sea, seed);
+        let mut rivers = build_rivers(atlas, sea, seed);
         let lakes = build_lakes(atlas, seed);
         let coasts = build_coasts(atlas, seed);
+        // Polylines stop at the last land cell; the shoreline is a meandered
+        // ring. Walk each mouth out until it is actually in the water it drains
+        // to, or the overlay's "ocean" endpoint is a cul-de-sac on the beach.
+        reach_sinks(&mut rivers, &lakes, &coasts, sea);
         let (cell_rivers, cell_lakes, cell_coasts) =
             build_cell_index(atlas.size, &rivers, &lakes, &coasts);
         let hydro = Self {
@@ -295,6 +304,9 @@ fn build_rivers(atlas: &ContinentAtlas, sea: f32, seed: u32) -> Vec<RiverPolylin
             surface_z,
             half_width_m: half_width_for_class(class),
             sink,
+            at_sink: segs[*chain.last().expect("a stitched reach has a last cell")]
+                .b_edge
+                .is_none(),
         });
         next_id += 1;
     }
@@ -1044,7 +1056,11 @@ fn stamp_aabb(
 
 fn endpoint_metres(atlas: &ContinentAtlas, ax: i32, az: i32, ep: Endpoint) -> Vec2 {
     match ep.kind {
-        EndpointKind::Ocean | EndpointKind::Lake | EndpointKind::Node => cell_centre(ax, az),
+        EndpointKind::Ocean => water_edge_metres(atlas, ax, az, |b| b == Biome::Ocean)
+            .unwrap_or_else(|| cell_centre(ax, az)),
+        EndpointKind::Lake => water_edge_metres(atlas, ax, az, |b| b == Biome::Lake)
+            .unwrap_or_else(|| cell_centre(ax, az)),
+        EndpointKind::Node => cell_centre(ax, az),
         EndpointKind::EdgePort => {
             let (ox, oz, dir) = edge_owner(ep.ref_id);
             let ports = atlas
@@ -1067,6 +1083,145 @@ fn endpoint_metres(atlas: &ContinentAtlas, ax: i32, az: i32, ep: Endpoint) -> Ve
             Vec2::new(mx * CELL_METRES, mz * CELL_METRES)
         }
     }
+}
+
+/// Midpoint of the cell edge that faces `pred` water. The map overlay already
+/// puts mouths here; the 3D polyline used to sit on the land-cell centre, half
+/// a kilometre short of the sea.
+fn water_edge_metres(
+    atlas: &ContinentAtlas,
+    ax: i32,
+    az: i32,
+    pred: impl Fn(Biome) -> bool,
+) -> Option<Vec2> {
+    for dir in [Dir::East, Dir::South, Dir::West, Dir::North] {
+        let (dx, dz) = dir.delta();
+        let nx = ax + dx;
+        let nz = az + dz;
+        let hit = if !atlas.in_bounds(nx, nz) {
+            pred(Biome::Ocean)
+        } else {
+            pred(pack::biome(atlas.cell_at(nx, nz)))
+        };
+        if hit {
+            let (mx, mz) = match dir {
+                Dir::North => (ax as f32 + 0.5, az as f32),
+                Dir::East => (ax as f32 + 1.0, az as f32 + 0.5),
+                Dir::South => (ax as f32 + 0.5, az as f32 + 1.0),
+                Dir::West => (ax as f32, az as f32 + 0.5),
+            };
+            return Some(Vec2::new(mx * CELL_METRES, mz * CELL_METRES));
+        }
+    }
+    None
+}
+
+/// Walk each mouth from the last land cell into the water it was authored to
+/// drain into. Coast and lake rings meander hundreds of metres off the atlas
+/// grid, so an endpoint on the cell edge is still a beach.
+fn reach_sinks(
+    rivers: &mut [RiverPolyline],
+    lakes: &[LakeOutline],
+    coasts: &[CoastRing],
+    sea: f32,
+) {
+    let coast_boxes: Vec<(Vec2, Vec2)> = coasts.iter().map(|c| padded_aabb(&c.ring, 250.0)).collect();
+    for river in rivers.iter_mut() {
+        if !river.at_sink {
+            continue;
+        }
+        let Some(heading) = mouth_heading(&river.points) else {
+            continue;
+        };
+        match river.sink {
+            HydroSink::Ocean => {
+                extend_mouth(river, heading, sea, |p| {
+                    !inside_any_coast(p, coasts, &coast_boxes)
+                });
+            }
+            HydroSink::Lake { lake_id } => {
+                let Some(lake) = lakes.iter().find(|l| l.id == lake_id) else {
+                    continue;
+                };
+                let sheet = lake.surface_z.max(sea);
+                extend_mouth(river, heading, sheet, |p| {
+                    point_in_ring(p + shore_domain_warp(p) * 0.45, &lake.ring)
+                });
+            }
+        }
+    }
+}
+
+fn mouth_heading(points: &[Vec2]) -> Option<Vec2> {
+    let last = *points.last()?;
+    for p in points.iter().rev().skip(1) {
+        let d = last - *p;
+        if d.length_squared() > 16.0 {
+            return Some(d.normalize());
+        }
+    }
+    None
+}
+
+fn extend_mouth(
+    river: &mut RiverPolyline,
+    heading: Vec2,
+    sheet: f32,
+    in_water: impl Fn(Vec2) -> bool,
+) {
+    let mut at = *river.points.last().expect("a river has points");
+    let past = river.half_width_m.max(24.0);
+    let mut travelled = 0.0;
+    let mut past_water = 0.0;
+    let mut seen_water = in_water(at);
+    while travelled < MOUTH_MAX_M {
+        at += heading * MOUTH_STEP_M;
+        travelled += MOUTH_STEP_M;
+        river.points.push(at);
+        river.surface_z.push(sheet);
+        if in_water(at) {
+            seen_water = true;
+            past_water += MOUTH_STEP_M;
+            if past_water >= past {
+                return;
+            }
+        } else if seen_water {
+            return;
+        }
+    }
+}
+
+fn inside_any_coast(p: Vec2, coasts: &[CoastRing], boxes: &[(Vec2, Vec2)]) -> bool {
+    let q = p + shore_domain_warp(p);
+    for (coast, (mn, mx)) in coasts.iter().zip(boxes) {
+        if q.x < mn.x || q.y < mn.y || q.x > mx.x || q.y > mx.y {
+            continue;
+        }
+        if point_in_ring(q, &coast.ring) {
+            return true;
+        }
+    }
+    false
+}
+
+fn padded_aabb(ring: &[Vec2], pad: f32) -> (Vec2, Vec2) {
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for p in ring {
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    (min - Vec2::splat(pad), max + Vec2::splat(pad))
+}
+
+/// Domain warp applied to coast/lake queries so the waterline is not the
+/// kilometre-cell stair the ring was extracted from. The 3D sampler uses the
+/// same offset; mouths have to as well or they stop on the beach.
+pub(crate) fn shore_domain_warp(p: Vec2) -> Vec2 {
+    let a = (p.x * 0.0019).sin() * (p.y * 0.0014).cos();
+    let b = (p.x * 0.0031 + 1.7).cos() * (p.y * 0.0026).sin();
+    let c = (p.x * 0.006 + p.y * 0.005).sin();
+    Vec2::new(a, b) * 110.0 + Vec2::new(b, -a) * 55.0 + Vec2::new(c, -c) * 35.0
 }
 
 fn cell_centre(ax: i32, az: i32) -> Vec2 {

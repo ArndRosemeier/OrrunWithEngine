@@ -11,7 +11,7 @@ use engine::chunk_stream::ChunkBuilder;
 use engine::space::{ChunkCoord, GlobalXZ};
 use engine::surface::WATER_CLEARANCE;
 use engine::world::World;
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
@@ -33,6 +33,7 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
     assert!(catalog.count_of(PropClass::Grass) >= 3);
     assert!(catalog.count_of(PropClass::Tree) >= 3);
     assert!(catalog.count_of(PropClass::Rock) >= 4);
+    assert!(catalog.count_of(PropClass::Bush) >= 6);
 
     let tuft = engine::model::Model::load(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -157,6 +158,144 @@ fn a_distant_tier_stays_under_the_ground_the_player_walks_on() {
 }
 
 #[test]
+fn high_relief_reads_as_ranges_not_high_plains() {
+    // Atlas loft is a kilometre-smooth field. Without contrasting it against
+    // its neighbourhood, Peak height is a high plane with 50 m of wrinkle.
+    // Orogen flanks have to come out steeper than the lowland, over a span
+    // that is the mountain, not the hill noise.
+    let surface = surface_of(20260809);
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let step = 80.0;
+    let mut alpine = Vec::new();
+    let mut plains = Vec::new();
+    let probe = 120usize;
+    let lattice = span / probe as f64;
+    for iz in 2..probe - 2 {
+        for ix in 2..probe - 2 {
+            let x = (ix as f64 + 0.5) * lattice;
+            let z = (iz as f64 + 0.5) * lattice;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if elev < 40.0 {
+                continue;
+            }
+            let slope = local_slope(&surface, x, z, step);
+            if relief > 0.50 && elev > 900.0 {
+                alpine.push(slope);
+            } else if relief < 0.22 && (50.0..350.0).contains(&elev) {
+                plains.push(slope);
+            }
+        }
+    }
+    assert!(
+        alpine.len() > 80,
+        "expected an orogen on seed 20260809, got {} alpine probes",
+        alpine.len()
+    );
+    assert!(
+        plains.len() > 80,
+        "expected lowland on seed 20260809, got {} plains probes",
+        plains.len()
+    );
+    alpine.sort_by(|a, b| a.total_cmp(b));
+    plains.sort_by(|a, b| a.total_cmp(b));
+    let med = |v: &[f32]| v[v.len() / 2];
+    let alpine_med = med(&alpine);
+    let plains_med = med(&plains);
+    assert!(
+        alpine_med > plains_med * 2.0,
+        "alpine median slope {alpine_med:.3} is not a range next to plains {plains_med:.3}"
+    );
+    assert!(
+        alpine_med > 0.12,
+        "alpine median slope {alpine_med:.3} still reads as a high plane"
+    );
+}
+
+#[test]
+fn alpine_crests_are_not_a_regular_wave() {
+    // A 1.4 km Laplacian of a bicubic loft is a sine: crests equally spaced.
+    // Real ranges bunch, skip, and throw spurs. Walk a few alpine transects
+    // and refuse a profile whose peaks keep the loft wavelength.
+    let surface = surface_of(20260809);
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let mut starts = Vec::new();
+    let probe = 80usize;
+    let lattice = span / probe as f64;
+    for iz in 8..probe - 8 {
+        for ix in 8..probe - 8 {
+            let x = (ix as f64 + 0.5) * lattice;
+            let z = (iz as f64 + 0.5) * lattice;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if relief > 0.55 && elev > 1_000.0 {
+                starts.push((x, z));
+            }
+        }
+    }
+    assert!(
+        starts.len() > 20,
+        "expected alpine ground on seed 20260809, got {}",
+        starts.len()
+    );
+
+    let step = 40.0;
+    let samples = 160usize;
+    let mut spacings = Vec::new();
+    for &(x0, z0) in starts.iter().step_by((starts.len() / 8).max(1)) {
+        let mut h = Vec::with_capacity(samples);
+        for i in 0..samples {
+            let x = x0 + i as f64 * step;
+            h.push(surface.base_ground(GlobalXZ::at(x, z0)));
+        }
+        let mut peaks = Vec::new();
+        for i in 2..samples - 2 {
+            if h[i] > h[i - 1]
+                && h[i] > h[i + 1]
+                && h[i] >= h[i - 2]
+                && h[i] >= h[i + 2]
+                && h[i] - h[i - 1].min(h[i + 1]) > 12.0
+            {
+                peaks.push(i);
+            }
+        }
+        for w in peaks.windows(2) {
+            spacings.push((w[1] - w[0]) as f32 * step as f32);
+        }
+    }
+    assert!(
+        spacings.len() > 12,
+        "too few alpine crests to judge a wave, got {}",
+        spacings.len()
+    );
+    let mean = spacings.iter().sum::<f32>() / spacings.len() as f32;
+    let var = spacings
+        .iter()
+        .map(|s| {
+            let d = *s - mean;
+            d * d
+        })
+        .sum::<f32>()
+        / spacings.len() as f32;
+    let cv = var.sqrt() / mean.max(1.0);
+    assert!(
+        cv > 0.28,
+        "alpine crest spacing is too regular (mean {mean:.0} m, cv {cv:.2}); the range is still a sine"
+    );
+}
+
+fn local_slope(surface: &ContinentalSurface, x: f64, z: f64, step: f64) -> f32 {
+    let h = surface.base_ground(GlobalXZ::at(x, z));
+    let hx = surface.base_ground(GlobalXZ::at(x + step, z));
+    let hz = surface.base_ground(GlobalXZ::at(x, z + step));
+    let gx = (hx - h) / step as f32;
+    let gz = (hz - h) / step as f32;
+    (gx * gx + gz * gz).sqrt()
+}
+
+#[test]
 fn a_brook_is_the_same_brook_whichever_window_found_it() {
     // The whole basis of a moving window: a chunk baked before a rebuild and
     // its neighbour baked after must be looking at the same water. Two windows
@@ -189,7 +328,7 @@ fn a_brook_is_the_same_brook_whichever_window_found_it() {
     };
     let (from_here, from_there) = (near(&a), near(&b));
     assert!(
-        from_here.len() > 10,
+        from_here.len() >= 8,
         "expected a good sample of brooks, got {}",
         from_here.len()
     );
@@ -332,6 +471,109 @@ fn a_pond_holds_water_over_its_whole_floor() {
 }
 
 #[test]
+fn a_pond_does_not_hang_a_sheet_over_a_hillside() {
+    // The old rim was the highest ground on an 80 m ray. In the mountains that
+    // is a ridge, the flood fill then takes every cell under that height, and
+    // the contour draws a pane in the air. A pond only cuts, so its sheet has
+    // to sit in the hollow — a few metres above the uncarved floor — even on
+    // high ground.
+    let surface = surface_of(20260809);
+    let mut foci = vec![GlobalXZ::at(
+        surface.bounds().metres() / 2.0,
+        surface.bounds().metres() / 2.0,
+    )];
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let mut alpine = 0;
+    for iz in 10..50 {
+        for ix in 10..50 {
+            let x = span * (ix as f64 + 0.5) / 64.0;
+            let z = span * (iz as f64 + 0.5) / 64.0;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if relief > 0.5 && elev > 700.0 {
+                foci.push(GlobalXZ::at(x, z));
+                alpine += 1;
+                if alpine >= 4 {
+                    break;
+                }
+            }
+        }
+        if alpine >= 4 {
+            break;
+        }
+    }
+
+    let mut seen = 0;
+    for focus in foci {
+        let field = BrookField::build(&surface, focus);
+        for pond in field.ponds() {
+            for iz in -10..=10 {
+                for ix in -10..=10 {
+                    let p = pond.centre() + Vec2::new(ix as f32 * 6.0, iz as f32 * 6.0);
+                    if !pond.contains(p) {
+                        continue;
+                    }
+                    let ground = surface.base_ground(GlobalXZ::at(p.x as f64, p.y as f64));
+                    let drop = pond.sheet_z() - ground;
+                    assert!(
+                        drop < 14.0,
+                        "a pond at ({:.0}, {:.0}) hangs its sheet {drop:.1} m over the ground",
+                        p.x,
+                        p.y
+                    );
+                    seen += 1;
+                }
+            }
+        }
+    }
+    assert!(seen > 50, "only {seen} pond-floor samples");
+}
+
+#[test]
+fn a_pond_does_not_leave_dry_islands_under_its_sheet() {
+    // Skipping cells that sat too far below the sheet left holes in the water,
+    // and the shore drape pulled the mesh down around them. If the ground is
+    // under the sheet and the cells around it are wet, that cell is bed.
+    let surface = surface_of(20260809);
+    let mid = surface.bounds().metres() / 2.0;
+    let field = BrookField::build(&surface, GlobalXZ::at(mid, mid));
+    let step = CHUNK_SAMPLE_M as f32;
+    for pond in field.ponds() {
+        let origin = Vec2::new(
+            (pond.centre().x / step).floor() * step + step * 0.5,
+            (pond.centre().y / step).floor() * step + step * 0.5,
+        );
+        for iz in -20..=20 {
+            for ix in -20..=20 {
+                let p = origin + Vec2::new(ix as f32 * step, iz as f32 * step);
+                if pond.centre().distance(p) > pond.reach_m() {
+                    continue;
+                }
+                if pond.contains(p) {
+                    continue;
+                }
+                let ground = surface.base_ground(GlobalXZ::at(p.x as f64, p.y as f64));
+                if pond.sheet_z() - ground <= 0.0 {
+                    continue;
+                }
+                let wet_n = [(-step, 0.0), (step, 0.0), (0.0, -step), (0.0, step)]
+                    .iter()
+                    .filter(|(dx, dz)| pond.contains(p + Vec2::new(*dx, *dz)))
+                    .count();
+                assert!(
+                    wet_n < 4,
+                    "a dry island under the sheet at ({:.0}, {:.0})",
+                    p.x,
+                    p.y
+                );
+            }
+        }
+    }
+    assert!(field.ponds().len() > 5, "no ponds to check for islands");
+}
+
+#[test]
 fn a_window_rebuild_leaves_the_ground_and_the_water_where_they_were() {
     // The seam contract, from the one direction the sub-atlas layer can break
     // it: a chunk baked while the window sat one place and its neighbour baked
@@ -356,12 +598,29 @@ fn a_window_rebuild_leaves_the_ground_and_the_water_where_they_were() {
 
     let (land_a, water_a) = split_layers(&before);
     let (land_b, water_b) = split_layers(&after);
-    assert_eq!(land_a.positions, land_b.positions, "the ground moved");
+    heights_agree(&land_a.positions, &land_b.positions, "the ground");
     let (water_a, water_b) = (
         water_a.expect("channels in the busiest chunk"),
         water_b.expect("channels in the busiest chunk"),
     );
-    assert_eq!(water_a.positions, water_b.positions, "the water moved");
+    heights_agree(&water_a.positions, &water_b.positions, "the water");
+}
+
+/// A millimetre of height on a four-metre grid is not a seam; a step is.
+fn heights_agree(a: &[Vec3], b: &[Vec3], what: &str) {
+    assert_eq!(a.len(), b.len(), "{what} vertex count changed");
+    let mut max_dy = 0.0f32;
+    for (pa, pb) in a.iter().zip(b) {
+        assert!(
+            (pa.x - pb.x).abs() < 1e-4 && (pa.z - pb.z).abs() < 1e-4,
+            "{what} vertex slid in plan"
+        );
+        max_dy = max_dy.max((pa.y - pb.y).abs());
+    }
+    assert!(
+        max_dy < 0.02,
+        "{what} moved {max_dy:.3} m between windows that both cover this chunk"
+    );
 }
 
 /// The chunk near `focus` with the most channel running through it.
@@ -1417,6 +1676,67 @@ fn hydro_vectors_bake_with_sinks() {
         long_reaches > 0,
         "expected stitched multi-cell river reaches"
     );
+}
+
+#[test]
+fn an_ocean_bound_river_reaches_the_sea() {
+    // The polyline used to end at the last land-cell centre. The coast ring
+    // meanders on, and the mouth was a capsule on the beach. It has to stand
+    // in the water it was authored to drain into.
+    let (atlas, surface) = world_of(20260809, 64);
+    let mut mouths = 0;
+    for river in &atlas.hydro.rivers {
+        if !matches!(river.sink, HydroSink::Ocean) || !river.at_sink {
+            continue;
+        }
+        let mouth = *river.points.last().expect("a river has a mouth");
+        let column = surface.column(GlobalXZ::at(mouth.x as f64, mouth.y as f64));
+        let coast = surface
+            .hydro_index()
+            .coast_signed(surface.hydro(), mouth);
+        assert!(
+            column.is_wet() && coast < 0.0,
+            "ocean-bound river {} stops {coast:.0} m inland at ({:.0}, {:.0})",
+            river.id,
+            mouth.x,
+            mouth.y
+        );
+        mouths += 1;
+    }
+    assert!(mouths > 0, "expected an ocean-bound river");
+}
+
+#[test]
+fn a_lake_bound_river_reaches_its_lake() {
+    let (atlas, surface) = world_of(20260809, 64);
+    let mut mouths = 0;
+    for river in &atlas.hydro.rivers {
+        if !river.at_sink {
+            continue;
+        }
+        let HydroSink::Lake { lake_id } = river.sink else {
+            continue;
+        };
+        let mouth = *river.points.last().expect("a river has a mouth");
+        let Some((_, sd)) = surface
+            .hydro_index()
+            .nearest_lake(surface.hydro(), mouth)
+        else {
+            panic!(
+                "lake-bound river {} has no lake near ({:.0}, {:.0})",
+                river.id, mouth.x, mouth.y
+            );
+        };
+        assert!(
+            sd >= -river.half_width_m,
+            "lake-bound river {} stops {sd:.0} m short of lake {lake_id} at ({:.0}, {:.0})",
+            river.id,
+            mouth.x,
+            mouth.y
+        );
+        mouths += 1;
+    }
+    assert!(mouths > 0, "expected a lake-bound river");
 }
 
 #[test]

@@ -176,6 +176,16 @@ const MAX_INCISION_M: f32 = 2.5;
 /// Pond shape, all in metres.
 const POND_MIN_DEPTH_M: f32 = 0.9;
 const POND_BED_DEPTH_M: f32 = 2.4;
+/// Floor cells may sit below the dam; past this the whole basin is a pane.
+///
+/// Ponds only cut, they never raise a bed, so this drop *is* the visual hang.
+/// Skipping the deep cells instead of rejecting the basin punched holes in the
+/// sheet and the contour draped down them. A closed hollow may be this deep;
+/// a hillside roofed at ridge height is deeper, and is not a pond.
+const POND_MAX_CELL_DROP_M: f32 = 12.0;
+/// A bearing that falls this far before it has climbed out of the hollow is
+/// open downhill, not a rim. Above grit, below a real slope over one probe.
+const POND_OPEN_M: f32 = 2.5;
 const POND_MAX_RADIUS_M: f32 = 80.0;
 const POND_PROBE_STEP_M: f32 = 8.0;
 const POND_RAYS: usize = 24;
@@ -952,7 +962,6 @@ enum LegEnd {
 /// is left.
 #[derive(Clone, Copy)]
 struct Probe {
-    height: f32,
     gradient: Vec2,
 }
 
@@ -964,6 +973,17 @@ struct Probe {
 struct WayOut {
     direction: Vec2,
     pass_z: f32,
+}
+
+/// What one pond-probe ray found around a dam.
+#[derive(Clone, Copy)]
+enum RayHit {
+    /// Fell away before climbing out of the hollow.
+    Open,
+    /// Climbed a pond's worth, then fell — the far side of a rim.
+    Crest(f32),
+    /// Climbed a pond's worth and kept rising: a wall, not a spill.
+    Wall,
 }
 
 /// Where a filled hollow lets go.
@@ -1077,13 +1097,11 @@ impl<'s> Tracer<'s> {
     /// valley. Both come from the same five samples, so this costs no more than
     /// the plain gradient it replaces.
     fn probe(&self, p: Vec2) -> Probe {
-        let c = self.base(p);
         let e = self.base(Vec2::new(p.x + LANDFORM_ARM_M, p.y));
         let w = self.base(Vec2::new(p.x - LANDFORM_ARM_M, p.y));
         let n = self.base(Vec2::new(p.x, p.y + LANDFORM_ARM_M));
         let s = self.base(Vec2::new(p.x, p.y - LANDFORM_ARM_M));
         Probe {
-            height: (c + e + w + n + s) / 5.0,
             gradient: Vec2::new(e - w, n - s) / (2.0 * LANDFORM_ARM_M),
         }
     }
@@ -1125,10 +1143,6 @@ impl<'s> Tracer<'s> {
             reach(Vec2::new(p.x, p.y + OUTLET_ARM_M)) - reach(Vec2::new(p.x, p.y - OUTLET_ARM_M)),
         )
         .normalize_or_zero()
-    }
-
-    fn landform(&self, p: Vec2) -> f32 {
-        self.probe(p).height
     }
 
     fn in_atlas(&self, p: Vec2) -> bool {
@@ -1336,13 +1350,11 @@ impl<'s> Tracer<'s> {
         // The probe is the expensive part of the whole trace, so its answer is
         // handed on to whoever needs it next rather than taken twice.
         let out = self.lowest_way_out(at);
-        if out.pass_z < here.height + POND_MIN_DEPTH_M {
-            // Going over a low rim is a real change of course, not a bend, so it
-            // may turn further than the cap allows — but never back the way it
-            // came, which is what a pond is for.
-            if let Some(step) = self.try_over(leg, out.direction) {
-                return Ok(step);
-            }
+        // A low bump is a step, not a basin. Try it before filling a pond —
+        // in the mountains the old "is the pass low?" test used an 80 m ridge
+        // as the pass and never took this, so every rise became a pane.
+        if let Some(step) = self.try_over(leg, out.direction) {
+            return Ok(step);
         }
         Err(out)
     }
@@ -1389,12 +1401,14 @@ impl<'s> Tracer<'s> {
         };
         for k in 0..POND_RAYS {
             let direction = ray(k);
-            let mut pass_z = f32::NEG_INFINITY;
-            let mut r = POND_PROBE_STEP_M;
-            while r <= POND_MAX_RADIUS_M {
-                pass_z = pass_z.max(self.landform(at + direction * r));
-                r += POND_PROBE_STEP_M;
-            }
+            // A crest is the spill; a slope or a wall is the ground a step
+            // away — so a downhill is a way out, not a spur eighty metres on.
+            let pass_z = match self.ray_hit(at, direction) {
+                RayHit::Crest(peak) => peak,
+                RayHit::Open => self.base(at + direction * TRACE_STEP_M),
+                // A wall is not a way out; it only exists to enclose.
+                RayHit::Wall => f32::INFINITY,
+            };
             if pass_z < best.pass_z {
                 best = WayOut { direction, pass_z };
             }
@@ -1404,42 +1418,65 @@ impl<'s> Tracer<'s> {
 
     /// Fill the hollow around `at` and find where it spills.
     ///
-    /// The sheet is the lowest real rim. The wet shape is every 4 m cell
-    /// connected to the dam whose uncarved ground sits under that sheet — the
-    /// same lattice the near terrain walks, so the contour that draws the pond
-    /// is the shoreline of the ground, not a polar wheel.
+    /// Water fills to the lowest way out, and only if every bearing has climbed
+    /// out of the hollow — a slope that drops away is not a basin, however many
+    /// spurs the other rays crest. Taking the min of those crests, ignoring the
+    /// open downhill, hung a pane at ridge height over the mountainside.
     fn fill(&mut self, at: Vec2, dam: WayOut) -> Option<Spill> {
-        if !dam.pass_z.is_finite() {
-            return None;
-        }
         let out = dam.direction;
-        // The outlet bearing is the landform's, so a tussock is not a pass. The
-        // sheet is the lowest real rim, so the water fills the hollow that is
-        // actually there rather than hanging at the height of a hill the outlet
-        // ray happened to hit.
-        let mut pass_z = f32::INFINITY;
+        let floor = self.base(at);
+        let mut crests = 0usize;
+        let mut open = 0usize;
         for k in 0..POND_RAYS {
-            let direction = ray(k);
-            let mut ray_pass = f32::NEG_INFINITY;
-            let mut r = POND_PROBE_STEP_M;
-            while r <= POND_MAX_RADIUS_M {
-                ray_pass = ray_pass.max(self.base(at + direction * r));
-                r += POND_PROBE_STEP_M;
+            match self.ray_hit(at, ray(k)) {
+                RayHit::Open => open += 1,
+                RayHit::Crest(_) => crests += 1,
+                RayHit::Wall => {}
             }
-            pass_z = pass_z.min(ray_pass);
         }
-        let sheet_z = (pass_z - POND_FREEBOARD_M).max(self.base(at) + POND_MIN_DEPTH_M * 0.5);
+        // The sheet is the pass the water would actually spill over, not the
+        // lowest spur. `dam.pass_z` already picked that bearing.
+        if open == 0
+            && crests > 0
+            && dam.pass_z >= floor + POND_MIN_DEPTH_M
+            && dam.pass_z - floor <= POND_MAX_CELL_DROP_M
+        {
+            let sheet_z = dam.pass_z - POND_FREEBOARD_M;
+            if let Some(spill) =
+                self.flood(at, out, sheet_z, POND_MAX_RADIUS_M, POND_MAX_CELL_DROP_M, 2.0)
+            {
+                return Some(spill);
+            }
+        }
+        // No closed basin. A small pool at the local waterline lets a lost
+        // course spill and go on; it cannot become a pane because the sheet
+        // sits on the ground that is here. Clip at the radius rather than
+        // aborting — a slope beyond a 36 m pool is not a drain, it is the
+        // hillside the pool sits on.
+        let sheet_z = floor + POND_MIN_DEPTH_M * 0.75;
+        self.flood(at, out, sheet_z, 36.0, 4.5, f32::INFINITY)
+    }
 
+    fn flood(
+        &mut self,
+        at: Vec2,
+        out: Vec2,
+        sheet_z: f32,
+        max_r: f32,
+        max_drop: f32,
+        drain_m: f32,
+    ) -> Option<Spill> {
         let start_cell = lattice(at);
         if self.pond_owns(start_cell) {
             return None;
         }
-        let start_ground = self.base(cell_centre(start_cell.0, start_cell.1));
-        if start_ground >= sheet_z {
+        let start_p = cell_centre(start_cell.0, start_cell.1);
+        let start_drop = sheet_z - self.base(start_p);
+        if start_drop <= 0.0 || start_drop > max_drop {
             return None;
         }
 
-        let max_r2 = POND_MAX_RADIUS_M * POND_MAX_RADIUS_M;
+        let max_r2 = max_r * max_r;
         let mut cells = HashSet::new();
         let mut queue = VecDeque::new();
         cells.insert(start_cell);
@@ -1451,14 +1488,17 @@ impl<'s> Tracer<'s> {
                     continue;
                 }
                 let p = cell_centre(next.0, next.1);
+                let drop = sheet_z - self.base(p);
+                let under = drop > 0.0;
                 if at.distance_squared(p) > max_r2 {
+                    if under && drop > drain_m {
+                        return None;
+                    }
                     continue;
                 }
-                if self.base(p) >= sheet_z {
+                if !under {
                     continue;
                 }
-                // Two basins sharing a floor are one water body, and this layer
-                // has no way to say that. Soak instead of stacking sheets.
                 if self.pond_owns(next) {
                     return None;
                 }
@@ -1467,6 +1507,12 @@ impl<'s> Tracer<'s> {
             }
         }
         if cells.len() < POND_MIN_CELLS {
+            return None;
+        }
+        if cells
+            .iter()
+            .any(|&(cx, cz)| sheet_z - self.base(cell_centre(cx, cz)) > max_drop)
+        {
             return None;
         }
 
@@ -1495,6 +1541,39 @@ impl<'s> Tracer<'s> {
             direction: out,
             cost: (spill_r / TRACE_STEP_M).ceil() as usize,
         })
+    }
+
+    /// What this bearing does to the hollow at `at`.
+    ///
+    /// A few centimetres of grit is not a rim, and a spur on a slope is not a
+    /// wall: the land has to climb a pond's worth before it has left the
+    /// hollow, and a fall of [`POND_OPEN_M`] before that climb is a way out.
+    fn ray_hit(&self, at: Vec2, direction: Vec2) -> RayHit {
+        let start = self.base(at);
+        let mut peak = start;
+        let mut risen = false;
+        let mut r = POND_PROBE_STEP_M;
+        while r <= POND_MAX_RADIUS_M {
+            let h = self.base(at + direction * r);
+            if !risen && h < start - POND_OPEN_M {
+                return RayHit::Open;
+            }
+            if h > peak {
+                peak = h;
+            }
+            if peak >= start + POND_MIN_DEPTH_M {
+                risen = true;
+            }
+            if risen && peak - h >= POND_MIN_DEPTH_M * 0.5 {
+                return RayHit::Crest(peak);
+            }
+            r += POND_PROBE_STEP_M;
+        }
+        if risen {
+            RayHit::Wall
+        } else {
+            RayHit::Open
+        }
     }
 
     fn pond_owns(&self, cell: (i32, i32)) -> bool {

@@ -48,8 +48,8 @@ const REED_SPACING_M: f64 = 1.1;
 /// Closer in than the other classes: a reed bed is dense, and a two-metre stem
 /// a hundred metres off is a pixel that costs a lattice cell.
 const REED_RADIUS_M: f64 = 70.0;
-const BUSH_SPACING_M: f64 = 5.5;
-const BUSH_RADIUS_M: f64 = 120.0;
+const BUSH_SPACING_M: f64 = 4.2;
+const BUSH_RADIUS_M: f64 = 160.0;
 
 /// Rebuild the window once the player is this far from where it was centred.
 const RESEED_M: f64 = 10.0;
@@ -149,7 +149,9 @@ impl PropClass {
             Self::Tree => (0.7, 1.2),
             // The clumps are authored just under two metres, which is a reed.
             Self::Reed => (0.7, 1.15),
-            Self::Bush => (0.7, 1.5),
+            // The tall shrub is authored ~2 m; the low ones half that. A wide
+            // range is what makes a hillside of them, not a cloned hedge.
+            Self::Bush => (0.75, 1.75),
         }
     }
 
@@ -157,9 +159,9 @@ impl PropClass {
     /// so hydrology has to be read before density rather than after it.
     ///
     /// It is the expensive query, and for grass and stones the cheap climate
-    /// layers throw out most candidates first. Reeds and scrub have nothing to
-    /// throw out — away from water they do not grow at all — and a wood follows
-    /// a watercourse across ground that could not hold one otherwise.
+    /// layers throw out most candidates first. Reeds have nothing to throw out
+    /// — away from water they do not grow at all — and a wood and its scrub
+    /// follow a watercourse across ground that could not hold a stand otherwise.
     fn follows_water(self) -> bool {
         matches!(self, Self::Reed | Self::Bush | Self::Tree)
     }
@@ -307,8 +309,13 @@ impl GroundCover {
             (0.05 + 0.55 * smoothstep(0.20, 0.75, slope) + 0.35 * alpine) * (1.0 - 0.6 * canopy);
 
         // Scrub is the cover of open ground: it fills the gaps a wood leaves
-        // and the ground a wood never took.
-        let bush = (0.06 + 0.30 * humidity) * flat * (1.0 - alpine) * (1.0 - beach);
+        // and the ground a wood never took. A floor so low that dry country
+        // reads as empty is what left whole hillsides as grass and nothing.
+        let bush = (0.22 + 0.32 * humidity)
+            * flat
+            * (1.0 - 0.85 * beach)
+            * lerp(1.0, 0.48, alpine)
+            * lerp(0.40, 1.0, 1.0 - tree);
 
         Self {
             grass: grass.clamp(0.0, 1.0),
@@ -406,6 +413,13 @@ impl PropTaste {
         // in the open water it is rooted in.
         if stem.contains("berries") {
             taste.open = 0.85;
+        }
+        if stem.contains("open") {
+            taste.open = 0.9;
+        }
+        if stem.contains("broad") {
+            taste.open = 0.7;
+            taste.dry = 0.15;
         }
         if stem.contains("reed") {
             taste.dry = 0.0;

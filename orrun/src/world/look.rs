@@ -76,6 +76,12 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
             sand_height_band: 10.0,
             sea_surface_z,
             tint_strength: 0.30,
+            // Shaded faces hold snow lower; sunny ones stay rock longer. Full
+            // cover is a band, not a contour, and steep faces shed it.
+            snow_line_m: 1_050.0,
+            snow_full_m: 2_100.0,
+            snow_slope_start: 0.32,
+            snow_slope_end: 0.68,
         })
         .expect("terrain material");
     world.set_default_terrain_material(Some(ground));

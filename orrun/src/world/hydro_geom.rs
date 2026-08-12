@@ -150,11 +150,7 @@ pub fn coast_signed_full(hydro: &HydroVectors, p: Vec2) -> f32 {
 }
 
 fn shore_domain_warp(p: Vec2) -> Vec2 {
-    // Metres — enough to break kilometre-scale ruler edges at walker scale.
-    let a = (p.x * 0.0019).sin() * (p.y * 0.0014).cos();
-    let b = (p.x * 0.0031 + 1.7).cos() * (p.y * 0.0026).sin();
-    let c = (p.x * 0.006 + p.y * 0.005).sin();
-    Vec2::new(a, b) * 110.0 + Vec2::new(b, -a) * 55.0 + Vec2::new(c, -c) * 35.0
+    crate::atlas::hydro::shore_domain_warp(p)
 }
 
 fn neighborhood(size: usize, idx: usize, table: &[Vec<u32>]) -> Vec<u32> {

@@ -463,7 +463,7 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
         let inside = if wet[a] { a } else { b };
         let sheet = cols[inside].sheet_hint();
         let y = match cols[inside].body() {
-            Some(WaterBody::Brook) => {
+            Some(WaterBody::Brook) | Some(WaterBody::Pond) => {
                 let land = lerp(cols[a].ground(), cols[b].ground(), t);
                 sheet.min(land)
             }
