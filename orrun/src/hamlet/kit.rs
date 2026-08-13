@@ -24,17 +24,24 @@ const MEDIEVAL_JSON: &str = include_str!(concat!(
 /// Piece id → vendored / generated glb file name.
 pub const PIECE_GLBS: &[(&str, &str)] = &[
     ("wall", "med_wall.glb"),
+    ("wall_b", "med_wall_b.glb"),
     ("window", "med_window.glb"),
     ("window_b", "med_window_b.glb"),
+    ("window_c", "med_window_c.glb"),
     ("door", "med_door.glb"),
+    ("door_b", "med_door_b.glb"),
     ("corner", "med_corner.glb"),
     ("wall_jetty", "med_wall_jetty.glb"),
+    ("wall_b_jetty", "med_wall_b_jetty.glb"),
     ("window_jetty", "med_window_jetty.glb"),
     ("window_b_jetty", "med_window_b_jetty.glb"),
+    ("window_c_jetty", "med_window_c_jetty.glb"),
     ("corner_jetty", "med_corner_jetty.glb"),
     ("roof", "med_roof.glb"),
+    ("roof_b", "med_roof_b.glb"),
     ("chimney", "med_chimney.glb"),
     ("plinth", "med_plinth.glb"),
+    ("plinth_b", "med_plinth_b.glb"),
 ];
 
 const DWELLING_IDS: &[&str] = &[
@@ -185,7 +192,10 @@ pub fn world_place(local: Place, house_at: Vec3, house_yaw_deg: f32) -> Place {
     .with_yaw_deg(house_yaw_deg + local.yaw_degrees)
 }
 
-pub(crate) fn centre_footprint(catalog: &Catalog, assembly: &Assembly<'_>) -> ModularResult<Vec<PlacedMesh>> {
+pub(crate) fn centre_footprint(
+    catalog: &Catalog,
+    assembly: &Assembly<'_>,
+) -> ModularResult<Vec<PlacedMesh>> {
     let cells = assembly.occupied_cells();
     let origin = catalog
         .pitch()
@@ -286,9 +296,9 @@ fn join_ring_3x4(assembly: &mut Assembly<'_>, ring: &[InstanceId; 10]) -> Modula
     Ok(())
 }
 
-fn plinths(assembly: &mut Assembly<'_>, ground: &[InstanceId]) -> ModularResult<()> {
+fn plinths(assembly: &mut Assembly<'_>, ground: &[InstanceId], plinth: &str) -> ModularResult<()> {
     for &id in ground {
-        assembly.mate(id, did("down"), pid("plinth"), did("up"))?;
+        assembly.mate(id, did("down"), pid(plinth), did("up"))?;
     }
     Ok(())
 }
@@ -296,13 +306,14 @@ fn plinths(assembly: &mut Assembly<'_>, ground: &[InstanceId]) -> ModularResult<
 fn roofs(
     assembly: &mut Assembly<'_>,
     walls: &[InstanceId],
+    roof: &str,
     chimney_at: Option<usize>,
 ) -> ModularResult<()> {
     for (index, &id) in walls.iter().enumerate() {
         let cap = if Some(index) == chimney_at {
             "chimney"
         } else {
-            "roof"
+            roof
         };
         assembly.mate(id, did("up"), pid(cap), did("down"))?;
     }
@@ -315,14 +326,14 @@ fn assemble_hut(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         &mut assembly,
         Cell::new(0, 0, 0),
         "corner",
-        "door",
+        "door_b",
         "corner",
         "corner",
-        "wall",
+        "wall_b",
         "corner",
     )?;
-    plinths(&mut assembly, &ring)?;
-    roofs(&mut assembly, &ring, None)?;
+    plinths(&mut assembly, &ring, "plinth_b")?;
+    roofs(&mut assembly, &ring, "roof_b", None)?;
     Ok(assembly)
 }
 
@@ -335,11 +346,11 @@ fn assemble_cabin(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         "door",
         "corner",
         "corner",
-        "window_b",
+        "window_c",
         "corner",
     )?;
-    plinths(&mut assembly, &ring)?;
-    roofs(&mut assembly, &ring, Some(4))?;
+    plinths(&mut assembly, &ring, "plinth_b")?;
+    roofs(&mut assembly, &ring, "roof_b", Some(4))?;
     Ok(assembly)
 }
 
@@ -349,19 +360,19 @@ fn assemble_townhouse(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         &mut assembly,
         Cell::new(0, 0, 0),
         "corner",
-        "door",
+        "door_b",
         "corner",
         "corner",
-        "window",
+        "window_c",
         "corner",
     )?;
-    plinths(&mut assembly, &ground)?;
+    plinths(&mut assembly, &ground, "plinth")?;
     let upper_ids = [
         "corner_jetty",
-        "window_jetty",
+        "window_c_jetty",
         "corner_jetty",
         "corner_jetty",
-        "window_b_jetty",
+        "wall_b_jetty",
         "corner_jetty",
     ];
     let upper = [
@@ -373,7 +384,7 @@ fn assemble_townhouse(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         assembly.mate(ground[5], did("up"), pid(upper_ids[5]), did("down"))?,
     ];
     join_ring_3x2(&mut assembly, &upper)?;
-    roofs(&mut assembly, &upper, Some(4))?;
+    roofs(&mut assembly, &upper, "roof", Some(4))?;
     Ok(assembly)
 }
 
@@ -383,28 +394,28 @@ fn assemble_hall(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         &mut assembly,
         Cell::new(0, 0, 0),
         "corner",
-        "door",
+        "door_b",
         "corner",
-        "window",
+        "window_c",
         "window_b",
         "corner",
-        "window_b",
+        "window_c",
         "corner",
         "window",
-        "wall",
+        "wall_b",
     )?;
-    plinths(&mut assembly, &ground)?;
+    plinths(&mut assembly, &ground, "plinth")?;
     let upper_ids = [
         "corner_jetty",
-        "window_jetty",
+        "window_c_jetty",
         "corner_jetty",
         "window_jetty",
         "window_b_jetty",
         "corner_jetty",
-        "window_b_jetty",
+        "window_c_jetty",
         "corner_jetty",
         "window_jetty",
-        "wall_jetty",
+        "wall_b_jetty",
     ];
     let upper = [
         assembly.mate(ground[0], did("up"), pid(upper_ids[0]), did("down"))?,
@@ -419,7 +430,7 @@ fn assemble_hall(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
         assembly.mate(ground[9], did("up"), pid(upper_ids[9]), did("down"))?,
     ];
     join_ring_3x4(&mut assembly, &upper)?;
-    roofs(&mut assembly, &upper, Some(6))?;
+    roofs(&mut assembly, &upper, "roof", Some(6))?;
     Ok(assembly)
 }
 
