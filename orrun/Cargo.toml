@@ -35,6 +35,7 @@ path = "src/bin/brook_map.rs"
 
 [dependencies]
 engine = { workspace = true }
+modular = { workspace = true }
 glam = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }

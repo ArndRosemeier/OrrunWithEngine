@@ -23,7 +23,7 @@
 //! [`super::chunk_mesh::TerrainChunkBuilder`]'s sink makes sure the finer tier
 //! wins.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use engine::chunk_stream::ChunkStream;
 use engine::contact::ContactSnapshot;
@@ -33,7 +33,8 @@ use engine::world::World;
 
 use super::brooks::{BrookDetail, SharedBrooks};
 use super::chunk_mesh::TerrainChunkBuilder;
-use super::coords::{CHUNK_SAMPLE_M, CHUNK_SPAN_M};
+use super::coords::{chunk_span, CHUNK_SAMPLE_M, CHUNK_SPAN_M};
+use super::footprint::{self, HousePlot};
 use super::surface::ContinentalSurface;
 
 /// Chunks that must be resident before the player may move.
@@ -144,6 +145,7 @@ pub struct WorldStream {
     near: ChunkStream,
     /// Coarse tiers, finest first.
     distant: Vec<ChunkStream>,
+    plots: Arc<RwLock<Vec<HousePlot>>>,
 }
 
 impl WorldStream {
@@ -153,9 +155,11 @@ impl WorldStream {
     /// tier samples every hundred and twenty-five metres, where a pond is one
     /// sample wide and a brook a twentieth of one.
     pub fn new(surface: Arc<ContinentalSurface>, brooks: SharedBrooks) -> Self {
+        let plots = Arc::new(RwLock::new(Vec::new()));
         let builder = Arc::new(
             TerrainChunkBuilder::new(Arc::clone(&surface))
-                .with_brooks(Arc::clone(&brooks), BrookDetail::Channels),
+                .with_brooks(Arc::clone(&brooks), BrookDetail::Channels)
+                .with_plots(Arc::clone(&plots)),
         );
         let near = ChunkStream::new(builder, NEAR.radius)
             .with_required_radius(ENTRY_RING)
@@ -185,7 +189,11 @@ impl WorldStream {
                     .with_budgets(tier.max_bakes_per_frame, tier.max_uploads_per_frame),
             );
         }
-        Self { near, distant }
+        Self {
+            near,
+            distant,
+            plots,
+        }
     }
 
     pub fn with_visual_ring(mut self, radius: i32) -> Self {
@@ -196,6 +204,28 @@ impl WorldStream {
     /// Resident chunks of the walked tier.
     pub fn resident_count(&self) -> usize {
         self.near.resident_count()
+    }
+
+    /// Cap interior ground under seated houses and rebuild the overlapping chunks.
+    pub fn set_house_plots(&mut self, world: &mut World, plots: Vec<HousePlot>) -> EngineResult<()> {
+        {
+            let prev = self.plots.read().expect("house plots");
+            if prev.as_slice() == plots.as_slice() {
+                return Ok(());
+            }
+        }
+        let mut coords = footprint::overlapping_chunks(&plots, chunk_span());
+        for coord in footprint::overlapping_chunks(
+            &self.plots.read().expect("house plots"),
+            chunk_span(),
+        ) {
+            if !coords.contains(&coord) {
+                coords.push(coord);
+            }
+        }
+        *self.plots.write().expect("house plots") = plots;
+        self.near.invalidate(world, &coords);
+        Ok(())
     }
 
     /// Resident chunks of the coarse tiers, nearest first.
@@ -235,7 +265,11 @@ impl WorldStream {
     ///
     /// Only the walked tier bakes a contact grid: the coarse ones are lowered
     /// on purpose and standing on one would drop the player through the world.
+    /// Inside a house the interpolated grid still ramps; the floor cap wins.
     pub fn contact_height(&self, p: GlobalXZ) -> Option<f32> {
+        if let Some(y) = footprint::terrain_cap(&self.plots.read().expect("house plots"), p) {
+            return Some(y);
+        }
         self.near.contact_height(p)
     }
 

@@ -8,7 +8,7 @@
 //! One bake produces everything that must agree about a patch of ground:
 //! the land mesh, the water mesh, and the CPU contact grid the player stands on.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use engine::chunk_stream::{ChunkBuilder, ChunkPayload};
 use engine::color::{rgb, rgba, Color};
@@ -21,6 +21,7 @@ use glam::{Vec3, Vec4};
 
 use super::brooks::{BrookDetail, SharedBrooks};
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
+use super::footprint::{self, HousePlot};
 use super::scatter::{canopy_noise, Fall, GroundCover};
 use super::surface::{lerp, ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
 
@@ -123,6 +124,8 @@ pub struct TerrainChunkBuilder {
     contact: bool,
     /// Sub-atlas water, for the tiers close enough to resolve any of it.
     brooks: Option<(SharedBrooks, BrookDetail)>,
+    /// Seated dwellings. Empty on distance tiers.
+    plots: Arc<RwLock<Vec<HousePlot>>>,
 }
 
 impl TerrainChunkBuilder {
@@ -140,7 +143,14 @@ impl TerrainChunkBuilder {
             sink_m: 0.0,
             contact: true,
             brooks: None,
+            plots: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Interior ground caps for seated houses. Shared with [`super::WorldStream`].
+    pub fn with_plots(mut self, plots: Arc<RwLock<Vec<HousePlot>>>) -> Self {
+        self.plots = plots;
+        self
     }
 
     /// Read the sub-atlas water layer while baking, at the detail this tier can
@@ -206,6 +216,7 @@ impl TerrainChunkBuilder {
             .brooks
             .as_ref()
             .map(|(shared, detail)| (Arc::clone(&shared.read().expect("brook window")), *detail));
+        let plots = self.plots.read().expect("house plots");
         let mut columns: Vec<SurfaceColumn> = Vec::with_capacity(stride * stride);
         for sz in -1..(stride as i32 - 1) {
             for sx in -1..(stride as i32 - 1) {
@@ -213,6 +224,9 @@ impl TerrainChunkBuilder {
                 let mut column = self.surface.column(p);
                 if let Some((field, detail)) = &brooks {
                     field.carve(p, &mut column, *detail);
+                }
+                if let Some(cap) = footprint::terrain_cap(&plots, p) {
+                    column.cap_ground(cap);
                 }
                 columns.push(column);
             }
@@ -264,14 +278,31 @@ impl TerrainChunkBuilder {
         }
 
         // One fixed diagonal for every quad; `ContactGrid` splits the same way,
-        // so the collision surface is exactly the drawn surface.
+        // so the collision surface is exactly the drawn surface — except where
+        // a house straddles a quad, which is split so the hillside cannot enter
+        // the room without lowering the yard.
+        let plots = self.plots.read().expect("house plots");
         for iz in 0..s.verts - 1 {
             for ix in 0..s.verts - 1 {
                 let i00 = (iz * s.verts + ix) as u32;
                 let i10 = i00 + 1;
                 let i01 = i00 + s.verts as u32;
                 let i11 = i01 + 1;
-                indices.extend([i00, i01, i11, i00, i11, i10]);
+                if plots.is_empty() {
+                    indices.extend([i00, i01, i11, i00, i11, i10]);
+                    continue;
+                }
+                emit_land_quad(
+                    &plots,
+                    s,
+                    self.sink_m,
+                    [ix as i32, iz as i32],
+                    [i00, i10, i01, i11],
+                    &mut positions,
+                    &mut normals,
+                    &mut colors,
+                    &mut indices,
+                );
             }
         }
 
@@ -280,6 +311,7 @@ impl TerrainChunkBuilder {
             positions,
             normals,
             colors,
+            uvs: Vec::new(),
             indices,
             opaque_index_count,
         }
@@ -364,6 +396,7 @@ impl TerrainChunkBuilder {
             positions,
             normals,
             colors,
+            uvs: Vec::new(),
             indices,
             // Fully translucent layer.
             opaque_index_count: 0,
@@ -380,6 +413,168 @@ impl TerrainChunkBuilder {
         }
         ContactGrid::new(s.origin, s.step, s.verts, heights)
     }
+}
+
+fn world_of(s: &ChunkSamples, ix: i32, iz: i32) -> GlobalXZ {
+    GlobalXZ::at(
+        s.origin.x + ix as f64 * s.step,
+        s.origin.z + iz as f64 * s.step,
+    )
+}
+
+fn lerp_xz(a: GlobalXZ, b: GlobalXZ, t: f32) -> GlobalXZ {
+    let t = f64::from(t);
+    GlobalXZ::at(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t)
+}
+
+fn wall_t(plots: &[HousePlot], a: GlobalXZ, b: GlobalXZ) -> f32 {
+    let a_in = footprint::terrain_cap(plots, a).is_some();
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    for _ in 0..20 {
+        let mid = 0.5 * (lo + hi);
+        let p = lerp_xz(a, b, mid);
+        if footprint::terrain_cap(plots, p).is_some() == a_in {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
+fn push_wall_vert(
+    plots: &[HousePlot],
+    s: &ChunkSamples,
+    sink_m: f32,
+    a: GlobalXZ,
+    b: GlobalXZ,
+    ia: u32,
+    ib: u32,
+    positions: &mut Vec<Vec3>,
+    normals: &mut Vec<Vec3>,
+    colors: &mut Vec<Vec4>,
+) -> u32 {
+    let t = wall_t(plots, a, b);
+    let p = lerp_xz(a, b, t);
+    let cap = footprint::terrain_cap(plots, p)
+        .or_else(|| footprint::terrain_cap(plots, a))
+        .or_else(|| footprint::terrain_cap(plots, b))
+        .expect("a split edge belongs to a house wall");
+    let (lx, lz) = ((p.x - s.origin.x) as f32, (p.z - s.origin.z) as f32);
+    positions.push(Vec3::new(lx, cap - sink_m, lz));
+    normals.push(Vec3::Y);
+    let ca = colors[ia as usize];
+    let cb = colors[ib as usize];
+    colors.push(ca.lerp(cb, t));
+    (positions.len() - 1) as u32
+}
+
+fn emit_land_quad(
+    plots: &[HousePlot],
+    s: &ChunkSamples,
+    sink_m: f32,
+    [ix, iz]: [i32; 2],
+    [i00, i10, i01, i11]: [u32; 4],
+    positions: &mut Vec<Vec3>,
+    normals: &mut Vec<Vec3>,
+    colors: &mut Vec<Vec4>,
+    indices: &mut Vec<u32>,
+) {
+    let p00 = world_of(s, ix, iz);
+    let p10 = world_of(s, ix + 1, iz);
+    let p01 = world_of(s, ix, iz + 1);
+    let p11 = world_of(s, ix + 1, iz + 1);
+    emit_land_tri(
+        plots, s, sink_m, i00, i01, i11, p00, p01, p11, positions, normals, colors, indices, 0,
+    );
+    emit_land_tri(
+        plots, s, sink_m, i00, i11, i10, p00, p11, p10, positions, normals, colors, indices, 0,
+    );
+}
+
+fn emit_land_tri(
+    plots: &[HousePlot],
+    s: &ChunkSamples,
+    sink_m: f32,
+    ia: u32,
+    ib: u32,
+    ic: u32,
+    pa: GlobalXZ,
+    pb: GlobalXZ,
+    pc: GlobalXZ,
+    positions: &mut Vec<Vec3>,
+    normals: &mut Vec<Vec3>,
+    colors: &mut Vec<Vec4>,
+    indices: &mut Vec<u32>,
+    depth: u8,
+) {
+    let ins = [
+        footprint::terrain_cap(plots, pa).is_some(),
+        footprint::terrain_cap(plots, pb).is_some(),
+        footprint::terrain_cap(plots, pc).is_some(),
+    ];
+    let n_in = ins.iter().filter(|v| **v).count();
+    if n_in == 0 || n_in == 3 {
+        if n_in == 0 && depth < 2 {
+            let mid = lerp_xz(pa, lerp_xz(pb, pc, 0.5), 0.5);
+            if footprint::terrain_cap(plots, mid).is_some() {
+                let cap = footprint::terrain_cap(plots, mid).expect("just tested");
+                let (lx, lz) = ((mid.x - s.origin.x) as f32, (mid.z - s.origin.z) as f32);
+                let im = positions.len() as u32;
+                positions.push(Vec3::new(lx, cap - sink_m, lz));
+                normals.push(Vec3::Y);
+                colors.push(colors[ia as usize]);
+                emit_land_tri(
+                    plots, s, sink_m, ia, ib, im, pa, pb, mid, positions, normals, colors, indices,
+                    depth + 1,
+                );
+                emit_land_tri(
+                    plots, s, sink_m, ib, ic, im, pb, pc, mid, positions, normals, colors, indices,
+                    depth + 1,
+                );
+                emit_land_tri(
+                    plots, s, sink_m, ic, ia, im, pc, pa, mid, positions, normals, colors, indices,
+                    depth + 1,
+                );
+                return;
+            }
+        }
+        indices.extend([ia, ib, ic]);
+        return;
+    }
+    if depth >= 3 {
+        indices.extend([ia, ib, ic]);
+        return;
+    }
+    let mut split = |a: GlobalXZ, b: GlobalXZ, ia: u32, ib: u32| {
+        push_wall_vert(
+            plots, s, sink_m, a, b, ia, ib, positions, normals, colors,
+        )
+    };
+    if n_in == 1 {
+        let (i_in, p_in, i0, p0, i1, p1) = if ins[0] {
+            (ia, pa, ib, pb, ic, pc)
+        } else if ins[1] {
+            (ib, pb, ic, pc, ia, pa)
+        } else {
+            (ic, pc, ia, pa, ib, pb)
+        };
+        let s0 = split(p_in, p0, i_in, i0);
+        let s1 = split(p_in, p1, i_in, i1);
+        indices.extend([i_in, s0, s1, s0, i0, i1, s0, i1, s1]);
+        return;
+    }
+    let (i_out, p_out, i0, p0, i1, p1) = if !ins[0] {
+        (ia, pa, ib, pb, ic, pc)
+    } else if !ins[1] {
+        (ib, pb, ic, pc, ia, pa)
+    } else {
+        (ic, pc, ia, pa, ib, pb)
+    };
+    let s0 = split(p_out, p0, i_out, i0);
+    let s1 = split(p_out, p1, i_out, i1);
+    indices.extend([i_out, s0, s1, s0, i0, i1, s0, i1, s1]);
 }
 
 impl ChunkBuilder for TerrainChunkBuilder {

@@ -150,6 +150,13 @@ impl SurfaceColumn {
         self.ground
     }
 
+    /// Lower this column's land surface, leaving water as it is.
+    pub(super) fn cap_ground(&mut self, y: f32) {
+        if self.ground > y {
+            self.ground = y;
+        }
+    }
+
     /// Signed water field used for contouring; `>= 0` means standing water.
     pub fn wetness(self) -> f32 {
         self.wetness

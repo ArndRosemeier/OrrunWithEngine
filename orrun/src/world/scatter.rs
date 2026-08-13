@@ -31,6 +31,7 @@ use thiserror::Error;
 use glam::{Vec2, Vec3};
 
 use super::brooks::{BrookDetail, BrookField};
+use super::footprint::{self, HousePlot};
 use super::look::SUN_DIR;
 use super::rng::{hash3, unit01, value_noise, CellRng};
 use super::surface::{lerp, smoothstep, ContinentalSurface, SurfaceColumn};
@@ -504,7 +505,7 @@ impl ScatterCatalog {
     }
 }
 
-/// Folder that holds the vendored prop glbs (`grass/`, `houses/`, …).
+/// Folder that holds the vendored prop glbs (`grass/`, `trees/`, …).
 pub(super) fn props_dir() -> Result<PathBuf, ScatterError> {
     let mut tried = Vec::new();
     if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
@@ -567,6 +568,7 @@ struct Sowing {
     surface: Arc<ContinentalSurface>,
     brooks: Arc<BrookField>,
     ground: ContactSnapshot,
+    plots: Vec<HousePlot>,
 }
 
 /// A sow in flight, and the state of the world it speaks for.
@@ -591,6 +593,8 @@ pub struct ScatterLayer {
     /// What the last sow took on its own thread. Worth watching: it is the
     /// budget that decides how far behind the cover can fall while moving.
     sow_ms: f32,
+    /// Last footprints a sow was started against.
+    house_plots: Vec<HousePlot>,
 }
 
 impl std::fmt::Debug for ScatterLayer {
@@ -640,6 +644,7 @@ impl ScatterLayer {
             placed: 0,
             pending: None,
             sow_ms: 0.0,
+            house_plots: Vec::new(),
         })
     }
 
@@ -667,6 +672,7 @@ impl ScatterLayer {
         self.centre = None;
         self.resident_chunks = 0;
         self.placed = 0;
+        self.house_plots.clear();
         Ok(())
     }
 
@@ -683,6 +689,7 @@ impl ScatterLayer {
         surface: &Arc<ContinentalSurface>,
         brooks: &Arc<BrookField>,
         focus: GlobalXZ,
+        house_plots: &[HousePlot],
         rebased: bool,
     ) -> EngineResult<bool> {
         let resident = stream.resident_count();
@@ -715,12 +722,15 @@ impl ScatterLayer {
         // again, so residency counts as movement — but only once the streamer has
         // stopped, or a spawn would chase every chunk of the ring in turn and sow
         // the whole window a hundred and sixty-nine times.
+        let plots_changed = self.house_plots.as_slice() != house_plots;
         let wanted = moved >= RESEED_M
-            || (resident != self.resident_chunks && stream.walked_pending_count() == 0);
+            || (resident != self.resident_chunks && stream.walked_pending_count() == 0)
+            || plots_changed;
         if !wanted || self.pending.is_some() {
             return Ok(changed);
         }
 
+        self.house_plots = house_plots.to_vec();
         let sowing = Sowing {
             seed: self.seed,
             variants: self
@@ -731,6 +741,7 @@ impl ScatterLayer {
             surface: Arc::clone(surface),
             brooks: Arc::clone(brooks),
             ground: stream.contact_snapshot(),
+            plots: self.house_plots.clone(),
         };
         if self.centre.is_none() {
             // First cover of an entry: there is nothing standing to look at
@@ -843,6 +854,9 @@ impl Sowing {
                     continue;
                 }
                 let p = GlobalXZ::at(jx, jz);
+                if footprint::blocks_prop(&self.plots, p) {
+                    continue;
+                }
 
                 let far_from_water = surface
                     .water_reach(p)

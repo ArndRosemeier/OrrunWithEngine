@@ -2,16 +2,18 @@
 
 The Asset Lab (`C:\\Projekte\\AssetGenerator`) treats its specs as the source of
 truth and gitignores its output, so the game vendors the meshes it actually
-scatters. Run this after regenerating an asset there.
+scatters and the medieval kit pieces hamlets assemble. Run this after
+regenerating an asset there.
 
     python tools/sync_props.py [path-to-asset-lab]
 
 Only the ids listed below are copied: everything under `assets/props` is loaded
-at startup, so an unused mesh would cost upload time for nothing.
+at startup, so an unused mesh would cost upload time for nothing. Kit pieces
+land under `assets/kit/medieval` and are loaded by name.
 
-Baked texture maps are dropped on the way in. The prop pipeline shades from
-vertex colour alone and names stone itself, so an embedded albedo/normal set is
-several hundred kilobytes of repository and load time that nothing can read.
+Scatter props shade from vertex colour / material factor, so their baked maps
+are dropped on the way in. Kit cells bake the look into albedo; those copies
+keep `baseColorTexture` and drop the unused normal/roughness maps.
 """
 
 from __future__ import annotations
@@ -58,11 +60,22 @@ WANTED: dict[str, tuple[str, ...]] = {
         "bush_alpine_low",
         "bush_sparse",
     ),
-    "houses": (
-        "house_hut_thatch",
-        "house_cabin_timber",
-        "house_cottage_stone",
-        "house_hall_large",
+}
+
+KIT: dict[str, tuple[str, ...]] = {
+    "medieval": (
+        "med_wall",
+        "med_window",
+        "med_window_b",
+        "med_door",
+        "med_corner",
+        "med_wall_jetty",
+        "med_window_jetty",
+        "med_window_b_jetty",
+        "med_corner_jetty",
+        "med_roof",
+        "med_chimney",
+        "med_plinth",
     ),
 }
 
@@ -109,34 +122,106 @@ def _write_glb(path: Path, doc: dict, binary: bytes) -> None:
     path.write_bytes(bytes(out))
 
 
-def strip_textures(source: Path, target: Path) -> None:
-    """Copy a glb, dropping images and any buffer data only they used."""
-    doc, binary = _read_glb(source)
+def _keep_albedo_only(doc: dict) -> None:
+    """Drop every map the engine cannot sample. Keep baseColorTexture."""
+    old_textures = doc.get("textures", [])
+    old_images = doc.get("images", [])
+    old_samplers = doc.get("samplers", [])
+    used_tex: dict[int, int] = {}
+    used_img: dict[int, int] = {}
+    used_samp: dict[int, int] = {}
+
     for material in doc.get("materials", []):
         pbr = material.get("pbrMetallicRoughness", {})
         for key in _TEXTURE_KEYS:
+            if key == "baseColorTexture":
+                continue
             material.pop(key, None)
             pbr.pop(key, None)
-    for key in ("images", "textures", "samplers"):
-        doc.pop(key, None)
+        info = pbr.get("baseColorTexture")
+        if info is None:
+            continue
+        old_tex = info["index"]
+        if old_tex not in used_tex:
+            used_tex[old_tex] = len(used_tex)
+        info["index"] = used_tex[old_tex]
+
+    new_textures = []
+    for old_tex, _new_tex in sorted(used_tex.items(), key=lambda item: item[1]):
+        tex = dict(old_textures[old_tex])
+        if "source" in tex:
+            old_img = tex["source"]
+            if old_img not in used_img:
+                used_img[old_img] = len(used_img)
+            tex["source"] = used_img[old_img]
+        if "sampler" in tex:
+            old_samp = tex["sampler"]
+            if old_samp not in used_samp:
+                used_samp[old_samp] = len(used_samp)
+            tex["sampler"] = used_samp[old_samp]
+        new_textures.append(tex)
+
+    new_images = [
+        dict(old_images[old])
+        for old, _ in sorted(used_img.items(), key=lambda item: item[1])
+    ]
+    new_samplers = [
+        old_samplers[old]
+        for old, _ in sorted(used_samp.items(), key=lambda item: item[1])
+    ]
+
+    if new_images:
+        doc["images"] = new_images
+        doc["textures"] = new_textures
+        if new_samplers:
+            doc["samplers"] = new_samplers
+        else:
+            doc.pop("samplers", None)
+    else:
+        for key in ("images", "textures", "samplers"):
+            doc.pop(key, None)
+
+
+def copy_glb(source: Path, target: Path, *, keep_albedo: bool) -> None:
+    """Copy a glb. Scatter props drop every map; kit cells keep albedo."""
+    doc, binary = _read_glb(source)
+    if keep_albedo:
+        _keep_albedo_only(doc)
+    else:
+        for material in doc.get("materials", []):
+            pbr = material.get("pbrMetallicRoughness", {})
+            for key in _TEXTURE_KEYS:
+                material.pop(key, None)
+                pbr.pop(key, None)
+        for key in ("images", "textures", "samplers"):
+            doc.pop(key, None)
 
     views = doc.get("bufferViews", [])
     kept: dict[int, int] = {}
     packed = bytearray()
-    for accessor in doc.get("accessors", []):
-        old = accessor.get("bufferView")
-        if old is None:
-            continue
+
+    def keep_view(old: int) -> int:
         if old not in kept:
             view = dict(views[old])
             start = view.get("byteOffset", 0)
             length = view["byteLength"]
-            packed += b"\x00" * (-len(packed) % 4)
+            packed.extend(b"\x00" * (-len(packed) % 4))
             view["byteOffset"] = len(packed)
-            packed += binary[start : start + length]
+            packed.extend(binary[start : start + length])
             kept[old] = len(kept)
             doc.setdefault("_kept", []).append(view)
-        accessor["bufferView"] = kept[old]
+        return kept[old]
+
+    for accessor in doc.get("accessors", []):
+        old = accessor.get("bufferView")
+        if old is None:
+            continue
+        accessor["bufferView"] = keep_view(old)
+    for image in doc.get("images", []):
+        old = image.get("bufferView")
+        if old is None:
+            continue
+        image["bufferView"] = keep_view(old)
 
     doc["bufferViews"] = doc.pop("_kept", [])
     doc["buffers"] = [{"byteLength": len(packed)}]
@@ -151,6 +236,7 @@ def main() -> int:
         return 2
 
     target_root = Path(__file__).resolve().parents[1] / "orrun" / "assets" / "props"
+    kit_root = Path(__file__).resolve().parents[1] / "orrun" / "assets" / "kit"
     copied = 0
     missing: list[str] = []
     for folder, ids in WANTED.items():
@@ -161,10 +247,20 @@ def main() -> int:
             if not glb.is_file():
                 missing.append(asset_id)
                 continue
-            strip_textures(glb, target / glb.name)
+            copy_glb(glb, target / glb.name, keep_albedo=False)
+            copied += 1
+    for folder, ids in KIT.items():
+        target = kit_root / folder
+        target.mkdir(parents=True, exist_ok=True)
+        for asset_id in ids:
+            glb = source / f"{asset_id}.glb"
+            if not glb.is_file():
+                missing.append(asset_id)
+                continue
+            copy_glb(glb, target / glb.name, keep_albedo=True)
             copied += 1
 
-    print(f"copied {copied} meshes into {target_root}")
+    print(f"copied {copied} meshes into {target_root} and {kit_root}")
     if missing:
         print("missing from the Asset Lab: " + ", ".join(missing), file=sys.stderr)
         return 1

@@ -6,6 +6,7 @@
 
 mod catalog;
 mod config;
+pub(crate) mod kit;
 mod occupancy;
 mod planner;
 mod seat;

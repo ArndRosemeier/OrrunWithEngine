@@ -49,28 +49,50 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
 }
 
 #[test]
-fn vendored_houses_stand_on_their_plinth() {
-    let hut = engine::model::Model::load(
+fn vendored_kit_pieces_keep_their_baked_albedo() {
+    // Kit cells bake the look into a baseColor map. Scatter props are untextured
+    // on purpose; stripping those maps on kit pieces leaves a white 1×1 albedo.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/kit/medieval/med_wall.glb");
+    let blob = std::fs::read(&path).expect("med_wall.glb");
+    assert!(
+        blob.windows(b"baseColorTexture".len())
+            .any(|w| w == b"baseColorTexture"),
+        "{} lost its albedo map",
+        path.display()
+    );
+    let mesh = engine::model::Model::load(&path)
+        .expect("medieval wall loads")
+        .build();
+    assert!(
+        mesh.uvs.iter().any(|uv| uv[0] > 0.01 || uv[1] > 0.01),
+        "wall UVs are missing; albedo would sample a single texel"
+    );
+}
+
+#[test]
+fn vendored_kit_plinth_sits_on_the_origin() {
+    let plinth = engine::model::Model::load(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets/props/houses/house_hut_thatch.glb"),
+            .join("assets/kit/medieval/med_plinth.glb"),
     )
-    .expect("thatch hut loads")
+    .expect("medieval plinth loads")
     .build();
-    let min_y = hut
+    let min_y = plinth
         .positions
         .iter()
         .map(|p| p.y)
         .fold(f32::INFINITY, f32::min);
-    let max_y = hut
+    let max_y = plinth
         .positions
         .iter()
         .map(|p| p.y)
         .fold(f32::NEG_INFINITY, f32::max);
     assert!(
         min_y.abs() < 0.05,
-        "hut base should sit on y=0 after Y-up export, got {min_y}"
+        "plinth base should sit on y=0 after Y-up export, got {min_y}"
     );
-    assert!(max_y > 3.0, "hut should stand upright; max y is {max_y}");
+    assert!(max_y > 2.0, "plinth should fill the storey cell; max y is {max_y}");
 }
 
 #[test]

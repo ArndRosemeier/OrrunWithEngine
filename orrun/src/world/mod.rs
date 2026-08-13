@@ -11,6 +11,7 @@ mod brooks;
 mod chunk_mesh;
 mod coords;
 mod entry;
+mod footprint;
 mod hydro_geom;
 mod look;
 mod paths;
@@ -36,6 +37,7 @@ pub use coords::{
     CHUNK_SPAN_M,
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+pub use footprint::HousePlot;
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;
 pub use scatter::{

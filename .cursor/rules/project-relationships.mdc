@@ -11,6 +11,7 @@ alwaysApply: true
 |------|------|
 | `C:\Projekte\OrrunWithEngine` | This game — pure Rust, built on the Engine |
 | `C:\Projekte\Engine` | Shared 3D / procedural engine (`engine` crate) — develop in parallel |
+| `C:\Projekte\Modular` | Kit assembler (`modular` crate) — cell occupancy, dock snap, house/castle kits |
 | `C:\Projekte\Orrun` | Legacy Godot reference only — not a dependency, not a 1:1 target |
 
 ## Porting stance
@@ -27,6 +28,7 @@ alwaysApply: true
 
 ## Workflow
 
-- Keep this project on a path dependency to the local Engine crate.
+- Keep this project on a path dependency to the local Engine crate and the local Modular crate.
 - When Engine APIs need to grow for Orrun, change Engine first (or in the same effort), then consume the API here.
+- Hamlet dwellings assemble from Modular kits (`catalogs/medieval.json` + Asset Lab `med_*` pieces). Recipes live here; the assembler stays kit-agnostic.
 - Loud errors; no silent fallbacks that hide generation or render bugs.

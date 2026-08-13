@@ -1,4 +1,13 @@
-//! Village footprints. Dwellings match Asset Lab cabins; civics keep lab sizes.
+//! Village footprints. Dwellings are Modular medieval kit recipes; civics keep lab sizes.
+
+/// Storey/plinth cell height from `catalogs/medieval.json`.
+const KIT_STOREY_M: f32 = 2.7;
+/// 3×2 ring at 4 m pitch: door on the long (−Z) wall.
+const COTTAGE_SIZE_X: f32 = 12.0;
+const COTTAGE_SIZE_Z: f32 = 8.0;
+/// 3×4 ring at 4 m pitch: same door wall, two extra cells of depth.
+const HALL_SIZE_X: f32 = 12.0;
+const HALL_SIZE_Z: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildingRole {
@@ -41,37 +50,37 @@ const SPECS: &[BuildingSpec] = &[
         id: "house_hut_thatch",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 4.2,
-        size_z: 5.0,
+        size_x: COTTAGE_SIZE_X,
+        size_z: COTTAGE_SIZE_Z,
         yaw_offset: 0.0,
-        foundation_m: 0.7,
+        foundation_m: KIT_STOREY_M,
     },
     BuildingSpec {
         id: "house_cabin_timber",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 6.0,
-        size_z: 7.5,
+        size_x: COTTAGE_SIZE_X,
+        size_z: COTTAGE_SIZE_Z,
         yaw_offset: 0.0,
-        foundation_m: 0.75,
+        foundation_m: KIT_STOREY_M,
     },
     BuildingSpec {
         id: "house_cottage_stone",
         role: BuildingRole::Dwelling,
         min_tier: 0,
-        size_x: 7.2,
-        size_z: 8.0,
+        size_x: COTTAGE_SIZE_X,
+        size_z: COTTAGE_SIZE_Z,
         yaw_offset: 0.0,
-        foundation_m: 0.8,
+        foundation_m: KIT_STOREY_M,
     },
     BuildingSpec {
         id: "house_hall_large",
         role: BuildingRole::Dwelling,
         min_tier: 1,
-        size_x: 12.0,
-        size_z: 16.0,
+        size_x: HALL_SIZE_X,
+        size_z: HALL_SIZE_Z,
         yaw_offset: 0.0,
-        foundation_m: 0.95,
+        foundation_m: KIT_STOREY_M,
     },
     BuildingSpec {
         id: "Well",

@@ -99,7 +99,7 @@ fn main() {
             .sync(&mut world, p, Some(Vec2::new(dir.x, dir.y)))
             .expect("sync");
         scatter
-            .follow(&mut world, &stream, &surface, &brooks.field(), p, rebased)
+            .follow(&mut world, &stream, &surface, &brooks.field(), p, &[], rebased)
             .expect("cover");
         let dt = frame_t0.elapsed();
         // The first sow happens on the calling thread on purpose, behind what

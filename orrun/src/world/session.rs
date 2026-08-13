@@ -434,6 +434,46 @@ impl WorldSession {
         if !self.stream.required_ready(focus) {
             return Ok(());
         }
+        let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
+            settlements.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                self.brooks.field().as_ref(),
+                focus,
+                false,
+            )?
+        } else {
+            false
+        };
+        if rebuilt {
+            let plots = self
+                .settlements
+                .as_ref()
+                .map(|s| s.plots().to_vec())
+                .unwrap_or_default();
+            self.stream.set_house_plots(world, plots)?;
+            self.stream.sync(world, focus, None)?;
+            if !self.stream.required_ready(focus) || self.stream.walked_pending_count() > 0 {
+                return Ok(());
+            }
+        }
+        let plots = self
+            .settlements
+            .as_ref()
+            .map(|s| s.plots().to_vec())
+            .unwrap_or_default();
+        if let Some(scatter) = self.scatter.as_mut() {
+            scatter.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                &self.brooks.field(),
+                focus,
+                &plots,
+                false,
+            )?;
+        }
         let Some(ground) = self.stream.contact_height(focus) else {
             return Err(SessionError::MissingContact {
                 x: focus.x,
@@ -485,7 +525,32 @@ impl WorldSession {
         // has stopped reaching it.
         self.brooks.follow(foot);
         let rebased = self.stream.maybe_rebase(world, foot)?;
+        let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
+            settlements.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                self.brooks.field().as_ref(),
+                foot,
+                rebased,
+            )?
+        } else {
+            false
+        };
+        if rebuilt {
+            let plots = self
+                .settlements
+                .as_ref()
+                .map(|s| s.plots().to_vec())
+                .unwrap_or_default();
+            self.stream.set_house_plots(world, plots)?;
+        }
         self.stream.sync(world, foot, Some(player.heading))?;
+        let plots = self
+            .settlements
+            .as_ref()
+            .map(|s| s.plots().to_vec())
+            .unwrap_or_default();
         if let Some(scatter) = self.scatter.as_mut() {
             scatter.follow(
                 world,
@@ -493,16 +558,7 @@ impl WorldSession {
                 &self.surface,
                 &self.brooks.field(),
                 foot,
-                rebased,
-            )?;
-        }
-        if let Some(settlements) = self.settlements.as_mut() {
-            settlements.follow(
-                world,
-                &self.stream,
-                &self.surface,
-                self.brooks.field().as_ref(),
-                foot,
+                &plots,
                 rebased,
             )?;
         }

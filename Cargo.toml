@@ -12,6 +12,7 @@ warnings = "deny"
 
 [workspace.dependencies]
 engine = { path = "../Engine/engine" }
+modular = { path = "../Modular/modular" }
 glam = { version = "0.30", features = ["bytemuck"] }
 thiserror = "2"
 rand = "0.8"

@@ -1,32 +1,29 @@
 //! Settlements on the continent: lab packing, door-sill seating, no flattened pads.
 //!
 //! Atlas settlement nodes are pins. Each nearby pin is packed at its atlas
-//! tier (hamlet … port), scored against the real ground, then each building
-//! sits with its door at grade. Downhill air under the floor is a foundation
-//! skirt. The heightfield is not rewritten — that was the Godot trap that
-//! buried doors or left houses floating, and it was hard to keep the pad edge
-//! honest.
+//! tier (hamlet … port), scored against the real ground, then each dwelling
+//! is a Modular medieval kit seated with its door at grade. Kit plinths take
+//! the downhill air. The heightfield is not rewritten — that was the Godot
+//! trap that buried doors or left houses floating.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use engine::color::Color;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
-use engine::model::Model;
 use engine::place::Place;
 use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
 use glam::{Vec2, Vec3};
+use modular::prelude::{PieceId, PlacedMesh};
 use thiserror::Error;
 
 use super::brooks::{BrookDetail, BrookField};
-use super::scatter::{props_dir, ScatterError};
+use super::footprint::HousePlot;
 use super::surface::{ContinentalSurface, SettlementPin, SurfaceColumn};
 use super::world_stream::WorldStream;
-use crate::hamlet::{
-    plan_on, spec_for, HamletError, HamletLabConfig, Plan2D, Plot, ShapeKind, SKIRT_BITE_M,
-};
+use crate::hamlet::kit::{self, KitError};
+use crate::hamlet::{plan_on, spec_for, HamletError, HamletLabConfig, Plan2D, Plot, ShapeKind, DOOR_SINK_M};
 
 /// How far from the player a pin still gets a layout. Sized for a port envelope.
 const REACH_M: f64 = 720.0;
@@ -41,26 +38,10 @@ const ROAD_CLEAR_M: f32 = 4.0;
 /// Extra metres past the outermost house where the dirt ribbon still pauses.
 const HAMLET_ROAD_PAD_M: f32 = 10.0;
 
-/// Blender authors the door on +Y; glTF Y-up maps that to −Z, which is where
-/// the planner already puts the door at yaw 0. No extra turn.
-const MESH_DOOR_YAW_OFFSET_DEG: f32 = 0.0;
-
 #[derive(Debug, Error)]
 pub enum SettlementError {
     #[error(transparent)]
-    Scatter(#[from] ScatterError),
-
-    #[error(
-        "no house meshes under {0}; generate the Asset Lab cabins and run tools/sync_props.py"
-    )]
-    NoHouses(PathBuf),
-
-    #[error("house {path} failed to load: {source}")]
-    BadHouse {
-        path: PathBuf,
-        #[source]
-        source: EngineError,
-    },
+    Kit(#[from] KitError),
 
     #[error(transparent)]
     Engine(#[from] EngineError),
@@ -69,24 +50,22 @@ pub enum SettlementError {
     Hamlet(#[from] HamletError),
 }
 
-struct HouseMesh {
-    id: String,
+struct PieceBatch {
+    piece: PieceId,
     entity: EntityId,
     places: Vec<Place>,
 }
 
 #[derive(Clone, Copy)]
 enum Kind {
-    House(usize),
+    Piece(usize),
     Well,
-    Skirt,
 }
 
 struct Standing {
     kind: Kind,
     at: GlobalPosition,
     yaw_deg: f32,
-    stretch: Vec3,
 }
 
 /// One seated hamlet, in world metres.
@@ -149,83 +128,53 @@ impl Plot for GroundPlot<'_> {
 
 /// Live hamlets around the player.
 pub struct SettlementLayer {
-    houses: Vec<HouseMesh>,
+    pieces: Vec<PieceBatch>,
+    recipes: HashMap<String, Vec<PlacedMesh>>,
     well: EntityId,
     well_places: Vec<Place>,
-    skirt: EntityId,
-    skirt_places: Vec<Place>,
     seed: i32,
     centre: Option<GlobalXZ>,
     resident_chunks: usize,
     standing: Vec<Standing>,
     plans: HashMap<i32, Plan2D>,
     hamlets: Vec<HamletStand>,
+    plots: Vec<HousePlot>,
 }
 
 impl SettlementLayer {
-    /// Upload house meshes and the shared skirt / well once; nothing is seated yet.
+    /// Upload kit piece meshes and the well once; nothing is seated yet.
     pub fn install(world: &mut World, seed: i32) -> Result<Self, SettlementError> {
-        let root = props_dir()?.join("houses");
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            return Err(SettlementError::NoHouses(root));
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("glb")))
-            .collect();
-        paths.sort();
-        if paths.is_empty() {
-            return Err(SettlementError::NoHouses(root));
-        }
-
-        let mut houses = Vec::new();
-        for path in paths {
-            let id = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .ok_or_else(|| SettlementError::NoHouses(path.clone()))?;
-            if spec_for(&id).is_none() {
-                return Err(SettlementError::BadHouse {
-                    path: path.clone(),
-                    source: EngineError::InvalidValue(format!(
-                        "house mesh '{id}' has no catalog spec"
-                    )),
-                });
-            }
-            let mesh = Model::load(&path).map_err(|source| SettlementError::BadHouse {
-                path: path.clone(),
-                source,
-            })?;
-            houses.push(HouseMesh {
-                id,
+        let catalog = kit::catalog();
+        let recipes = kit::dwelling_recipes(&catalog)?;
+        let mut pieces = Vec::new();
+        for (id, _) in kit::PIECE_GLBS {
+            let piece = PieceId::new(*id).unwrap_or_else(|err| panic!("{err}"));
+            let mesh = kit::load_piece_mesh(&piece)?;
+            pieces.push(PieceBatch {
+                piece,
                 entity: world.spawn_instanced(mesh),
                 places: Vec::new(),
             });
         }
 
         let well = world.spawn_instanced(well_mesh()?);
-        let skirt = world.spawn_instanced(skirt_mesh()?);
         Ok(Self {
-            houses,
+            pieces,
+            recipes,
             well,
             well_places: Vec::new(),
-            skirt,
-            skirt_places: Vec::new(),
             seed,
             centre: None,
             resident_chunks: 0,
             standing: Vec::new(),
             plans: HashMap::new(),
             hamlets: Vec::new(),
+            plots: Vec::new(),
         })
     }
 
     pub fn placed_count(&self) -> usize {
-        self.standing
-            .iter()
-            .filter(|s| !matches!(s.kind, Kind::Skirt))
-            .count()
+        self.hamlets.iter().map(|h| h.houses.len()).sum()
     }
 
     /// Seated hamlets in the current window, for footbridges across a split river.
@@ -233,18 +182,22 @@ impl SettlementLayer {
         &self.hamlets
     }
 
+    /// Dwelling footprints, for interior ground caps and scatter.
+    pub fn plots(&self) -> &[HousePlot] {
+        &self.plots
+    }
+
     pub fn clear(&mut self, world: &mut World) -> EngineResult<()> {
-        for house in &mut self.houses {
-            house.places.clear();
-            world.set_instances(house.entity, &[])?;
+        for piece in &mut self.pieces {
+            piece.places.clear();
+            world.set_instances(piece.entity, &[])?;
         }
         self.well_places.clear();
-        self.skirt_places.clear();
         world.set_instances(self.well, &[])?;
-        world.set_instances(self.skirt, &[])?;
         self.standing.clear();
         self.plans.clear();
         self.hamlets.clear();
+        self.plots.clear();
         self.centre = None;
         self.resident_chunks = 0;
         Ok(())
@@ -277,7 +230,7 @@ impl SettlementLayer {
             self.resident_chunks = resident;
         }
         self.stand(world)?;
-        Ok(true)
+        Ok(wanted)
     }
 
     fn rebuild(
@@ -304,26 +257,25 @@ impl SettlementLayer {
 
         self.standing.clear();
         self.hamlets.clear();
+        self.plots.clear();
         for pin in nearby {
             let plan = self.plans.entry(pin.id).or_insert_with(|| {
                 layout_for(self.seed, pin, surface, brooks)
                     .unwrap_or_else(|err| panic!("hamlet at node {} failed: {err}", pin.id))
             });
-            let before = self.standing.len();
+            let mut houses = Vec::new();
             seat_plan(
                 plan,
                 pin,
                 surface,
                 brooks,
                 stream,
-                &self.houses,
+                &self.pieces,
+                &self.recipes,
                 &mut self.standing,
+                &mut houses,
+                &mut self.plots,
             );
-            let houses: Vec<GlobalXZ> = self.standing[before..]
-                .iter()
-                .filter(|s| matches!(s.kind, Kind::House(_) | Kind::Well))
-                .map(|s| s.at.horizontal())
-                .collect();
             let radius = hamlet_radius(pin.at, &houses);
             self.hamlets.push(HamletStand {
                 at: pin.at,
@@ -335,31 +287,26 @@ impl SettlementLayer {
 
     fn stand(&mut self, world: &mut World) -> EngineResult<()> {
         let origin = world.render_origin();
-        for house in &mut self.houses {
-            house.places.clear();
+        for piece in &mut self.pieces {
+            piece.places.clear();
         }
         self.well_places.clear();
-        self.skirt_places.clear();
 
         for item in &self.standing {
             let Ok(render) = item.at.to_render(origin) else {
                 continue;
             };
             let at = render.vec3();
-            let place = Place::new(at.x, at.y, at.z)
-                .with_yaw_deg(item.yaw_deg)
-                .with_stretch(item.stretch);
+            let place = Place::new(at.x, at.y, at.z).with_yaw_deg(item.yaw_deg);
             match item.kind {
-                Kind::House(i) => self.houses[i].places.push(place),
+                Kind::Piece(i) => self.pieces[i].places.push(place),
                 Kind::Well => self.well_places.push(place),
-                Kind::Skirt => self.skirt_places.push(place),
             }
         }
-        for house in &self.houses {
-            world.set_instances(house.entity, &house.places)?;
+        for piece in &self.pieces {
+            world.set_instances(piece.entity, &piece.places)?;
         }
         world.set_instances(self.well, &self.well_places)?;
-        world.set_instances(self.skirt, &self.skirt_places)?;
         Ok(())
     }
 }
@@ -388,8 +335,11 @@ fn seat_plan(
     surface: &ContinentalSurface,
     brooks: &BrookField,
     stream: &WorldStream,
-    houses: &[HouseMesh],
+    pieces: &[PieceBatch],
+    recipes: &HashMap<String, Vec<PlacedMesh>>,
     out: &mut Vec<Standing>,
+    houses: &mut Vec<GlobalXZ>,
+    plots: &mut Vec<HousePlot>,
 ) {
     let plot = GroundPlot {
         surface,
@@ -419,40 +369,51 @@ fn seat_plan(
         let Some(seat) = crate::hamlet::seat_building(&sample, spec.foundation_m) else {
             continue;
         };
-        let yaw_deg = shape.yaw.to_degrees() + MESH_DOOR_YAW_OFFSET_DEG;
+        let yaw_deg = shape.yaw.to_degrees();
         let x = pin.at.x + f64::from(shape.center.x);
         let z = pin.at.z + f64::from(shape.center.y);
+        houses.push(GlobalXZ::at(x, z));
 
         if spec.id == "Well" {
             out.push(Standing {
                 kind: Kind::Well,
                 at: GlobalPosition::at(x, f64::from(seat.floor_z), z),
                 yaw_deg,
-                stretch: Vec3::ONE,
             });
             continue;
         }
-
-        let Some(index) = houses.iter().position(|h| h.id == spec.id) else {
+        if spec.is_civic() {
             continue;
-        };
-        out.push(Standing {
-            kind: Kind::House(index),
-            at: GlobalPosition::at(x, f64::from(seat.origin_y), z),
-            yaw_deg,
-            stretch: Vec3::ONE,
+        }
+
+        let recipe = recipes.get(spec.id).unwrap_or_else(|| {
+            panic!("dwelling '{}' has no modular recipe", spec.id)
         });
-        let skirt_y = seat.floor_z - seat.skirt_height * 0.5;
-        out.push(Standing {
-            kind: Kind::Skirt,
-            at: GlobalPosition::at(x, f64::from(skirt_y), z),
-            yaw_deg,
-            stretch: Vec3::new(
-                spec.size_x * 0.96,
-                seat.skirt_height.max(SKIRT_BITE_M),
-                spec.size_z * 0.96,
-            ),
+        let floor_y = seat.floor_z - DOOR_SINK_M;
+        plots.push(HousePlot {
+            at: GlobalXZ::at(x, z),
+            half_x: shape.half_size.x,
+            half_z: shape.half_size.y,
+            yaw: shape.yaw,
+            floor_y,
         });
+        for item in recipe {
+            let p = item.place.position;
+            let (dx, dz) = kit::yaw_xz(p.x, p.z, yaw_deg);
+            let index = pieces
+                .iter()
+                .position(|batch| batch.piece == item.piece)
+                .unwrap_or_else(|| panic!("kit piece {} was not uploaded", item.piece));
+            out.push(Standing {
+                kind: Kind::Piece(index),
+                at: GlobalPosition::at(
+                    x + f64::from(dx),
+                    f64::from(floor_y + p.y),
+                    z + f64::from(dz),
+                ),
+                yaw_deg: yaw_deg + item.place.yaw_degrees,
+            });
+        }
     }
 }
 
@@ -476,10 +437,6 @@ fn well_mesh() -> EngineResult<Mesh> {
         Vec3::new(1.6, 1.0, 1.6),
         Color::rgb(118, 110, 98),
     )
-}
-
-fn skirt_mesh() -> EngineResult<Mesh> {
-    Mesh::box_at(Vec3::ZERO, Vec3::ONE, Color::rgb(78, 68, 58))
 }
 
 fn hamlet_radius(at: GlobalXZ, houses: &[GlobalXZ]) -> f32 {
