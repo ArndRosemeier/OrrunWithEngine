@@ -516,9 +516,9 @@ fn stamp_road_path(
 }
 
 fn already_has_undirected(existing: &[Link], new: &Link) -> bool {
-    existing.iter().any(|l| {
-        (l.a == new.a && l.b == new.b) || (l.a == new.b && l.b == new.a)
-    })
+    existing
+        .iter()
+        .any(|l| (l.a == new.a && l.b == new.b) || (l.a == new.b && l.b == new.a))
 }
 
 /// A town is a spur or a through-road, not a hub of MST/spur exits.

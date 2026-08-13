@@ -1,14 +1,17 @@
 //! Settlements on the continent: lab packing, door-sill seating, no flattened pads.
 //!
 //! Atlas settlement nodes are pins. Each nearby pin is packed at its atlas
-//! tier (hamlet … port), scored against the real ground, then each dwelling
-//! is a Modular medieval kit seated with its door at grade. Kit plinths take
-//! the downhill air. The heightfield is not rewritten — that was the Godot
-//! trap that buried doors or left houses floating.
+//! tier (hamlet … port) on a worker thread, scored against the real ground,
+//! then each dwelling is a Modular medieval kit seated with its door at grade.
+//! Kit plinths take the downhill air. The heightfield is not rewritten — that
+//! was the Godot trap that buried doors or left houses floating.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use engine::color::Color;
+use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
 use engine::place::Place;
@@ -18,20 +21,21 @@ use glam::{Vec2, Vec3};
 use modular::prelude::{PieceId, PlacedMesh};
 use thiserror::Error;
 
-use super::brooks::{BrookDetail, BrookField};
 use super::footprint::HousePlot;
+use super::ponds::PondField;
 use super::surface::{ContinentalSurface, SettlementPin, SurfaceColumn};
-use super::world_stream::WorldStream;
+use super::world_stream::{WorldStream, NEAR};
 use crate::hamlet::kit::{self, KitError};
-use crate::hamlet::{plan_on, spec_for, HamletError, HamletLabConfig, Plan2D, Plot, ShapeKind, DOOR_SINK_M};
+use crate::hamlet::{
+    plan_on, spec_for, HamletError, HamletLabConfig, Plan2D, Plot, ShapeKind, DOOR_SINK_M,
+};
 
-/// How far from the player a pin still gets a layout. Sized for a port envelope.
-const REACH_M: f64 = 720.0;
+/// How far from the player a pin still gets a layout. Sized with the walked ring.
+const REACH_M: f64 = NEAR.covers_m();
 /// Rebuild the standing set once the player is this far from where it was centred.
 const RESEED_M: f64 = 70.0;
-/// Lab ports ask for thousands of dwellings; that is a hitch and a hillside of
-/// underfill. 3D uses the atlas tier's market and spread, with this cap on
-/// houses until packing is off the main thread.
+/// Lab ports ask for thousands of dwellings. Packing is off the game thread;
+/// this still caps instance count and scatter holes in 3D.
 const MAX_3D_DWELLINGS: u32 = 80;
 /// Keep house footprints off the atlas road bed (half of a primary ribbon plus a wall).
 const ROAD_CLEAR_M: f32 = 4.0;
@@ -69,7 +73,7 @@ struct Standing {
 }
 
 /// One seated hamlet, in world metres.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HamletStand {
     pub at: GlobalXZ,
     /// Disk that covers the packed houses, for roads to pause inside.
@@ -79,8 +83,8 @@ pub struct HamletStand {
 
 struct GroundPlot<'a> {
     surface: &'a ContinentalSurface,
-    brooks: &'a BrookField,
-    stream: Option<&'a WorldStream>,
+    ponds: &'a PondField,
+    ground: Option<&'a ContactSnapshot>,
     origin: GlobalXZ,
     roads: Vec<(Vec2, Vec2)>,
 }
@@ -95,7 +99,7 @@ impl GroundPlot<'_> {
 
     fn column(&self, p: GlobalXZ) -> SurfaceColumn {
         let mut column = self.surface.column(p);
-        self.brooks.carve(p, &mut column, BrookDetail::Channels);
+        self.ponds.carve(p, &mut column);
         column
     }
 }
@@ -103,8 +107,8 @@ impl GroundPlot<'_> {
 impl Plot for GroundPlot<'_> {
     fn height(&self, p: Vec2) -> f32 {
         let at = self.world(p);
-        if let Some(stream) = self.stream {
-            if let Some(h) = stream.contact_height(at) {
+        if let Some(ground) = self.ground {
+            if let Some(h) = ground.height_at(at) {
                 return h;
             }
         }
@@ -126,10 +130,34 @@ impl Plot for GroundPlot<'_> {
     }
 }
 
+struct Packing {
+    seed: i32,
+    pins: Vec<SettlementPin>,
+    plans: HashMap<i32, Plan2D>,
+    surface: Arc<ContinentalSurface>,
+    ponds: Arc<PondField>,
+    ground: ContactSnapshot,
+    piece_ids: Vec<PieceId>,
+    recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
+}
+
+struct PackResult {
+    plans: HashMap<i32, Plan2D>,
+    standing: Vec<Standing>,
+    hamlets: Vec<HamletStand>,
+    plots: Vec<HousePlot>,
+}
+
+struct Pending {
+    focus: GlobalXZ,
+    resident_chunks: usize,
+    job: JoinHandle<PackResult>,
+}
+
 /// Live hamlets around the player.
 pub struct SettlementLayer {
     pieces: Vec<PieceBatch>,
-    recipes: HashMap<String, Vec<PlacedMesh>>,
+    recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
     well: EntityId,
     well_places: Vec<Place>,
     seed: i32,
@@ -139,6 +167,7 @@ pub struct SettlementLayer {
     plans: HashMap<i32, Plan2D>,
     hamlets: Vec<HamletStand>,
     plots: Vec<HousePlot>,
+    pending: Option<Pending>,
 }
 
 impl SettlementLayer {
@@ -160,7 +189,7 @@ impl SettlementLayer {
         let well = world.spawn_instanced(well_mesh()?);
         Ok(Self {
             pieces,
-            recipes,
+            recipes: Arc::new(recipes),
             well,
             well_places: Vec::new(),
             seed,
@@ -170,6 +199,7 @@ impl SettlementLayer {
             plans: HashMap::new(),
             hamlets: Vec::new(),
             plots: Vec::new(),
+            pending: None,
         })
     }
 
@@ -187,7 +217,13 @@ impl SettlementLayer {
         &self.plots
     }
 
+    /// A layout is packing on a worker. The loading screen waits; walking does not.
+    pub fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn clear(&mut self, world: &mut World) -> EngineResult<()> {
+        self.pending = None;
         for piece in &mut self.pieces {
             piece.places.clear();
             world.set_instances(piece.entity, &[])?;
@@ -203,86 +239,94 @@ impl SettlementLayer {
         Ok(())
     }
 
-    /// Keep hamlets around the player. Re-seats when the player walks off the
-    /// last centre, when ground streams in, or when render space rebases.
+    /// Keep hamlets around the player. Packing and seating run on a worker;
+    /// this frame only starts that job or installs one that has finished.
+    /// Re-uploads instances when render space rebases.
     pub fn follow(
         &mut self,
         world: &mut World,
         stream: &WorldStream,
-        surface: &ContinentalSurface,
-        brooks: &BrookField,
+        surface: &Arc<ContinentalSurface>,
+        ponds: &Arc<PondField>,
         focus: GlobalXZ,
         rebased: bool,
     ) -> EngineResult<bool> {
         let resident = stream.resident_count();
+        let mut changed = false;
+
+        if let Some(pending) = self.pending.take() {
+            if pending.job.is_finished() {
+                let bake = pending.job.join().expect("settlement thread");
+                self.install_bake(bake);
+                self.centre = Some(pending.focus);
+                self.resident_chunks = pending.resident_chunks;
+                self.stand(world)?;
+                changed = true;
+            } else {
+                self.pending = Some(pending);
+            }
+        }
+
+        if rebased && !self.standing.is_empty() {
+            self.stand(world)?;
+            changed = true;
+        }
+
         let moved = self
             .centre
             .map(|c| ((c.x - focus.x).powi(2) + (c.z - focus.z).powi(2)).sqrt())
             .unwrap_or(f64::INFINITY);
         let wanted = moved >= RESEED_M
             || (resident != self.resident_chunks && stream.walked_pending_count() == 0);
-        if !wanted && !rebased {
-            return Ok(false);
+        if !wanted || self.pending.is_some() {
+            return Ok(changed);
         }
-        if wanted {
-            self.rebuild(stream, surface, brooks, focus);
+
+        let nearby = nearby_pins(surface, focus);
+        if nearby.is_empty() {
+            let had = !self.standing.is_empty();
+            self.plans.clear();
+            self.standing.clear();
+            self.hamlets.clear();
+            self.plots.clear();
             self.centre = Some(focus);
             self.resident_chunks = resident;
+            if had {
+                self.stand(world)?;
+            }
+            return Ok(changed || had);
         }
-        self.stand(world)?;
-        Ok(wanted)
+
+        let packing = Packing {
+            seed: self.seed,
+            pins: nearby,
+            plans: self.plans.clone(),
+            surface: Arc::clone(surface),
+            ponds: Arc::clone(ponds),
+            ground: stream.contact_snapshot(),
+            piece_ids: self
+                .pieces
+                .iter()
+                .map(|batch| batch.piece.clone())
+                .collect(),
+            recipes: Arc::clone(&self.recipes),
+        };
+        self.pending = Some(Pending {
+            focus,
+            resident_chunks: resident,
+            job: std::thread::Builder::new()
+                .name("settlements".into())
+                .spawn(move || packing.pack())
+                .expect("settlement thread"),
+        });
+        Ok(changed)
     }
 
-    fn rebuild(
-        &mut self,
-        stream: &WorldStream,
-        surface: &ContinentalSurface,
-        brooks: &BrookField,
-        focus: GlobalXZ,
-    ) {
-        let reach_sq = REACH_M * REACH_M;
-        let nearby: Vec<SettlementPin> = surface
-            .settlements()
-            .iter()
-            .copied()
-            .filter(|pin| {
-                let dx = pin.at.x - focus.x;
-                let dz = pin.at.z - focus.z;
-                dx * dx + dz * dz <= reach_sq
-            })
-            .collect();
-
-        self.plans
-            .retain(|id, _| nearby.iter().any(|pin| pin.id == *id));
-
-        self.standing.clear();
-        self.hamlets.clear();
-        self.plots.clear();
-        for pin in nearby {
-            let plan = self.plans.entry(pin.id).or_insert_with(|| {
-                layout_for(self.seed, pin, surface, brooks)
-                    .unwrap_or_else(|err| panic!("hamlet at node {} failed: {err}", pin.id))
-            });
-            let mut houses = Vec::new();
-            seat_plan(
-                plan,
-                pin,
-                surface,
-                brooks,
-                stream,
-                &self.pieces,
-                &self.recipes,
-                &mut self.standing,
-                &mut houses,
-                &mut self.plots,
-            );
-            let radius = hamlet_radius(pin.at, &houses);
-            self.hamlets.push(HamletStand {
-                at: pin.at,
-                radius,
-                houses,
-            });
-        }
+    fn install_bake(&mut self, bake: PackResult) {
+        self.plans = bake.plans;
+        self.standing = bake.standing;
+        self.hamlets = bake.hamlets;
+        self.plots = bake.plots;
     }
 
     fn stand(&mut self, world: &mut World) -> EngineResult<()> {
@@ -311,18 +355,73 @@ impl SettlementLayer {
     }
 }
 
+impl Packing {
+    fn pack(self) -> PackResult {
+        let mut plans = self.plans;
+        plans.retain(|id, _| self.pins.iter().any(|pin| pin.id == *id));
+        let mut standing = Vec::new();
+        let mut hamlets = Vec::new();
+        let mut plots = Vec::new();
+        for pin in self.pins {
+            let plan = plans.entry(pin.id).or_insert_with(|| {
+                layout_for(self.seed, pin, &self.surface, &self.ponds)
+                    .unwrap_or_else(|err| panic!("hamlet at node {} failed: {err}", pin.id))
+            });
+            let mut houses = Vec::new();
+            seat_plan(
+                plan,
+                pin,
+                &self.surface,
+                &self.ponds,
+                &self.ground,
+                &self.piece_ids,
+                &self.recipes,
+                &mut standing,
+                &mut houses,
+                &mut plots,
+            );
+            let radius = hamlet_radius(pin.at, &houses);
+            hamlets.push(HamletStand {
+                at: pin.at,
+                radius,
+                houses,
+            });
+        }
+        PackResult {
+            plans,
+            standing,
+            hamlets,
+            plots,
+        }
+    }
+}
+
+fn nearby_pins(surface: &ContinentalSurface, focus: GlobalXZ) -> Vec<SettlementPin> {
+    let reach_sq = REACH_M * REACH_M;
+    surface
+        .settlements()
+        .iter()
+        .copied()
+        .filter(|pin| {
+            let dx = pin.at.x - focus.x;
+            let dz = pin.at.z - focus.z;
+            dx * dx + dz * dz <= reach_sq
+        })
+        .collect()
+}
+
 fn layout_for(
     world_seed: i32,
     pin: SettlementPin,
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
 ) -> Result<Plan2D, HamletError> {
     let mut config = layout_config(pin);
     config.seed = plan_seed(world_seed, pin.id);
     let plot = GroundPlot {
         surface,
-        brooks,
-        stream: None,
+        ponds,
+        ground: None,
         origin: pin.at,
         roads: nearby_road_segs(surface, pin.at, config.max_settle_radius + 24.0),
     };
@@ -333,9 +432,9 @@ fn seat_plan(
     plan: &Plan2D,
     pin: SettlementPin,
     surface: &ContinentalSurface,
-    brooks: &BrookField,
-    stream: &WorldStream,
-    pieces: &[PieceBatch],
+    ponds: &PondField,
+    ground: &ContactSnapshot,
+    piece_ids: &[PieceId],
     recipes: &HashMap<String, Vec<PlacedMesh>>,
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
@@ -343,21 +442,20 @@ fn seat_plan(
 ) {
     let plot = GroundPlot {
         surface,
-        brooks,
-        stream: Some(stream),
+        ponds,
+        ground: Some(ground),
         origin: pin.at,
-        roads: nearby_road_segs(
-            surface,
-            pin.at,
-            layout_config(pin).max_settle_radius + 24.0,
-        ),
+        roads: nearby_road_segs(surface, pin.at, layout_config(pin).max_settle_radius + 24.0),
     };
     for shape in &plan.shapes {
         if shape.kind != ShapeKind::House {
             continue;
         }
         let Some(spec) = spec_for(&shape.catalog_id) else {
-            panic!("planned building '{}' is not in the catalog", shape.catalog_id);
+            panic!(
+                "planned building '{}' is not in the catalog",
+                shape.catalog_id
+            );
         };
         let sample = crate::hamlet::sample_footprint(
             &plot,
@@ -386,9 +484,9 @@ fn seat_plan(
             continue;
         }
 
-        let recipe = recipes.get(spec.id).unwrap_or_else(|| {
-            panic!("dwelling '{}' has no modular recipe", spec.id)
-        });
+        let recipe = recipes
+            .get(spec.id)
+            .unwrap_or_else(|| panic!("dwelling '{}' has no modular recipe", spec.id));
         let floor_y = seat.floor_z - DOOR_SINK_M;
         plots.push(HousePlot {
             at: GlobalXZ::at(x, z),
@@ -400,9 +498,9 @@ fn seat_plan(
         for item in recipe {
             let p = item.place.position;
             let (dx, dz) = kit::yaw_xz(p.x, p.z, yaw_deg);
-            let index = pieces
+            let index = piece_ids
                 .iter()
-                .position(|batch| batch.piece == item.piece)
+                .position(|id| *id == item.piece)
                 .unwrap_or_else(|| panic!("kit piece {} was not uploaded", item.piece));
             out.push(Standing {
                 kind: Kind::Piece(index),
@@ -426,8 +524,7 @@ fn layout_config(pin: SettlementPin) -> HamletLabConfig {
 }
 
 fn plan_seed(world_seed: i32, node_id: i32) -> u64 {
-    (world_seed as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    (world_seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (node_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
 }
 
@@ -449,7 +546,11 @@ fn hamlet_radius(at: GlobalXZ, houses: &[GlobalXZ]) -> f32 {
     r + HAMLET_ROAD_PAD_M
 }
 
-fn nearby_road_segs(surface: &ContinentalSurface, origin: GlobalXZ, reach: f32) -> Vec<(Vec2, Vec2)> {
+fn nearby_road_segs(
+    surface: &ContinentalSurface,
+    origin: GlobalXZ,
+    reach: f32,
+) -> Vec<(Vec2, Vec2)> {
     let o = Vec2::new(origin.x as f32, origin.z as f32);
     let mut segs = Vec::new();
     for road in surface.roads() {

@@ -7,7 +7,6 @@
 //! * [`WorldSession`] runs atlas → loading → walking in one process.
 
 mod atlas_fields;
-mod brooks;
 mod chunk_mesh;
 mod coords;
 mod entry;
@@ -15,6 +14,7 @@ mod footprint;
 mod hydro_geom;
 mod look;
 mod paths;
+mod ponds;
 mod ring_field;
 mod rng;
 mod scatter;
@@ -27,10 +27,6 @@ mod world_stream;
 mod tests;
 
 pub use atlas_fields::AtlasFields;
-pub use brooks::{
-    Brook, BrookDetail, BrookField, BrookHit, BrookWindow, Pond, SharedBrooks, Terminus,
-    CHANNEL_WIDTH_M, COVERS_M, MAX_BROOK_LEN_M, REBUILD_M, SEED_RADIUS_M,
-};
 pub use chunk_mesh::TerrainChunkBuilder;
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
@@ -40,6 +36,7 @@ pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use footprint::HousePlot;
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;
+pub use ponds::{Pond, PondField, PondWindow, SharedPonds, COVERS_M, REBUILD_M, SEED_RADIUS_M};
 pub use scatter::{
     Fall, GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer, PROP_CLASSES,
 };

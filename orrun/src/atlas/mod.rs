@@ -23,8 +23,8 @@ pub use cell_overlay::{AtlasCellOverlay, OverlayStore, WaterBodyKind};
 pub use continent::{AtlasError, ContinentAtlas, CELL_METRES, SCHEMA_VERSION, SEA_SURFACE_Z, SIZE};
 pub use features::{edge_owner, Dir, EndpointKind, Kind, NodeKind, RoadClass};
 pub use hydro::{CoastRing, HydroSink, HydroVectors, LakeOutline, RiverPolyline};
-pub use road_geom::{bake_road_paths, RoadPath};
 pub use pack::{elevation_to_metres, metres_to_elevation, pack, population as cell_population};
+pub use road_geom::{bake_road_paths, RoadPath};
 pub use types::{Crossing, Endpoint, GraphNode, Lake, Link, Port};
 
 use rustc_hash::FxHasher;

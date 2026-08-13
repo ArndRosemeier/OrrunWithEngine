@@ -19,9 +19,9 @@ use engine::space::{ChunkCoord, ChunkLayer, ChunkSpan, GlobalXZ};
 use engine::SurfaceMeshStyle;
 use glam::{Vec3, Vec4};
 
-use super::brooks::{BrookDetail, SharedBrooks};
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
 use super::footprint::{self, HousePlot};
+use super::ponds::SharedPonds;
 use super::scatter::{canopy_noise, Fall, GroundCover};
 use super::surface::{lerp, ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
 
@@ -51,9 +51,6 @@ fn water_tint(body: Option<WaterBody>) -> Color {
         Some(WaterBody::Ocean) | None => rgba(104, 116, 130, 255),
         Some(WaterBody::Lake { .. }) => rgba(104, 126, 122, 255),
         Some(WaterBody::River { .. }) => rgba(112, 122, 104, 255),
-        // Sub-atlas water is shallow and moving over its own bed, so it reads
-        // browner and clearer than a river does.
-        Some(WaterBody::Brook) => rgba(118, 120, 96, 255),
         Some(WaterBody::Pond) => rgba(100, 122, 112, 255),
     }
 }
@@ -123,7 +120,7 @@ pub struct TerrainChunkBuilder {
     /// Whether this tier bakes the CPU grid the player stands on.
     contact: bool,
     /// Sub-atlas water, for the tiers close enough to resolve any of it.
-    brooks: Option<(SharedBrooks, BrookDetail)>,
+    ponds: Option<SharedPonds>,
     /// Seated dwellings. Empty on distance tiers.
     plots: Arc<RwLock<Vec<HousePlot>>>,
 }
@@ -142,7 +139,7 @@ impl TerrainChunkBuilder {
             },
             sink_m: 0.0,
             contact: true,
-            brooks: None,
+            ponds: None,
             plots: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -153,10 +150,9 @@ impl TerrainChunkBuilder {
         self
     }
 
-    /// Read the sub-atlas water layer while baking, at the detail this tier can
-    /// carry.
-    pub fn with_brooks(mut self, brooks: SharedBrooks, detail: BrookDetail) -> Self {
-        self.brooks = Some((brooks, detail));
+    /// Read the sub-atlas pond layer while baking.
+    pub fn with_ponds(mut self, ponds: SharedPonds) -> Self {
+        self.ponds = Some(ponds);
         self
     }
 
@@ -210,20 +206,20 @@ impl TerrainChunkBuilder {
         let step = self.sample_m;
         let origin = coord.origin(self.span);
         // Taken once for the whole chunk, never per column: the window may be
-        // swapped for a freshly traced one at any moment, and half a chunk with
-        // brooks and half without would show as a seam through the water.
-        let brooks = self
-            .brooks
+        // swapped for a freshly scanned one at any moment, and half a chunk with
+        // ponds and half without would show as a seam through the water.
+        let ponds = self
+            .ponds
             .as_ref()
-            .map(|(shared, detail)| (Arc::clone(&shared.read().expect("brook window")), *detail));
+            .map(|shared| Arc::clone(&shared.read().expect("pond window")));
         let plots = self.plots.read().expect("house plots");
         let mut columns: Vec<SurfaceColumn> = Vec::with_capacity(stride * stride);
         for sz in -1..(stride as i32 - 1) {
             for sx in -1..(stride as i32 - 1) {
                 let p = GlobalXZ::at(origin.x + sx as f64 * step, origin.z + sz as f64 * step);
                 let mut column = self.surface.column(p);
-                if let Some((field, detail)) = &brooks {
-                    field.carve(p, &mut column, *detail);
+                if let Some(field) = &ponds {
+                    field.carve(p, &mut column);
                 }
                 if let Some(cap) = footprint::terrain_cap(&plots, p) {
                     column.cap_ground(cap);
@@ -526,15 +522,51 @@ fn emit_land_tri(
                 normals.push(Vec3::Y);
                 colors.push(colors[ia as usize]);
                 emit_land_tri(
-                    plots, s, sink_m, ia, ib, im, pa, pb, mid, positions, normals, colors, indices,
+                    plots,
+                    s,
+                    sink_m,
+                    ia,
+                    ib,
+                    im,
+                    pa,
+                    pb,
+                    mid,
+                    positions,
+                    normals,
+                    colors,
+                    indices,
                     depth + 1,
                 );
                 emit_land_tri(
-                    plots, s, sink_m, ib, ic, im, pb, pc, mid, positions, normals, colors, indices,
+                    plots,
+                    s,
+                    sink_m,
+                    ib,
+                    ic,
+                    im,
+                    pb,
+                    pc,
+                    mid,
+                    positions,
+                    normals,
+                    colors,
+                    indices,
                     depth + 1,
                 );
                 emit_land_tri(
-                    plots, s, sink_m, ic, ia, im, pc, pa, mid, positions, normals, colors, indices,
+                    plots,
+                    s,
+                    sink_m,
+                    ic,
+                    ia,
+                    im,
+                    pc,
+                    pa,
+                    mid,
+                    positions,
+                    normals,
+                    colors,
+                    indices,
                     depth + 1,
                 );
                 return;
@@ -548,9 +580,7 @@ fn emit_land_tri(
         return;
     }
     let mut split = |a: GlobalXZ, b: GlobalXZ, ia: u32, ib: u32| {
-        push_wall_vert(
-            plots, s, sink_m, a, b, ia, ib, positions, normals, colors,
-        )
+        push_wall_vert(plots, s, sink_m, a, b, ia, ib, positions, normals, colors)
     };
     if n_in == 1 {
         let (i_in, p_in, i0, p0, i1, p1) = if ins[0] {
@@ -641,7 +671,7 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
     // shorelines meet bit-for-bit.
     //
     // Atlas water keeps a level sheet at the rim: lakes and rivers already
-    // meet the bank by construction. A brook on a hillside does not — the wet
+    // meet the bank by construction. A pond on a hillside does not — the wet
     // sample's sheet can sit metres above the dirt under the crossing, and the
     // contour draws a pane in the air. Drop that edge onto the land.
     let crossing = |a: usize, b: usize| -> WaterVertex {
@@ -658,7 +688,7 @@ fn cell_water_polygons(s: &ChunkSamples, ix: i32, iz: i32) -> Vec<WaterPoly> {
         let inside = if wet[a] { a } else { b };
         let sheet = cols[inside].sheet_hint();
         let y = match cols[inside].body() {
-            Some(WaterBody::Brook) | Some(WaterBody::Pond) => {
+            Some(WaterBody::Pond) => {
                 let land = lerp(cols[a].ground(), cols[b].ground(), t);
                 sheet.min(land)
             }

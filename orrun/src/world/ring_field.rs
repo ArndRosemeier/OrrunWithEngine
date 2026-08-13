@@ -38,8 +38,8 @@ pub struct SegmentField {
     /// The point pair each segment runs between.
     ///
     /// Explicit rather than implied by "index and index + 1", so several
-    /// separate polylines can share one grid: a brook network is a few hundred
-    /// short traces, and indexing each on its own grid would mean asking every
+    /// separate polylines can share one grid: a river network is a few dozen
+    /// traces, and indexing each on its own grid would mean asking every
     /// one of them how far away it is.
     ends: Vec<[u32; 2]>,
     min: Vec2,
@@ -75,6 +75,7 @@ impl SegmentField {
     /// Segment indices run through the paths in order; [`Self::segment_ends`]
     /// gives back the point indices, which is how a caller finds which path a
     /// hit belongs to.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn build_paths(paths: &[Vec<Vec2>]) -> Option<Self> {
         let mut points = Vec::new();
         let mut ends = Vec::new();
@@ -172,6 +173,7 @@ impl SegmentField {
 
     /// Point indices of segment `seg`, for callers carrying per-point data.
     #[inline]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn segment_ends(&self, seg: usize) -> (usize, usize) {
         let [a, b] = self.ends[seg];
         (a as usize, b as usize)
@@ -549,7 +551,7 @@ mod tests {
     #[test]
     fn separate_paths_in_one_grid_do_not_join_up() {
         // The whole reason for `build_paths`: a naive concatenation would leave
-        // a segment bridging the gap between two brooks, and a query in that gap
+        // a segment bridging the gap between two rivers, and a query in that gap
         // would be told it is standing in water.
         let left = vec![Vec2::new(0.0, 0.0), Vec2::new(0.0, 100.0)];
         let right = vec![Vec2::new(400.0, 0.0), Vec2::new(400.0, 100.0)];

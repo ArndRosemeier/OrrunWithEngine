@@ -31,10 +31,10 @@ use engine::error::EngineResult;
 use engine::space::{ChunkLevel, ChunkSpan, GlobalXZ, RenderOrigin};
 use engine::world::World;
 
-use super::brooks::{BrookDetail, SharedBrooks};
 use super::chunk_mesh::TerrainChunkBuilder;
 use super::coords::{chunk_span, CHUNK_SAMPLE_M, CHUNK_SPAN_M};
 use super::footprint::{self, HousePlot};
+use super::ponds::SharedPonds;
 use super::surface::ContinentalSurface;
 
 /// Chunks that must be resident before the player may move.
@@ -153,12 +153,12 @@ impl WorldStream {
     ///
     /// The sub-atlas water window goes to the two closest tiers only. The far
     /// tier samples every hundred and twenty-five metres, where a pond is one
-    /// sample wide and a brook a twentieth of one.
-    pub fn new(surface: Arc<ContinentalSurface>, brooks: SharedBrooks) -> Self {
+    /// sample wide.
+    pub fn new(surface: Arc<ContinentalSurface>, ponds: SharedPonds) -> Self {
         let plots = Arc::new(RwLock::new(Vec::new()));
         let builder = Arc::new(
             TerrainChunkBuilder::new(Arc::clone(&surface))
-                .with_brooks(Arc::clone(&brooks), BrookDetail::Channels)
+                .with_ponds(Arc::clone(&ponds))
                 .with_plots(Arc::clone(&plots)),
         );
         let near = ChunkStream::new(builder, NEAR.radius)
@@ -175,7 +175,7 @@ impl WorldStream {
                 tier.sink_m,
             );
             if tier.level == MEDIUM.level {
-                builder = builder.with_brooks(Arc::clone(&brooks), BrookDetail::Basins);
+                builder = builder.with_ponds(Arc::clone(&ponds));
             }
             let builder = Arc::new(builder);
             distant.push(
@@ -207,7 +207,11 @@ impl WorldStream {
     }
 
     /// Cap interior ground under seated houses and rebuild the overlapping chunks.
-    pub fn set_house_plots(&mut self, world: &mut World, plots: Vec<HousePlot>) -> EngineResult<()> {
+    pub fn set_house_plots(
+        &mut self,
+        world: &mut World,
+        plots: Vec<HousePlot>,
+    ) -> EngineResult<()> {
         {
             let prev = self.plots.read().expect("house plots");
             if prev.as_slice() == plots.as_slice() {
@@ -215,10 +219,9 @@ impl WorldStream {
             }
         }
         let mut coords = footprint::overlapping_chunks(&plots, chunk_span());
-        for coord in footprint::overlapping_chunks(
-            &self.plots.read().expect("house plots"),
-            chunk_span(),
-        ) {
+        for coord in
+            footprint::overlapping_chunks(&self.plots.read().expect("house plots"), chunk_span())
+        {
             if !coords.contains(&coord) {
                 coords.push(coord);
             }

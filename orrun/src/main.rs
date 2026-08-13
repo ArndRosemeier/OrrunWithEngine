@@ -577,17 +577,13 @@ fn main() {
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
     eprintln!("generating atlas seed={seed} size={size}…");
-    let mut generating: Option<
-        JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>)>,
-    > = Some(
+    let mut generating: Option<JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>)>> = Some(
         std::thread::Builder::new()
             .name("atlas".into())
             .spawn(move || {
                 let atlas = ContinentAtlas::generate(seed, size);
-                *status_job.lock().expect("title status") =
-                    "Building continental terrain…".into();
-                let surface =
-                    ContinentalSurface::new(&atlas).expect("canonical surface");
+                *status_job.lock().expect("title status") = "Building continental terrain…".into();
+                let surface = ContinentalSurface::new(&atlas).expect("canonical surface");
                 (Arc::new(atlas), Arc::new(surface))
             })
             .expect("atlas thread"),
@@ -666,8 +662,12 @@ fn main() {
             return;
         }
 
-        let viewer = viewer.as_mut().expect("left the title before the atlas was ready");
-        let session = session.as_mut().expect("left the title before the atlas was ready");
+        let viewer = viewer
+            .as_mut()
+            .expect("left the title before the atlas was ready");
+        let session = session
+            .as_mut()
+            .expect("left the title before the atlas was ready");
 
         match session.state() {
             SessionState::World | SessionState::Loading => install_daylight(world),
@@ -744,9 +744,7 @@ fn title_vista_path() -> PathBuf {
     tried
         .into_iter()
         .find(|p| p.is_file())
-        .unwrap_or_else(|| {
-            panic!("title vista missing; expected orrun/assets/title/vista.png")
-        })
+        .unwrap_or_else(|| panic!("title vista missing; expected orrun/assets/title/vista.png"))
 }
 
 fn paint_vista_backdrop(ui: &egui::Ui, rect: Rect, art: &TextureHandle) {
@@ -775,7 +773,10 @@ fn paint_edge_fade(painter: &egui::Painter, rect: Rect, from_top: bool) {
     for i in 0..8 {
         let t = i as f32 / 8.0;
         let (y0, y1) = if from_top {
-            (rect.min.y + band * t, rect.min.y + band * ((i + 1) as f32 / 8.0))
+            (
+                rect.min.y + band * t,
+                rect.min.y + band * ((i + 1) as f32 / 8.0),
+            )
         } else {
             let fade_top = rect.max.y - band;
             (
@@ -882,10 +883,7 @@ fn title_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
                 .color(Color32::from_rgb(235, 230, 210)),
         )
         .fill(Color32::from_rgba_unmultiplied(10, 14, 20, 170))
-        .stroke(egui::Stroke::new(
-            1.0_f32,
-            Color32::from_rgb(168, 186, 204),
-        ))
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(168, 186, 204)))
         .min_size(egui::vec2(240.0, 40.0)),
     )
 }
@@ -1126,16 +1124,10 @@ fn settlement_tier_name(tier: u8) -> &'static str {
     }
 }
 
-fn draw_loading(
-    viewer: &AtlasViewer,
-    session: &WorldSession,
-    frame: &Frame,
-    art: &TextureHandle,
-) {
+fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame, art: &TextureHandle) {
     let ctx = frame.ui.ctx().clone();
     let cream = Color32::from_rgb(235, 230, 210);
     let mute = Color32::from_rgb(168, 186, 204);
-    let progress = session.loading_progress();
     let where_to = session
         .destination()
         .map(|g| format!("({:.0} m, {:.0} m)", g.x, g.z))
@@ -1146,6 +1138,7 @@ fn draw_loading(
         .filter(|note| !note.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("Travelling to {where_to}"));
+    let status = session.loading_status();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
@@ -1161,15 +1154,7 @@ fn draw_loading(
                     ui.vertical_centered(|ui| {
                         ui.label(egui::RichText::new(heading).size(22.0).color(cream));
                         ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "streaming ground… {:.0}%   ({} chunks resident)",
-                                progress * 100.0,
-                                session.stream().resident_count()
-                            ))
-                            .size(14.0)
-                            .color(mute),
-                        );
+                        ui.label(egui::RichText::new(status).size(14.0).color(mute));
                     });
                 });
         });

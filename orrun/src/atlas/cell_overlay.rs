@@ -239,7 +239,7 @@ fn dominant_body(columns: &[Option<WaterBody>]) -> WaterBodyKind {
             // Sub-atlas water is below the resolution of a map cell and never
             // reaches the overlay: it lives in the window the session carries,
             // not in the surface these columns come from.
-            WaterBody::Brook | WaterBody::Pond => {}
+            WaterBody::Pond => {}
         }
     }
     let best_lake = lakes.into_iter().max_by_key(|(id, n)| (*n, *id));

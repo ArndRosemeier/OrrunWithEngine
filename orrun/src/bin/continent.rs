@@ -2,7 +2,7 @@
 //!
 //! Usage: `cargo run -p orrun --bin continent -- [seed] [size] [where]`
 //! where `where` is `river` (default), `coast`, `inland`, `forest`, `ocean`,
-//! `summit`, `brook`, `pond`, or `x,z`.
+//! `summit`, `pond`, or `x,z`.
 //! Controls: click to look · Esc hands the mouse back · W/S walk · Q/E
 //! sidestep · A/D turn · Shift sprint · F fly (W follows the look) · Space jump · Esc with
 //! a free cursor quits.
@@ -18,8 +18,8 @@ use engine::space::GlobalXZ;
 use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
 use orrun::world::{
-    install_daylight, install_materials, BrookField, ContinentalSurface, Fall, GroundCover,
-    Heading, MapPoint, SessionState, Terminus, WorldEntryRequest, WorldSession,
+    install_daylight, install_materials, ContinentalSurface, Fall, GroundCover, Heading, MapPoint,
+    PondField, SessionState, WorldEntryRequest, WorldSession,
 };
 
 /// Which part of the continent to enter at.
@@ -31,7 +31,6 @@ enum Target {
     Forest,
     Ocean,
     Summit,
-    Brook,
     Pond,
     Exact(f64, f64),
 }
@@ -45,12 +44,11 @@ impl Target {
             "forest" => Self::Forest,
             "ocean" => Self::Ocean,
             "summit" => Self::Summit,
-            "brook" => Self::Brook,
             "pond" => Self::Pond,
             other => {
                 let (x, z) = other
                     .split_once(',')
-                    .expect("entry must be river|coast|inland|forest|ocean|summit|brook|pond|x,z");
+                    .expect("entry must be river|coast|inland|forest|ocean|summit|pond|x,z");
                 Self::Exact(
                     x.trim().parse().expect("entry x in metres"),
                     z.trim().parse().expect("entry z in metres"),
@@ -187,26 +185,23 @@ fn lowland_shore(atlas: &ContinentAtlas, surface: &ContinentalSurface) -> Global
     at
 }
 
-/// The bank of a real brook, or the shore of a real pond.
+/// The shore of a real pond.
 ///
 /// Sub-atlas water is a window around the player rather than a continental
 /// layer, so there is no map to look it up in: the only way to stand beside one
-/// is to trace a window first and pick out of it.
-fn sub_atlas_water(surface: &ContinentalSurface, want_pond: bool) -> (GlobalXZ, Heading) {
+/// is to scan a window first and pick out of it.
+fn sub_atlas_pond(surface: &ContinentalSurface) -> (GlobalXZ, Heading) {
     let mid = surface.bounds().metres() / 2.0;
-    let field = BrookField::build(surface, GlobalXZ::at(mid, mid));
+    let field = PondField::build(surface, GlobalXZ::at(mid, mid));
     // Stand off the water and look back at it. The spawn resolver faces the
     // nearest water by itself, but it asks the surface, and the surface has
-    // never heard of a brook.
+    // never heard of a pond.
     let wet = |p: Vec2| {
         field.water_reach(p) >= 0.0
             || surface
                 .column(GlobalXZ::at(p.x as f64, p.y as f64))
                 .is_wet()
     };
-    // Out to a bearing that is dry, then back in to the shoreline and a few
-    // paces off it. Standing off by the whole reach of the water puts a bank
-    // between the camera and it as often as not.
     let dry_near = |at: Vec2, reach: f32| -> (GlobalXZ, Heading) {
         for turn in 0..16 {
             let angle = std::f32::consts::TAU * (turn as f32 / 16.0);
@@ -218,9 +213,6 @@ fn sub_atlas_water(surface: &ContinentalSurface, want_pond: bool) -> (GlobalXZ, 
             while stand.distance(at) > 2.0 && !wet(stand - away * 2.0) {
                 stand -= away * 2.0;
             }
-            // Right on the bank. A brook lies most of a metre below the field it
-            // runs through, so from ten paces back its own near bank hides it,
-            // and the shot comes out as a meadow with reeds in it.
             let stand = stand + away * 2.0;
             return (
                 GlobalXZ::at(stand.x as f64, stand.y as f64),
@@ -233,41 +225,17 @@ fn sub_atlas_water(surface: &ContinentalSurface, want_pond: bool) -> (GlobalXZ, 
         )
     };
 
-    if want_pond {
-        let pond = field
-            .ponds()
-            .iter()
-            .max_by(|a, b| a.reach_m().total_cmp(&b.reach_m()))
-            .expect("the window holds at least one pond");
-        eprintln!(
-            "pond {:.0} m across, sheet {:.1} m",
-            pond.reach_m() * 2.0,
-            pond.sheet_z()
-        );
-        return dry_near(pond.centre(), pond.reach_m() + 14.0);
-    }
-
-    let brook = field
-        .brooks()
+    let pond = field
+        .ponds()
         .iter()
-        .filter(|b| b.terminus() == Terminus::Water)
-        .max_by(|a, b| a.length_m().total_cmp(&b.length_m()))
-        .or_else(|| {
-            field
-                .brooks()
-                .iter()
-                .max_by(|a, b| a.length_m().total_cmp(&b.length_m()))
-        })
-        .expect("the window holds at least one brook");
+        .max_by(|a, b| a.reach_m().total_cmp(&b.reach_m()))
+        .expect("the window holds at least one pond");
     eprintln!(
-        "brook {:.0} m long ending in {:?}",
-        brook.length_m(),
-        brook.terminus()
+        "pond {:.0} m across, sheet {:.1} m",
+        pond.reach_m() * 2.0,
+        pond.sheet_z()
     );
-    // Mid-course: at the mouth the receiving river fills the frame, and at the
-    // spring the channel is still narrowing. Stand off past the water itself.
-    let points = brook.points();
-    dry_near(points[points.len() / 2], 20.0)
+    dry_near(pond.centre(), pond.reach_m() + 14.0)
 }
 
 /// Where to enter, and which way to look if the target knows better than the
@@ -277,8 +245,8 @@ fn entry_position(
     surface: &ContinentalSurface,
     target: Target,
 ) -> (GlobalXZ, Option<Heading>) {
-    if let Target::Brook | Target::Pond = target {
-        let (at, look) = sub_atlas_water(surface, matches!(target, Target::Pond));
+    if let Target::Pond = target {
+        let (at, look) = sub_atlas_pond(surface);
         return (at, Some(look));
     }
     let at = match target {
@@ -297,7 +265,7 @@ fn entry_position(
         Target::Forest => deepest_timber(surface),
         Target::Ocean => extreme_column(surface, true),
         Target::Summit => highest_ground(surface),
-        Target::Brook | Target::Pond => unreachable!("handled above"),
+        Target::Pond => unreachable!("handled above"),
     };
     (at, None)
 }
@@ -337,7 +305,7 @@ fn main() {
     let mut session = WorldSession::new(Arc::clone(&surface));
     let mut announced = false;
     let mut reported = false;
-    // Entry is the one moment everything happens at once — brook window, chunk
+    // Entry is the one moment everything happens at once — pond window, chunk
     // bakes, the first sowing — so the longest frame of the first seconds is the
     // number that says whether entering the world hitches.
     let mut worst = (0.0f32, 0.0f32);

@@ -1,9 +1,8 @@
 //! Deterministic randomness keyed by place.
 //!
 //! Everything the world scatters or grows below atlas scale — tufts, stones,
-//! trees, springs, the brooks that run from them — has to come out the same on
-//! every machine and every launch, and has to do so without anything being
-//! stored. So nothing here has state that outlives a call: a draw is a function
+//! trees, the ponds they stand beside — has to come out the same on every
+//! machine and every launch, and has to do so without anything being stored. So nothing here has state that outlives a call: a draw is a function
 //! of the world seed, a lattice cell, and which stream is asking.
 //!
 //! Two consumers must never share a stream. A salt per purpose is what keeps a
@@ -33,6 +32,7 @@ impl CellRng {
 
     /// How many of `max` to place, rounding by chance rather than truncating, so
     /// a density of 0.3 per cell reads as three cells in ten and not as none.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn count(&mut self, expected: f32, max: usize) -> usize {
         let whole = expected.floor();
         let extra = if self.unit() < expected - whole {
@@ -128,8 +128,8 @@ mod tests {
 
     #[test]
     fn a_cell_reads_the_same_whatever_reached_it_first() {
-        // The whole point: a brook traced from upstream and the same brook met
-        // from its mouth have to be the same brook.
+        // The whole point: a pond found from one lattice cell and the same pond
+        // found from another have to be the same pond.
         let first: Vec<f32> = (0..8).map(|_| CellRng::new(7, -3, 91).unit()).collect();
         assert!(first.iter().all(|v| (*v - first[0]).abs() < f32::EPSILON));
         assert_ne!(

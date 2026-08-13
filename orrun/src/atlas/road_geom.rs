@@ -103,8 +103,18 @@ pub(crate) fn meander_cell_corridor(
         }
         let envelope = (std::f32::consts::PI * t).sin();
         let h0 = hash_unit(seed, cell_idx as u32, feature_id as u32, i as u32);
-        let h1 = hash_unit(seed ^ 0x9E37, cell_idx as u32, feature_id as u32, (i * 3) as u32);
-        let h2 = hash_unit(seed ^ 0x85EB, cell_idx as u32, feature_id as u32, (i * 7) as u32);
+        let h1 = hash_unit(
+            seed ^ 0x9E37,
+            cell_idx as u32,
+            feature_id as u32,
+            (i * 3) as u32,
+        );
+        let h2 = hash_unit(
+            seed ^ 0x85EB,
+            cell_idx as u32,
+            feature_id as u32,
+            (i * 7) as u32,
+        );
         let h0b = hash_unit(seed, cell_idx as u32, feature_id as u32, (i + 1) as u32);
         let coarse = (h0 * 2.0 - 1.0) * 0.65 + (h0b * 2.0 - 1.0) * 0.35;
         let fine = (h1 * 2.0 - 1.0) * (0.5 + 0.5 * (t * 11.0).sin());
@@ -284,7 +294,11 @@ fn join_piece(chain: &mut Vec<Vec2>, piece: Vec<Vec2>, at_tail: bool) {
         let skip = usize::from(piece[0].distance(*chain.last().expect("chain")) < 2.0);
         chain.extend(piece.into_iter().skip(skip));
     } else {
-        let skip_last = piece.last().expect("piece").distance(*chain.first().expect("chain")) < 2.0;
+        let skip_last = piece
+            .last()
+            .expect("piece")
+            .distance(*chain.first().expect("chain"))
+            < 2.0;
         let mut prefix = piece;
         if skip_last {
             prefix.pop();
@@ -383,22 +397,19 @@ mod tests {
     fn duplicate_corridors_do_not_scribble() {
         let a = vec![v(0.0, 0.0), v(500.0, 0.0), v(1000.0, 0.0)];
         let b = vec![v(1000.0, 0.0), v(1500.0, 0.0), v(2000.0, 0.0)];
-        let chains = stitch_polylines(dedupe_pieces(vec![
-            a.clone(),
-            b.clone(),
-            a,
-            b.clone(),
-            {
-                let mut rev = b;
-                rev.reverse();
-                rev
-            },
-        ]));
+        let chains = stitch_polylines(dedupe_pieces(vec![a.clone(), b.clone(), a, b.clone(), {
+            let mut rev = b;
+            rev.reverse();
+            rev
+        }]));
         assert_eq!(chains.len(), 1, "one road, not a bundle of copies");
         let p = &chains[0];
         assert_eq!(p.len(), 5);
         assert!(p[0].distance(v(0.0, 0.0)) < 1.0 || p[0].distance(v(2000.0, 0.0)) < 1.0);
-        assert!(p.last().unwrap().distance(v(2000.0, 0.0)) < 1.0 || p.last().unwrap().distance(v(0.0, 0.0)) < 1.0);
+        assert!(
+            p.last().unwrap().distance(v(2000.0, 0.0)) < 1.0
+                || p.last().unwrap().distance(v(0.0, 0.0)) < 1.0
+        );
     }
 
     #[test]
@@ -468,11 +479,7 @@ mod tests {
             .iter()
             .copied()
             .filter(|p| p.distance(plaza) < 400.0)
-            .max_by(|a, b| {
-                a.distance(plaza)
-                    .partial_cmp(&b.distance(plaza))
-                    .unwrap()
-            })
+            .max_by(|a, b| a.distance(plaza).partial_cmp(&b.distance(plaza)).unwrap())
             .unwrap_or(plaza);
         (far - plaza).normalize_or_zero()
     }

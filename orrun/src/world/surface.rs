@@ -29,7 +29,9 @@ use super::atlas_fields::AtlasFields;
 use super::coords::AtlasBounds;
 use super::hydro_geom::{HydroIndex, OCEAN_SHELF_DEPTH, SHORE_BAND_M};
 use crate::atlas::hydro::HydroVectors;
-use crate::atlas::{bake_road_paths, cell_population, ContinentAtlas, NodeKind, RoadPath, CELL_METRES};
+use crate::atlas::{
+    bake_road_paths, cell_population, ContinentAtlas, NodeKind, RoadPath, CELL_METRES,
+};
 
 /// Minimum water depth wherever a sheet is present.
 pub const MIN_WATER_DEPTH: f32 = 0.35;
@@ -99,8 +101,6 @@ pub enum WaterBody {
     River {
         class: i32,
     },
-    /// A sub-atlas channel, seated and drawn on the same lattice as the land.
-    Brook,
     /// A sub-atlas basin, filled to the height it would spill at.
     Pond,
 }
@@ -119,10 +119,6 @@ pub struct WaterCarve {
     /// Metres into the water; negative outside it, in the bank blend.
     pub margin_m: f32,
     pub body: WaterBody,
-    /// Cut or fill to the profile. A brook on a hillside has to raise a floor
-    /// on the downhill side or the sheet is a pane over the slope; a pond
-    /// never fills, it only cuts.
-    pub seat: bool,
 }
 
 /// Albedo class for chunk vertex tinting.
@@ -167,21 +163,16 @@ impl SurfaceColumn {
         self.wetness
     }
 
-    /// Sink a sub-atlas channel or basin into this column.
+    /// Sink a sub-atlas basin into this column.
     ///
     /// Atlas hydrology wins outright: where an ocean, lake or river already
-    /// stands, a brook has no business arguing about the sheet height — it was
-    /// traced until it reached exactly this water and stopped.
+    /// stands, a pond has no business arguing about the sheet height.
     pub(super) fn carve(&mut self, carve: WaterCarve) {
         if self.body.is_some() {
             return;
         }
         let target = carve.sheet_z - carve.depth_m;
-        if carve.seat {
-            self.ground = target;
-        } else {
-            self.ground = self.ground.min(target);
-        }
+        self.ground = self.ground.min(target);
         if carve.margin_m < 0.0 {
             // Still report the distance to the bank. The contour that draws a
             // pond interpolates against the dry side, and the atlas figure out
@@ -189,9 +180,6 @@ impl SurfaceColumn {
             // every crossing onto the wet lattice point and shrink the pond to
             // the cells it happens to cover.
             self.wetness = self.wetness.max(carve.margin_m);
-            if carve.seat {
-                self.sheet = carve.sheet_z;
-            }
             return;
         }
         self.sheet = carve.sheet_z;
@@ -306,7 +294,11 @@ impl TerrainDetail {
         let grit = self.grit.fbm2(px * 0.02, pz * 0.02, 2, 2.2, 0.5) * GRIT_HEIGHT * detail_amt;
         // Crests sit off the loft wavelength (~700 m, not 1.4 km) so amplifying
         // the atlas cannot keep a parallel wave.
-        let ridge01 = self.mountain.ridged2(px * 0.0014, pz * 0.0014, 4, 2.18, 0.46) * 0.5 + 0.5;
+        let ridge01 = self
+            .mountain
+            .ridged2(px * 0.0014, pz * 0.0014, 4, 2.18, 0.46)
+            * 0.5
+            + 0.5;
         let shaped = ridge01.clamp(0.0, 1.0).powf(lerp(1.45, 2.15, alpine));
         let ridge = (shaped - 0.40)
             * MOUNTAIN_DETAIL

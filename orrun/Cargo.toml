@@ -30,8 +30,8 @@ name = "chunk_cost"
 path = "src/bin/chunk_cost.rs"
 
 [[bin]]
-name = "brook_map"
-path = "src/bin/brook_map.rs"
+name = "pond_map"
+path = "src/bin/pond_map.rs"
 
 [dependencies]
 engine = { workspace = true }

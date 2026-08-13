@@ -20,10 +20,10 @@ use engine::{Key, MouseButton};
 use glam::{Vec2, Vec3};
 use thiserror::Error;
 
-use super::brooks::{BrookField, BrookWindow};
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::paths::PathLayer;
+use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
 use super::settlement::{SettlementError, SettlementLayer};
 use super::surface::ContinentalSurface;
@@ -220,8 +220,8 @@ impl Player {
 
 pub struct WorldSession {
     surface: Arc<ContinentalSurface>,
-    /// Sub-atlas water around the player, traced off the main thread.
-    brooks: BrookWindow,
+    /// Sub-atlas water around the player, scanned off the main thread.
+    ponds: PondWindow,
     stream: WorldStream,
     /// Ground cover, once the prop meshes have been uploaded.
     scatter: Option<ScatterLayer>,
@@ -230,7 +230,7 @@ pub struct WorldSession {
     /// Draped roads and measured bridges.
     paths: Option<PathLayer>,
     state: SessionState,
-    /// The request being loaded, until the water under it has been traced and
+    /// The request being loaded, until the water under it has been scanned and
     /// the spawn it resolves to is known.
     entering: Option<WorldEntryRequest>,
     spawn: Option<SpawnPose>,
@@ -239,11 +239,11 @@ pub struct WorldSession {
 
 impl WorldSession {
     pub fn new(surface: Arc<ContinentalSurface>) -> Self {
-        let brooks = BrookWindow::new(Arc::clone(&surface));
-        let stream = WorldStream::new(Arc::clone(&surface), brooks.shared());
+        let ponds = PondWindow::new(Arc::clone(&surface));
+        let stream = WorldStream::new(Arc::clone(&surface), ponds.shared());
         Self {
             surface,
-            brooks,
+            ponds,
             stream,
             scatter: None,
             settlements: None,
@@ -280,8 +280,8 @@ impl WorldSession {
     }
 
     /// The sub-atlas water the world is currently being cut with.
-    pub fn brooks(&self) -> Arc<BrookField> {
-        self.brooks.field()
+    pub fn ponds(&self) -> Arc<PondField> {
+        self.ponds.field()
     }
 
     /// Global position of the player, once they exist.
@@ -299,12 +299,12 @@ impl WorldSession {
         request: WorldEntryRequest,
     ) -> Result<(), SessionError> {
         // The spawn this resolves to is not the one the player gets: the water
-        // under it is not traced yet, and a pond the resolver cannot see is a
+        // under it is not scanned yet, and a pond the resolver cannot see is a
         // pond it will stand them in. It is here to answer the one question that
         // has to be answered before anything is torn down — whether the request
         // has any walkable ground at all — and to say where the render origin
         // goes, which the true spawn will be a few metres from.
-        let approach = resolve_spawn(&self.surface, &self.brooks.field(), request)?;
+        let approach = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
 
         if let Some(scatter) = self.scatter.as_mut() {
             scatter.clear(world)?;
@@ -354,6 +354,28 @@ impl WorldSession {
         (resident / (resident + pending).max(1.0)).clamp(0.0, 0.95)
     }
 
+    /// What the loading screen should say. Progress stays at 0 until spawn is
+    /// known, which used to read as a stuck ground streamer while water scanned.
+    pub fn loading_status(&self) -> String {
+        if self.spawn.is_none() {
+            if self.scatter.is_none() {
+                return "loading props…".into();
+            }
+            return "scanning water…".into();
+        }
+        if self.settlements.as_ref().is_some_and(SettlementLayer::busy) {
+            return "seating hamlet…".into();
+        }
+        if self.scatter.as_ref().is_some_and(ScatterLayer::busy) {
+            return "growing cover…".into();
+        }
+        format!(
+            "streaming ground… {:.0}%   ({} chunks resident)",
+            self.loading_progress() * 100.0,
+            self.stream.resident_count()
+        )
+    }
+
     /// Advance the session for one rendered frame.
     ///
     /// Mouse-look is taken, never assumed: the pointer is captured when the
@@ -391,31 +413,28 @@ impl WorldSession {
     }
 
     fn update_loading(&mut self, world: &mut World) -> Result<(), SessionError> {
-        // Water first, and off this thread. Ground baked before the brooks were
+        // Water first, and off this thread. Ground baked before the ponds were
         // known would have to be thrown away, so nothing else starts until the
         // window covers the spawn. The window reaches kilometres and the resolver
         // searches metres, so the requested point centres both.
         if let Some(request) = self.entering {
-            // Prop meshes are read off disk and uploaded once, on the first
-            // entry, so a player who never leaves the map never pays for them.
-            // It happens here, a frame to itself, while the brook thread runs:
-            // done during the request it lands on the frame that still has the
-            // map on it, which is the one frame that must not stall.
+            // Start the water window first so it runs while prop GLBs are read.
             if self.scatter.is_none() {
+                let _ = self.ponds.traced(request.requested());
                 let catalog = ScatterCatalog::discover()?;
                 self.scatter = Some(ScatterLayer::install(
                     world,
                     &catalog,
                     self.surface.world_seed(),
                 )?);
-                self.settlements = Some(SettlementLayer::install(world, self.surface.world_seed())?);
+                self.settlements =
+                    Some(SettlementLayer::install(world, self.surface.world_seed())?);
                 self.paths = Some(PathLayer::new());
+            }
+            if !self.ponds.traced(request.requested()) {
                 return Ok(());
             }
-            if !self.brooks.traced(request.requested()) {
-                return Ok(());
-            }
-            let pose = resolve_spawn(&self.surface, &self.brooks.field(), request)?;
+            let pose = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
             self.spawn = Some(pose);
             self.player = Some(Player {
                 position: pose.position(),
@@ -439,13 +458,16 @@ impl WorldSession {
                 world,
                 &self.stream,
                 &self.surface,
-                self.brooks.field().as_ref(),
+                &self.ponds.field(),
                 focus,
                 false,
             )?
         } else {
             false
         };
+        if self.settlements.as_ref().is_some_and(SettlementLayer::busy) {
+            return Ok(());
+        }
         if rebuilt {
             let plots = self
                 .settlements
@@ -468,11 +490,14 @@ impl WorldSession {
                 world,
                 &self.stream,
                 &self.surface,
-                &self.brooks.field(),
+                &self.ponds.field(),
                 focus,
                 &plots,
                 false,
             )?;
+            if scatter.busy() {
+                return Ok(());
+            }
         }
         let Some(ground) = self.stream.contact_height(focus) else {
             return Err(SessionError::MissingContact {
@@ -523,14 +548,14 @@ impl WorldSession {
         let foot = player.position.horizontal();
         // Before the streamer, so a chunk is never baked against a window that
         // has stopped reaching it.
-        self.brooks.follow(foot);
+        self.ponds.follow(foot);
         let rebased = self.stream.maybe_rebase(world, foot)?;
         let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
             settlements.follow(
                 world,
                 &self.stream,
                 &self.surface,
-                self.brooks.field().as_ref(),
+                &self.ponds.field(),
                 foot,
                 rebased,
             )?
@@ -556,7 +581,7 @@ impl WorldSession {
                 world,
                 &self.stream,
                 &self.surface,
-                &self.brooks.field(),
+                &self.ponds.field(),
                 foot,
                 &plots,
                 rebased,
@@ -571,7 +596,7 @@ impl WorldSession {
             paths.follow(
                 world,
                 &self.surface,
-                &self.brooks.field(),
+                &self.ponds.field(),
                 &hamlets,
                 foot,
                 self.stream.resident_count(),

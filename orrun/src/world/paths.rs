@@ -16,12 +16,13 @@ use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
 use glam::{Vec2, Vec3};
 
-use super::brooks::{BrookDetail, BrookField};
+use super::ponds::PondField;
 use super::settlement::HamletStand;
 use super::surface::{ContinentalSurface, SurfaceColumn};
+use super::world_stream::NEAR;
 use crate::hamlet::WATERLINE_MARGIN;
 
-const REACH_M: f64 = 900.0;
+const REACH_M: f64 = NEAR.covers_m();
 const RESEED_M: f64 = 80.0;
 const SAMPLE_M: f32 = 6.0;
 /// How far the dirt sits above sampled ground so the 4 m grass grid cannot
@@ -105,6 +106,8 @@ pub struct PathLayer {
     centre: Option<GlobalXZ>,
     resident_chunks: usize,
     pending: Option<Pending>,
+    /// Hamlets the in-flight or last bake was started against.
+    hamlets: Vec<HamletStand>,
 }
 
 impl PathLayer {
@@ -115,6 +118,7 @@ impl PathLayer {
             centre: None,
             resident_chunks: 0,
             pending: None,
+            hamlets: Vec::new(),
         }
     }
 
@@ -126,6 +130,7 @@ impl PathLayer {
         self.decks.clear();
         self.centre = None;
         self.resident_chunks = 0;
+        self.hamlets.clear();
         Ok(())
     }
 
@@ -145,7 +150,7 @@ impl PathLayer {
         &mut self,
         world: &mut World,
         surface: &Arc<ContinentalSurface>,
-        brooks: &Arc<BrookField>,
+        ponds: &Arc<PondField>,
         hamlets: &[HamletStand],
         focus: GlobalXZ,
         resident: usize,
@@ -169,20 +174,24 @@ impl PathLayer {
             .centre
             .map(|c| ((c.x - focus.x).powi(2) + (c.z - focus.z).powi(2)).sqrt())
             .unwrap_or(f64::INFINITY);
-        let wanted = moved >= RESEED_M || (resident != self.resident_chunks && walked_pending == 0);
+        let hamlets_changed = self.hamlets != hamlets;
+        let wanted = moved >= RESEED_M
+            || (resident != self.resident_chunks && walked_pending == 0)
+            || hamlets_changed;
         if !wanted || self.pending.is_some() {
             return Ok(changed);
         }
 
         let surface = Arc::clone(surface);
-        let brooks = Arc::clone(brooks);
+        let ponds = Arc::clone(ponds);
         let hamlets = hamlets.to_vec();
+        self.hamlets = hamlets.clone();
         self.pending = Some(Pending {
             focus,
             resident_chunks: resident,
             job: std::thread::Builder::new()
                 .name("paths".into())
-                .spawn(move || bake_paths(&surface, &brooks, &hamlets, focus))
+                .spawn(move || bake_paths(&surface, &ponds, &hamlets, focus))
                 .expect("path thread"),
         });
         Ok(changed)
@@ -204,7 +213,7 @@ impl PathLayer {
 
 fn bake_paths(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     hamlets: &[HamletStand],
     focus: GlobalXZ,
 ) -> EngineResult<PathBake> {
@@ -223,11 +232,11 @@ fn bake_paths(
         } else {
             SECONDARY_WIDTH
         };
-        for samples in sample_runs(surface, brooks, &road.points, focus2) {
+        for samples in sample_runs(surface, ponds, &road.points, focus2) {
             let spans = spans_along(&samples, width);
             let dry = dry_runs(&samples, &spans, hamlets);
             for run in dry {
-                add_ribbon(&mut mesh, origin, &run, width, road_dirt(), surface, brooks)?;
+                add_ribbon(&mut mesh, origin, &run, width, road_dirt(), surface, ponds)?;
             }
             for span in spans {
                 if span.kind == SpanKind::Ford {
@@ -236,7 +245,7 @@ fn bake_paths(
                 if near_deck(&decks, &span) {
                     continue;
                 }
-                add_bridge(&mut mesh, origin, &span, surface, brooks)?;
+                add_bridge(&mut mesh, origin, &span, surface, ponds)?;
                 decks.push(Deck {
                     a: span.a,
                     b: span.b,
@@ -249,9 +258,9 @@ fn bake_paths(
     }
 
     for hamlet in hamlets {
-        if let Some(span) = hamlet_span(surface, brooks, hamlet) {
+        if let Some(span) = hamlet_span(surface, ponds, hamlet) {
             if span.kind == SpanKind::Bridge && !near_deck(&decks, &span) {
-                add_bridge(&mut mesh, origin, &span, surface, brooks)?;
+                add_bridge(&mut mesh, origin, &span, surface, ponds)?;
                 decks.push(Deck {
                     a: span.a,
                     b: span.b,
@@ -304,16 +313,16 @@ struct Sample {
     ground: f32,
 }
 
-fn column_at(surface: &ContinentalSurface, brooks: &BrookField, p: Vec2) -> SurfaceColumn {
+fn column_at(surface: &ContinentalSurface, ponds: &PondField, p: Vec2) -> SurfaceColumn {
     let g = GlobalXZ::at(f64::from(p.x), f64::from(p.y));
     let mut column = surface.column(g);
-    brooks.carve(g, &mut column, BrookDetail::Channels);
+    ponds.carve(g, &mut column);
     column
 }
 
 fn sample_runs(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     points: &[Vec2],
     focus: Vec2,
 ) -> Vec<Vec<Sample>> {
@@ -323,7 +332,7 @@ fn sample_runs(
         .map(|run| {
             run.into_iter()
                 .map(|at| {
-                    let col = column_at(surface, brooks, at);
+                    let col = column_at(surface, ponds, at);
                     Sample {
                         at,
                         wet: col.wetness(),
@@ -538,7 +547,8 @@ fn dry_runs(samples: &[Sample], spans: &[Span], hamlets: &[HamletStand]) -> Vec<
     let mut cur: Vec<Vec3> = Vec::new();
     let pause = |p: Vec2| {
         let on_bridge = spans.iter().any(|s| {
-            s.kind == SpanKind::Bridge && project_t(p, s.a, s.b).is_some_and(|t| (0.02..=0.98).contains(&t))
+            s.kind == SpanKind::Bridge
+                && project_t(p, s.a, s.b).is_some_and(|t| (0.02..=0.98).contains(&t))
         });
         on_bridge || in_hamlet(p, hamlets)
     };
@@ -633,7 +643,7 @@ fn add_ribbon(
     width: f32,
     color: Color,
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
 ) -> EngineResult<()> {
     let points = densify_xz(centreline, RIBBON_STEP_M);
     if points.len() < 2 {
@@ -653,9 +663,9 @@ fn add_ribbon(
         let centre = Vec2::new(p.x, p.z);
         let left_at = centre - perp * half;
         let right_at = centre + perp * half;
-        let lg = column_at(surface, brooks, left_at).ground();
-        let cg = column_at(surface, brooks, centre).ground();
-        let rg = column_at(surface, brooks, right_at).ground();
+        let lg = column_at(surface, ponds, left_at).ground();
+        let cg = column_at(surface, ponds, centre).ground();
+        let rg = column_at(surface, ponds, right_at).ground();
         let (ly, ry) = drape_edges(lg, cg, rg);
         left.push(Vec3::new(left_at.x, ly, left_at.y) - origin);
         right.push(Vec3::new(right_at.x, ry, right_at.y) - origin);
@@ -679,7 +689,7 @@ fn add_bridge(
     origin: Vec3,
     span: &Span,
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
 ) -> EngineResult<()> {
     let along = span.b - span.a;
     let len = along.length();
@@ -701,10 +711,26 @@ fn add_bridge(
         Vec3::new(b.x - perp.x * half, zb, b.y - perp.y * half),
     ];
     let corners_bot = [
-        Vec3::new(a.x - perp.x * half, za - DECK_THICKNESS, a.y - perp.y * half),
-        Vec3::new(a.x + perp.x * half, za - DECK_THICKNESS, a.y + perp.y * half),
-        Vec3::new(b.x + perp.x * half, zb - DECK_THICKNESS, b.y + perp.y * half),
-        Vec3::new(b.x - perp.x * half, zb - DECK_THICKNESS, b.y - perp.y * half),
+        Vec3::new(
+            a.x - perp.x * half,
+            za - DECK_THICKNESS,
+            a.y - perp.y * half,
+        ),
+        Vec3::new(
+            a.x + perp.x * half,
+            za - DECK_THICKNESS,
+            a.y + perp.y * half,
+        ),
+        Vec3::new(
+            b.x + perp.x * half,
+            zb - DECK_THICKNESS,
+            b.y + perp.y * half,
+        ),
+        Vec3::new(
+            b.x - perp.x * half,
+            zb - DECK_THICKNESS,
+            b.y - perp.y * half,
+        ),
     ];
     add_box_corners(mesh, origin, &corners_bot, &corners_top, deck_wood())?;
 
@@ -743,7 +769,7 @@ fn add_bridge(
         let t = i as f32 / (piers + 1) as f32;
         let p = a.lerp(b, t);
         let z_bot = za + (zb - za) * t - DECK_THICKNESS;
-        let col = column_at(surface, brooks, p);
+        let col = column_at(surface, ponds, p);
         let foot = col.ground() - PIER_FOOT;
         let height = (z_bot - foot).max(0.6);
         let centre = Vec3::new(p.x, foot + height * 0.5, p.y) - origin;
@@ -776,14 +802,16 @@ fn add_box_corners(
 
 pub(super) fn hamlet_span(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     hamlet: &HamletStand,
 ) -> Option<Span> {
     if hamlet.houses.len() < 2 {
         return None;
     }
     let plaza = Vec2::new(hamlet.at.x as f32, hamlet.at.z as f32);
-    let river = surface.hydro_index().nearest_river(surface.hydro(), plaza)?;
+    let river = surface
+        .hydro_index()
+        .nearest_river(surface.hydro(), plaza)?;
     if river.dist > 220.0 {
         return None;
     }
@@ -805,17 +833,17 @@ pub(super) fn hamlet_span(
         return None;
     }
     let perp = Vec2::new(-river.tangent.y, river.tangent.x);
-    let mid = column_at(surface, brooks, river.at);
+    let mid = column_at(surface, ponds, river.at);
     let water_z = mid.ground() + mid.wetness().max(0.0);
-    let bank_a = walk_to_bank(surface, brooks, river.at, perp)?;
-    let bank_b = walk_to_bank(surface, brooks, river.at, -perp)?;
-    let crest_a = walk_to_crest(surface, brooks, bank_a, perp, water_z);
-    let crest_b = walk_to_crest(surface, brooks, bank_b, -perp, water_z);
-    let ga = column_at(surface, brooks, crest_a).ground();
-    let gb = column_at(surface, brooks, crest_b).ground();
+    let bank_a = walk_to_bank(surface, ponds, river.at, perp)?;
+    let bank_b = walk_to_bank(surface, ponds, river.at, -perp)?;
+    let crest_a = walk_to_crest(surface, ponds, bank_a, perp, water_z);
+    let crest_b = walk_to_crest(surface, ponds, bank_b, -perp, water_z);
+    let ga = column_at(surface, ponds, crest_a).ground();
+    let gb = column_at(surface, ponds, crest_b).ground();
     let seat = ga.min(gb);
-    let a = walk_to_height(surface, brooks, bank_a, perp, crest_a, seat);
-    let b = walk_to_height(surface, brooks, bank_b, -perp, crest_b, seat);
+    let a = walk_to_height(surface, ponds, bank_a, perp, crest_a, seat);
+    let b = walk_to_height(surface, ponds, bank_b, -perp, crest_b, seat);
     let gap = a.distance(b);
     if !(MIN_SPAN_M..=MAX_SPAN_M).contains(&gap) {
         return None;
@@ -833,7 +861,7 @@ pub(super) fn hamlet_span(
 
 fn walk_to_bank(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     start: Vec2,
     dir: Vec2,
 ) -> Option<Vec2> {
@@ -841,7 +869,7 @@ fn walk_to_bank(
     let mut last_wet = start;
     for i in 1..50 {
         let p = start + dir * (step * i as f32);
-        let col = column_at(surface, brooks, p);
+        let col = column_at(surface, ponds, p);
         if col.wetness() < -WATERLINE_MARGIN {
             return Some(last_wet.lerp(p, 0.6));
         }
@@ -852,17 +880,17 @@ fn walk_to_bank(
 
 fn walk_to_crest(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     start: Vec2,
     dir: Vec2,
     water_z: f32,
 ) -> Vec2 {
     let target = water_z + BRIDGE_ABOVE_WATER;
     let mut cur = start;
-    let mut h = column_at(surface, brooks, start).ground();
+    let mut h = column_at(surface, ponds, start).ground();
     for i in 1..40 {
         let p = start + dir * (2.0 * i as f32);
-        let col = column_at(surface, brooks, p);
+        let col = column_at(surface, ponds, p);
         if col.wetness() >= -WATERLINE_MARGIN {
             break;
         }
@@ -889,13 +917,13 @@ fn walk_to_crest(
 
 fn walk_to_height(
     surface: &ContinentalSurface,
-    brooks: &BrookField,
+    ponds: &PondField,
     start: Vec2,
     dir: Vec2,
     crest: Vec2,
     height: f32,
 ) -> Vec2 {
-    if column_at(surface, brooks, start).ground() >= height {
+    if column_at(surface, ponds, start).ground() >= height {
         return start;
     }
     let max_d = start.distance(crest);
@@ -906,7 +934,7 @@ fn walk_to_height(
             break;
         }
         cur = p;
-        if column_at(surface, brooks, p).ground() >= height {
+        if column_at(surface, ponds, p).ground() >= height {
             break;
         }
     }
@@ -963,8 +991,12 @@ mod tests {
 
     #[test]
     fn a_bridge_sits_on_the_high_banks_not_the_gully() {
-        let heights = [20.0, 20.0, 20.0, 14.0, 8.0, 3.0, 3.0, 8.0, 14.0, 20.0, 20.0, 20.0];
-        let wets = [-2.0, -2.0, -2.0, -2.0, -0.2, 2.0, 2.0, -0.2, -2.0, -2.0, -2.0, -2.0];
+        let heights = [
+            20.0, 20.0, 20.0, 14.0, 8.0, 3.0, 3.0, 8.0, 14.0, 20.0, 20.0, 20.0,
+        ];
+        let wets = [
+            -2.0, -2.0, -2.0, -2.0, -0.2, 2.0, 2.0, -0.2, -2.0, -2.0, -2.0, -2.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -983,14 +1015,26 @@ mod tests {
             spans[0].za,
             spans[0].zb
         );
-        assert!(spans[0].a.x <= 12.0, "left abutment still in the gully at {}", spans[0].a.x);
-        assert!(spans[0].b.x >= 54.0, "right abutment still in the gully at {}", spans[0].b.x);
+        assert!(
+            spans[0].a.x <= 12.0,
+            "left abutment still in the gully at {}",
+            spans[0].a.x
+        );
+        assert!(
+            spans[0].b.x >= 54.0,
+            "right abutment still in the gully at {}",
+            spans[0].b.x
+        );
     }
 
     #[test]
     fn a_bridge_does_not_climb_the_hill_behind_the_bank() {
-        let heights = [28.0, 28.0, 20.0, 20.0, 12.0, 4.0, 4.0, 12.0, 20.0, 20.0, 28.0, 28.0];
-        let wets = [-2.0, -2.0, -2.0, -2.0, -0.2, 2.0, 2.0, -0.2, -2.0, -2.0, -2.0, -2.0];
+        let heights = [
+            28.0, 28.0, 20.0, 20.0, 12.0, 4.0, 4.0, 12.0, 20.0, 20.0, 28.0, 28.0,
+        ];
+        let wets = [
+            -2.0, -2.0, -2.0, -2.0, -0.2, 2.0, 2.0, -0.2, -2.0, -2.0, -2.0, -2.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -1008,7 +1052,9 @@ mod tests {
     #[test]
     fn a_gentle_bank_is_not_the_waterline() {
         let heights = [7.0, 6.8, 6.5, 6.2, 5.9, 2.0, 2.0, 5.9, 6.2, 6.5, 6.8, 7.0];
-        let wets = [-2.0, -1.6, -1.0, -0.5, -0.2, 2.0, 2.0, -0.2, -0.5, -1.0, -1.6, -2.0];
+        let wets = [
+            -2.0, -1.6, -1.0, -0.5, -0.2, 2.0, 2.0, -0.2, -0.5, -1.0, -1.6, -2.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -1020,14 +1066,26 @@ mod tests {
             spans[0].za,
             spans[0].zb
         );
-        assert!(spans[0].a.x <= 12.0, "left abutment still at the edge at {}", spans[0].a.x);
-        assert!(spans[0].b.x >= 54.0, "right abutment still at the edge at {}", spans[0].b.x);
+        assert!(
+            spans[0].a.x <= 12.0,
+            "left abutment still at the edge at {}",
+            spans[0].a.x
+        );
+        assert!(
+            spans[0].b.x >= 54.0,
+            "right abutment still at the edge at {}",
+            spans[0].b.x
+        );
     }
 
     #[test]
     fn a_steep_bank_bridge_covers_the_chasm_not_just_the_water() {
-        let heights = [30.0, 26.0, 22.0, 18.0, 8.0, 3.0, 3.0, 8.0, 18.0, 22.0, 26.0, 30.0];
-        let wets = [-3.0, -2.5, -2.0, -1.5, -0.2, 2.0, 2.0, -0.2, -1.5, -2.0, -2.5, -3.0];
+        let heights = [
+            30.0, 26.0, 22.0, 18.0, 8.0, 3.0, 3.0, 8.0, 18.0, 22.0, 26.0, 30.0,
+        ];
+        let wets = [
+            -3.0, -2.5, -2.0, -1.5, -0.2, 2.0, 2.0, -0.2, -1.5, -2.0, -2.5, -3.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -1047,8 +1105,12 @@ mod tests {
 
     #[test]
     fn a_valley_bridge_sits_on_the_bank_crests() {
-        let heights = [16.0, 14.0, 12.0, 8.0, 3.0, 2.0, 2.0, 3.0, 8.0, 12.0, 14.0, 16.0];
-        let wets = [-8.0, -6.0, -4.0, -1.0, 2.0, 3.0, 3.0, 2.0, -1.0, -4.0, -6.0, -8.0];
+        let heights = [
+            16.0, 14.0, 12.0, 8.0, 3.0, 2.0, 2.0, 3.0, 8.0, 12.0, 14.0, 16.0,
+        ];
+        let wets = [
+            -8.0, -6.0, -4.0, -1.0, 2.0, 3.0, 3.0, 2.0, -1.0, -4.0, -6.0, -8.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -1075,8 +1137,12 @@ mod tests {
 
     #[test]
     fn an_uneven_crossing_sits_at_the_lower_bank() {
-        let heights = [24.0, 20.0, 16.0, 10.0, 4.0, 2.0, 2.0, 4.0, 8.0, 12.0, 12.0, 12.0];
-        let wets = [-6.0, -5.0, -3.0, -1.5, -0.2, 2.0, 2.0, -0.2, -1.0, -4.0, -4.0, -4.0];
+        let heights = [
+            24.0, 20.0, 16.0, 10.0, 4.0, 2.0, 2.0, 4.0, 8.0, 12.0, 12.0, 12.0,
+        ];
+        let wets = [
+            -6.0, -5.0, -3.0, -1.5, -0.2, 2.0, 2.0, -0.2, -1.0, -4.0, -4.0, -4.0,
+        ];
         let samples: Vec<Sample> = (0..12)
             .map(|i| samp(i as f32 * 6.0, wets[i], heights[i]))
             .collect();
@@ -1139,7 +1205,11 @@ mod tests {
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
         assert!(run.len() > 10);
-        assert!(run.len() < 400, "sampled the whole road: {} points", run.len());
+        assert!(
+            run.len() < 400,
+            "sampled the whole road: {} points",
+            run.len()
+        );
         for p in run {
             assert!(p.distance(focus) <= pad + 1.0);
         }
@@ -1176,11 +1246,7 @@ mod tests {
         let runs = dry_runs(&samples, &[], &[]);
         assert_eq!(runs.len(), 1);
         for p in &runs[0] {
-            assert!(
-                p.y > 10.0,
-                "ribbon still sunk into the ground at {}",
-                p.y
-            );
+            assert!(p.y > 10.0, "ribbon still sunk into the ground at {}", p.y);
             assert!(
                 (p.y - (10.0 + ROAD_LIFT_M)).abs() < 1e-5,
                 "ribbon hover was {}, expected {}",
@@ -1212,10 +1278,7 @@ mod tests {
 
     #[test]
     fn a_ribbon_is_sampled_finer_than_the_terrain_grid() {
-        let line = [
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(6.0, 0.0, 0.0),
-        ];
+        let line = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(6.0, 0.0, 0.0)];
         let dense = densify_xz(&line, RIBBON_STEP_M);
         assert!(
             dense.len() >= 4,

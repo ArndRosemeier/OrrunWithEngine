@@ -1,13 +1,11 @@
-//! Plan view of the sub-atlas water layer, as a PNG.
+//! Plan view of the sub-atlas pond layer, as a PNG.
 //!
 //! A first-person camera is the wrong instrument for judging the *shape* of a
-//! watercourse: from head height a loop and a bend look alike, and a knot only
-//! shows from above. This draws what the carve would do to the ground over a few
-//! square kilometres — shaded relief, atlas water, brooks at their true width,
-//! ponds as the 4 m cells they actually flood — so a course that doubles back or
-//! turns a corner is visible at a glance.
+//! basin: from head height a hollow and a hillside look alike. This draws what
+//! the carve would do to the ground over a few square kilometres — shaded
+//! relief, atlas water, ponds as the 4 m cells they actually flood.
 //!
-//! Usage: `brook_map [seed] [size] [x] [z] [span_m]`
+//! Usage: `pond_map [seed] [size] [x] [z] [span_m]`
 
 use std::sync::Arc;
 
@@ -15,7 +13,7 @@ use engine::space::GlobalXZ;
 use engine::texture::save_rgba8_png;
 use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
-use orrun::world::{BrookDetail, BrookField, ContinentalSurface, WaterBody};
+use orrun::world::{ContinentalSurface, PondField, WaterBody};
 
 const PIXELS: usize = 1024;
 
@@ -25,7 +23,6 @@ enum Paint {
     Land,
     /// Ocean, lake or atlas river: this layer does not touch it.
     Atlas,
-    Brook,
     Pond,
 }
 
@@ -64,12 +61,11 @@ fn main() {
     let args = parse_args(Some(surface.bounds().metres()));
 
     let started = std::time::Instant::now();
-    let field = BrookField::build(&surface, args.centre);
+    let field = PondField::build(&surface, args.centre);
     eprintln!(
-        "seed {} size {}: {} brooks, {} ponds around ({:.0}, {:.0}) in {} ms",
+        "seed {} size {}: {} ponds around ({:.0}, {:.0}) in {} ms",
         args.seed,
         args.size,
-        field.brooks().len(),
         field.ponds().len(),
         args.centre.x,
         args.centre.z,
@@ -82,7 +78,7 @@ fn main() {
         args.centre.z - args.span_m * 0.5,
     );
     // One pass for the ground as the game carves it, then shade from that, so a
-    // channel shows as the notch it cuts and not just as the water in it.
+    // basin shows as the hollow it cuts and not just as the water in it.
     let point = |px: usize, py: usize| {
         GlobalXZ::at(
             origin.x + (px as f64 + 0.5) * step,
@@ -96,12 +92,11 @@ fn main() {
             let p = point(px, py);
             let mut column = surface.column(p);
             let atlas_water = column.is_wet();
-            field.carve(p, &mut column, BrookDetail::Channels);
+            field.carve(p, &mut column);
             let i = py * PIXELS + px;
             ground[i] = column.ground();
             paint[i] = match column.body() {
                 _ if atlas_water => Paint::Atlas,
-                Some(WaterBody::Brook) => Paint::Brook,
                 Some(WaterBody::Pond) => Paint::Pond,
                 _ => Paint::Land,
             };
@@ -128,7 +123,6 @@ fn main() {
                 ]
             };
             let colour = match paint[i] {
-                Paint::Brook => [90, 200, 255, 255],
                 Paint::Pond => [40, 120, 220, 255],
                 Paint::Atlas => shade([0.16, 0.32, 0.52]),
                 Paint::Land => shade([0.36, 0.42, 0.26]),
@@ -137,8 +131,8 @@ fn main() {
         }
     }
 
-    let path = std::env::var("BROOK_MAP")
-        .unwrap_or_else(|_| "C:/Projekte/OrrunWithEngine/shots/brook-map.png".to_string());
+    let path = std::env::var("POND_MAP")
+        .unwrap_or_else(|_| "C:/Projekte/OrrunWithEngine/shots/pond-map.png".to_string());
     save_rgba8_png(&path, PIXELS as u32, PIXELS as u32, &rgba).expect("write the map");
     eprintln!("wrote {path} at {:.1} m per pixel", step);
 }

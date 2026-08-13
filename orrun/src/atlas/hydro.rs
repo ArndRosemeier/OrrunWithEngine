@@ -1125,7 +1125,8 @@ fn reach_sinks(
     coasts: &[CoastRing],
     sea: f32,
 ) {
-    let coast_boxes: Vec<(Vec2, Vec2)> = coasts.iter().map(|c| padded_aabb(&c.ring, 250.0)).collect();
+    let coast_boxes: Vec<(Vec2, Vec2)> =
+        coasts.iter().map(|c| padded_aabb(&c.ring, 250.0)).collect();
     for river in rivers.iter_mut() {
         if !river.at_sink {
             continue;

@@ -11,10 +11,14 @@
 //! test that can reject it: the lattice roll first, then the atlas fields, then
 //! the resident ground, and only then the full surface column.
 //!
-//! Heights come from the same contact grid the player stands on, never from a
-//! fresh surface probe, so a tuft cannot sink into ground that was drawn
-//! slightly differently.
+//! Heights for the walked ring come from the same contact grid the player
+//! stands on, never from a fresh surface probe, so a tuft cannot sink into
+//! ground that was drawn slightly differently. A second band of cheap pine
+//! stand-ins sits on the medium heightfield out to the horizon. Full-res trees
+//! replace those proxies per 200 m cell as their bins land, so a wood does not
+//! vanish and then pop in as one sheet.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -22,38 +26,61 @@ use std::thread::JoinHandle;
 use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::EngineResult;
+use engine::mesh::Mesh;
 use engine::model::Model;
 use engine::place::Place;
-use engine::space::{GlobalPosition, GlobalXZ};
+use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, World};
 use thiserror::Error;
 
 use glam::{Vec2, Vec3};
 
-use super::brooks::{BrookDetail, BrookField};
+use super::coords::CHUNK_SPAN_M;
 use super::footprint::{self, HousePlot};
 use super::look::SUN_DIR;
+use super::ponds::PondField;
 use super::rng::{hash3, unit01, value_noise, CellRng};
 use super::surface::{lerp, smoothstep, ContinentalSurface, SurfaceColumn};
-use super::world_stream::WorldStream;
+use super::world_stream::{WorldStream, MEDIUM, NEAR};
 
 /// Lattice spacing and window radius per class, in metres.
 const GRASS_SPACING_M: f64 = 1.7;
 const GRASS_RADIUS_M: f64 = 58.0;
 const ROCK_SPACING_M: f64 = 16.0;
-const ROCK_RADIUS_M: f64 = 230.0;
+/// Stones fill the walked ring: they are sparse enough to keep every cell.
+const ROCK_RADIUS_M: f64 = NEAR.covers_m();
 const TREE_SPACING_M: f64 = 10.0;
-const TREE_RADIUS_M: f64 = 340.0;
+/// Full pines fill the walked ground; beyond this the far band takes over.
+const TREE_RADIUS_M: f64 = NEAR.covers_m();
+/// Inner disk that keeps the authored 10 m lattice.
+const TREE_DENSE_RADIUS_M: f64 = 400.0;
+/// Effective spacing at the edge of the walked ring.
+const TREE_OUTER_SPACING_M: f64 = 25.0;
 /// Bank dressing: a narrow subject, so a short window and close spacing.
 const REED_SPACING_M: f64 = 1.1;
 /// Closer in than the other classes: a reed bed is dense, and a two-metre stem
 /// a hundred metres off is a pixel that costs a lattice cell.
 const REED_RADIUS_M: f64 = 70.0;
 const BUSH_SPACING_M: f64 = 4.2;
-const BUSH_RADIUS_M: f64 = 160.0;
+const BUSH_RADIUS_M: f64 = NEAR.covers_m();
+const BUSH_DENSE_RADIUS_M: f64 = 160.0;
+const BUSH_OUTER_SPACING_M: f64 = 10.0;
 
-/// Rebuild the window once the player is this far from where it was centred.
-const RESEED_M: f64 = 10.0;
+/// Cheap pine stand-ins on the medium heightfield, outside the full-mesh ring.
+const FAR_TREE_SPACING_M: f64 = 36.0;
+const FAR_TREE_RADIUS_M: f64 = MEDIUM.reach_m();
+const FAR_TREE_SALT: u64 = 0x6661_7254_7265;
+
+/// Rebuild the near window once the player is this far from where it was centred.
+const RESEED_M: f64 = 20.0;
+/// The far band is a seven-kilometre disk; it can drift further before a resow.
+const FAR_RESEED_M: f64 = 100.0;
+/// Pending full-res trees. Farther ones stay as LOD until they walk into this set.
+const MAX_TREE_QUEUE: usize = 1_000;
+/// Full-res trees to promote per walking frame. Whole 200 m bins were hundreds.
+const MAX_TREES_PER_FRAME: usize = 40;
+/// Grass / rock / bush bins to upload per walking frame.
+const MAX_OTHER_BINS_PER_FRAME: usize = 4;
 
 /// Highest ground trees still grow on, and the band they thin out over.
 const TREELINE_M: f32 = 780.0;
@@ -198,6 +225,48 @@ impl PropClass {
         let (lo, hi) = self.wet_band();
         (lo..=hi).contains(&wetness_m)
     }
+
+    /// How much of the fine lattice to keep at `dist_m` from the player.
+    ///
+    /// `None` means every cell: grass and reeds stay dense and close, and
+    /// stones are already a wide lattice. Trees and bushes thin toward the
+    /// walked ring so the window can grow without a squared instance count.
+    fn keep_fraction(self, dist_m: f64) -> Option<f32> {
+        match self {
+            Self::Tree => Some(thin_keep(
+                dist_m,
+                TREE_DENSE_RADIUS_M,
+                TREE_RADIUS_M,
+                TREE_SPACING_M,
+                TREE_OUTER_SPACING_M,
+            )),
+            Self::Bush => Some(thin_keep(
+                dist_m,
+                BUSH_DENSE_RADIUS_M,
+                BUSH_RADIUS_M,
+                BUSH_SPACING_M,
+                BUSH_OUTER_SPACING_M,
+            )),
+            Self::Grass | Self::Rock | Self::Reed => None,
+        }
+    }
+}
+
+/// Keep-probability that interpolates from a dense inner disk to a coarser rim.
+fn thin_keep(
+    dist_m: f64,
+    dense_m: f64,
+    window_m: f64,
+    inner_spacing: f64,
+    outer_spacing: f64,
+) -> f32 {
+    if dist_m <= dense_m {
+        return 1.0;
+    }
+    let span = (window_m - dense_m).max(1.0);
+    let t = ((dist_m - dense_m) / span).clamp(0.0, 1.0);
+    let outer = inner_spacing / outer_spacing;
+    (1.0 + t * (outer - 1.0)) as f32
 }
 
 /// How much of each cover class belongs at one spot, as a probability that a
@@ -342,7 +411,7 @@ impl GroundCover {
     /// Fold in the one hydrological fact the cheap layers cannot know: how far
     /// this spot is from water.
     ///
-    /// `wetness_m` is the surface's signed field, so a brook bank and an ocean
+    /// `wetness_m` is the surface's signed field, so a pond bank and an ocean
     /// shore are the same measurement, and the whole sub-atlas layer dresses
     /// itself without knowing that it exists.
     pub fn with_water(mut self, wetness_m: f32) -> Self {
@@ -532,12 +601,15 @@ pub(super) fn props_dir() -> Result<PathBuf, ScatterError> {
 }
 
 /// One prop variant that has been uploaded and can be placed.
-#[derive(Debug)]
+///
+/// Instances are split into 200 m bins, each its own instanced entity, so the
+/// renderer can frustum-cull a hillside behind the camera instead of unioning
+/// the whole window into one bounds sphere. Bins share the prototype's mesh.
 struct LiveProp {
     class: PropClass,
     taste: PropTaste,
-    entity: EntityId,
-    places: Vec<Place>,
+    prototype: EntityId,
+    bins: HashMap<(i32, i32), EntityId>,
 }
 
 /// One prop standing on the ground, in the world's own coordinates.
@@ -557,18 +629,28 @@ struct Sprig {
 /// frame it was started on.
 ///
 /// This is what makes the sow a job rather than a stall. A window of cover is
-/// twenty thousand lattice cells across five classes, and it is re-sown every
-/// ten metres of travel and whenever ground streams in; on the main thread that
-/// is a hitch every second or two, and at a spawn — when every chunk in the ring
-/// arrives at once — it was a hitch every frame.
+/// tens of thousands of lattice cells across five classes, and it is re-sown
+/// whenever the player walks off its centre or ground streams in; on the main
+/// thread that is a hitch, and at a spawn — when every chunk in the ring arrives
+/// at once — it was a hitch every frame.
 struct Sowing {
     seed: u64,
     /// Indexed like [`ScatterLayer::props`], so a sprig can name its variant.
     variants: Vec<(PropClass, PropTaste)>,
     surface: Arc<ContinentalSurface>,
-    brooks: Arc<BrookField>,
+    ponds: Arc<PondField>,
     ground: ContactSnapshot,
     plots: Vec<HousePlot>,
+}
+
+/// Far-band pine stand-ins: same cover field as the tint, medium-tier height.
+struct FarSowing {
+    seed: u64,
+    surface: Arc<ContinentalSurface>,
+    ponds: Arc<PondField>,
+    inner_m: f64,
+    outer_m: f64,
+    spacing_m: f64,
 }
 
 /// A sow in flight, and the state of the world it speaks for.
@@ -578,9 +660,19 @@ struct Pending {
     job: JoinHandle<(Vec<Sprig>, f32)>,
 }
 
+/// One tree-variant cell waiting to go full-res. `shown` trees already stand.
+#[derive(Clone, Copy, Debug)]
+struct TreeJob {
+    vi: usize,
+    bx: i32,
+    bz: i32,
+    shown: usize,
+}
+
 /// The live cover around the player.
 pub struct ScatterLayer {
     props: Vec<LiveProp>,
+    far_entity: EntityId,
     seed: u64,
     /// Where the standing cover was centred, and the residency it was sown
     /// against. Both are `None`/zero until the first sow lands.
@@ -588,27 +680,47 @@ pub struct ScatterLayer {
     resident_chunks: usize,
     /// The standing cover, in global metres.
     sown: Vec<Sprig>,
-    placed: usize,
+    far_sown: Vec<Sprig>,
+    far_centre: Option<GlobalXZ>,
+    near_placed: usize,
+    far_placed: usize,
     pending: Option<Pending>,
-    /// What the last sow took on its own thread. Worth watching: it is the
+    far_pending: Option<Pending>,
+    /// What the last near sow took on its own thread. Worth watching: it is the
     /// budget that decides how far behind the cover can fall while moving.
     sow_ms: f32,
     /// Last footprints a sow was started against.
     house_plots: Vec<HousePlot>,
+    /// Sprigs of the standing near window, grouped for budgeted upload.
+    near_buckets: HashMap<(usize, i32, i32), Vec<Sprig>>,
+    /// Tree cells waiting to go full-res, nearest first, then FIFO.
+    tree_queue: VecDeque<TreeJob>,
+    /// Grass / rock / bush bins not yet spawned.
+    other_queue: VecDeque<(usize, i32, i32)>,
+    /// How many full-res trees each tree bin already shows.
+    tree_shown: HashMap<(usize, i32, i32), usize>,
+    /// Walked-tier cells that already have full-res trees, so far proxies hide.
+    near_tree_bins: HashSet<(i32, i32)>,
+    /// Far proxies in render space, so a tree promotion does not rebuild them.
+    far_live: Vec<((i32, i32), Place)>,
 }
 
 impl std::fmt::Debug for ScatterLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScatterLayer")
             .field("variants", &self.props.len())
-            .field("placed", &self.placed)
+            .field("placed", &(self.near_placed + self.far_placed))
             .field("sowing", &self.pending.is_some())
+            .field("far_sowing", &self.far_pending.is_some())
             .finish()
     }
 }
 
 impl ScatterLayer {
     /// Upload every catalogue mesh once; nothing is placed yet.
+    ///
+    /// Bin entities for the walked ring are spawned on demand as the window
+    /// fills. The far-band proxy is one mesh, one entity.
     pub fn install(
         world: &mut World,
         catalog: &ScatterCatalog,
@@ -628,29 +740,47 @@ impl ScatterLayer {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
+            let prototype = world.spawn_instanced(mesh);
             props.push(LiveProp {
                 class: asset.class,
                 taste: PropTaste::of(&stem),
-                entity: world.spawn_instanced(mesh),
-                places: Vec::new(),
+                prototype,
+                bins: HashMap::new(),
             });
         }
+        let far_mesh = pine_proxy().expect("far-band pine proxy");
         Ok(Self {
             props,
+            far_entity: world.spawn_instanced(far_mesh),
             seed: seed as u32 as u64,
             centre: None,
             resident_chunks: 0,
             sown: Vec::new(),
-            placed: 0,
+            far_sown: Vec::new(),
+            far_centre: None,
+            near_placed: 0,
+            far_placed: 0,
             pending: None,
+            far_pending: None,
             sow_ms: 0.0,
             house_plots: Vec::new(),
+            near_buckets: HashMap::new(),
+            tree_queue: VecDeque::new(),
+            other_queue: VecDeque::new(),
+            tree_shown: HashMap::new(),
+            near_tree_bins: HashSet::new(),
+            far_live: Vec::new(),
         })
     }
 
-    /// Props standing in the world right now.
+    /// Props standing in the world right now, full mesh and far stand-ins.
     pub fn placed_count(&self) -> usize {
-        self.placed
+        self.near_placed + self.far_placed
+    }
+
+    /// A near-window sow is on a worker. The loading screen waits; walking does not.
+    pub fn busy(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// What the last sow took, in milliseconds, on its own thread.
@@ -664,30 +794,43 @@ impl ScatterLayer {
     /// was standing on belongs to a world that is being left.
     pub fn clear(&mut self, world: &mut World) -> EngineResult<()> {
         for prop in &mut self.props {
-            prop.places.clear();
-            world.set_instances(prop.entity, &[])?;
+            for id in prop.bins.values().copied() {
+                world.despawn(id);
+            }
+            prop.bins.clear();
         }
+        world.set_instances(self.far_entity, &[])?;
         self.pending = None;
+        self.far_pending = None;
         self.sown.clear();
+        self.far_sown.clear();
         self.centre = None;
+        self.far_centre = None;
         self.resident_chunks = 0;
-        self.placed = 0;
+        self.near_placed = 0;
+        self.far_placed = 0;
         self.house_plots.clear();
+        self.near_buckets.clear();
+        self.tree_queue.clear();
+        self.other_queue.clear();
+        self.tree_shown.clear();
+        self.near_tree_bins.clear();
+        self.far_live.clear();
         Ok(())
     }
 
     /// Keep the cover window centred on the player.
     ///
     /// Returns whether the cover standing in the world changed this frame. Never
-    /// blocks, except on the very first sow of an entry, which happens while the
-    /// loading screen is still up and would otherwise leave the player standing
-    /// on bare ground.
+    /// blocks: the first near sow of an entry runs on a worker like the rest,
+    /// and the loading screen waits on [`Self::busy`]. The far band always sows
+    /// on its own thread.
     pub fn follow(
         &mut self,
         world: &mut World,
         stream: &WorldStream,
         surface: &Arc<ContinentalSurface>,
-        brooks: &Arc<BrookField>,
+        ponds: &Arc<PondField>,
         focus: GlobalXZ,
         house_plots: &[HousePlot],
         rebased: bool,
@@ -702,18 +845,57 @@ impl ScatterLayer {
                 self.sow_ms = took_ms;
                 self.centre = Some(pending.focus);
                 self.resident_chunks = pending.resident_chunks;
-                self.stand(world)?;
+                self.queue_near(world, pending.focus);
                 changed = true;
             } else {
                 self.pending = Some(pending);
             }
         }
-        // Render space moved under the cover: same sprigs, new origin.
-        if rebased && !self.sown.is_empty() {
-            self.stand(world)?;
-            changed = true;
+        if let Some(pending) = self.far_pending.take() {
+            if pending.job.is_finished() {
+                let (sown, _) = pending.job.join().expect("scatter far thread");
+                self.far_sown = sown;
+                self.far_centre = Some(pending.focus);
+                self.rebuild_far_live(world.render_origin());
+                self.upload_far(world)?;
+                changed = true;
+            } else {
+                self.far_pending = Some(pending);
+            }
+        }
+        if rebased {
+            if !self.near_buckets.is_empty() {
+                self.restand_applied(world)?;
+                changed = true;
+            }
+            if !self.far_sown.is_empty() {
+                self.rebuild_far_live(world.render_origin());
+                self.upload_far(world)?;
+                changed = true;
+            }
         }
 
+        if self.follow_near(stream, surface, ponds, focus, house_plots, resident)? {
+            changed = true;
+        }
+        let trees = self.drain_trees(world, MAX_TREES_PER_FRAME)?;
+        let other = self.drain_other(world, MAX_OTHER_BINS_PER_FRAME)?;
+        if trees {
+            self.upload_far(world)?;
+        }
+        self.follow_far(surface, ponds, focus)?;
+        Ok(changed || trees || other)
+    }
+
+    fn follow_near(
+        &mut self,
+        stream: &WorldStream,
+        surface: &Arc<ContinentalSurface>,
+        ponds: &Arc<PondField>,
+        focus: GlobalXZ,
+        house_plots: &[HousePlot],
+        resident: usize,
+    ) -> EngineResult<bool> {
         let moved = self
             .centre
             .map(|c| ((c.x - focus.x).powi(2) + (c.z - focus.z).powi(2)).sqrt())
@@ -727,7 +909,7 @@ impl ScatterLayer {
             || (resident != self.resident_chunks && stream.walked_pending_count() == 0)
             || plots_changed;
         if !wanted || self.pending.is_some() {
-            return Ok(changed);
+            return Ok(false);
         }
 
         self.house_plots = house_plots.to_vec();
@@ -739,21 +921,10 @@ impl ScatterLayer {
                 .map(|prop| (prop.class, prop.taste))
                 .collect(),
             surface: Arc::clone(surface),
-            brooks: Arc::clone(brooks),
+            ponds: Arc::clone(ponds),
             ground: stream.contact_snapshot(),
             plots: self.house_plots.clone(),
         };
-        if self.centre.is_none() {
-            // First cover of an entry: there is nothing standing to look at
-            // while a thread works, and the loading screen is still up.
-            let (sown, took_ms) = timed(|| sowing.sow(focus));
-            self.sown = sown;
-            self.sow_ms = took_ms;
-            self.centre = Some(focus);
-            self.resident_chunks = resident;
-            self.stand(world)?;
-            return Ok(true);
-        }
         self.pending = Some(Pending {
             focus,
             resident_chunks: resident,
@@ -762,31 +933,288 @@ impl ScatterLayer {
                 .spawn(move || timed(|| sowing.sow(focus)))
                 .expect("spawn the scatter thread"),
         });
-        Ok(changed)
+        Ok(false)
     }
 
-    /// Hand the standing cover to the renderer in render space.
-    fn stand(&mut self, world: &mut World) -> EngineResult<()> {
-        let origin = world.render_origin();
-        for prop in &mut self.props {
-            prop.places.clear();
+    fn follow_far(
+        &mut self,
+        surface: &Arc<ContinentalSurface>,
+        ponds: &Arc<PondField>,
+        focus: GlobalXZ,
+    ) -> EngineResult<()> {
+        if self.far_pending.is_some() {
+            return Ok(());
         }
-        self.placed = 0;
+        let moved = self
+            .far_centre
+            .map(|c| ((c.x - focus.x).powi(2) + (c.z - focus.z).powi(2)).sqrt())
+            .unwrap_or(f64::INFINITY);
+        if moved < FAR_RESEED_M {
+            return Ok(());
+        }
+        let sowing = FarSowing {
+            seed: self.seed,
+            surface: Arc::clone(surface),
+            ponds: Arc::clone(ponds),
+            inner_m: 0.0,
+            outer_m: FAR_TREE_RADIUS_M,
+            spacing_m: FAR_TREE_SPACING_M,
+        };
+        self.far_pending = Some(Pending {
+            focus,
+            resident_chunks: 0,
+            job: std::thread::Builder::new()
+                .name("scatter-far".into())
+                .spawn(move || timed(|| sowing.sow(focus)))
+                .expect("spawn the scatter far thread"),
+        });
+        Ok(())
+    }
+
+    /// Group the standing near window. Tree cells around the player go into a
+    /// capped FIFO; farther full-res work is dropped and stays as LOD.
+    fn queue_near(&mut self, world: &mut World, focus: GlobalXZ) {
+        let mut buckets: HashMap<(usize, i32, i32), Vec<Sprig>> = HashMap::new();
         for sprig in &self.sown {
+            let bin = xz_bin(sprig.at.horizontal());
+            buckets
+                .entry((sprig.variant, bin.0, bin.1))
+                .or_default()
+                .push(*sprig);
+        }
+
+        let mut dropped_trees = false;
+        for (vi, prop) in self.props.iter_mut().enumerate() {
+            let stale: Vec<(i32, i32)> = prop
+                .bins
+                .keys()
+                .copied()
+                .filter(|&(bx, bz)| !buckets.contains_key(&(vi, bx, bz)))
+                .collect();
+            let is_tree = prop.class == PropClass::Tree;
+            for key in stale {
+                if let Some(id) = prop.bins.remove(&key) {
+                    world.despawn(id);
+                    if is_tree {
+                        dropped_trees = true;
+                        self.tree_shown.remove(&(vi, key.0, key.1));
+                    }
+                }
+            }
+        }
+        if dropped_trees {
+            self.rebuild_tree_bins();
+        }
+
+        self.near_buckets = buckets;
+        self.tree_queue = cap_tree_jobs(
+            self.tree_jobs_nearest(focus),
+            |job| self.tree_remaining(job),
+            MAX_TREE_QUEUE,
+        );
+        let mut other: Vec<(usize, i32, i32)> = self
+            .near_buckets
+            .keys()
+            .copied()
+            .filter(|&(vi, bx, bz)| {
+                self.props[vi].class != PropClass::Tree
+                    && !self.props[vi].bins.contains_key(&(bx, bz))
+            })
+            .collect();
+        other.sort_by_key(|&(_, bx, bz)| bin_dist_key(bx, bz, focus));
+        self.other_queue = other.into();
+        self.recount_near();
+    }
+
+    fn tree_jobs_nearest(&self, focus: GlobalXZ) -> Vec<TreeJob> {
+        let mut jobs: Vec<TreeJob> = self
+            .near_buckets
+            .iter()
+            .filter_map(|(&(vi, bx, bz), sprigs)| {
+                if self.props[vi].class != PropClass::Tree {
+                    return None;
+                }
+                let shown = self
+                    .tree_shown
+                    .get(&(vi, bx, bz))
+                    .copied()
+                    .unwrap_or(0)
+                    .min(sprigs.len());
+                if shown >= sprigs.len() {
+                    return None;
+                }
+                Some(TreeJob { vi, bx, bz, shown })
+            })
+            .collect();
+        jobs.sort_by_key(|job| bin_dist_key(job.bx, job.bz, focus));
+        jobs
+    }
+
+    fn tree_remaining(&self, job: &TreeJob) -> usize {
+        self.near_buckets
+            .get(&(job.vi, job.bx, job.bz))
+            .map(|s| s.len().saturating_sub(job.shown))
+            .unwrap_or(0)
+    }
+
+    fn drain_trees(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+        let origin = world.render_origin();
+        let mut left = budget;
+        let mut completed_cell = false;
+        while left > 0 {
+            let Some(mut job) = self.tree_queue.pop_front() else {
+                break;
+            };
+            let places = {
+                let Some(sprigs) = self.near_buckets.get(&(job.vi, job.bx, job.bz)) else {
+                    continue;
+                };
+                let total = sprigs.len();
+                if job.shown >= total {
+                    continue;
+                }
+                let take = (total - job.shown).min(left);
+                job.shown += take;
+                left -= take;
+                places_of(&sprigs[..job.shown], origin)
+            };
+            let prop = &mut self.props[job.vi];
+            let id = match prop.bins.get(&(job.bx, job.bz)) {
+                Some(id) => *id,
+                None => {
+                    let id = world.spawn_instanced_like(prop.prototype)?;
+                    prop.bins.insert((job.bx, job.bz), id);
+                    id
+                }
+            };
+            world.set_instances(id, &places)?;
+            self.tree_shown.insert((job.vi, job.bx, job.bz), job.shown);
+            let done = self
+                .near_buckets
+                .get(&(job.vi, job.bx, job.bz))
+                .is_some_and(|s| job.shown >= s.len());
+            if done {
+                if self.near_tree_bins.insert((job.bx, job.bz)) {
+                    completed_cell = true;
+                }
+            } else {
+                self.tree_queue.push_front(job);
+                break;
+            }
+        }
+        self.recount_near();
+        if completed_cell {
+            self.far_live
+                .retain(|(bin, _)| !self.near_tree_bins.contains(bin));
+        }
+        Ok(completed_cell)
+    }
+
+    fn drain_other(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+        let origin = world.render_origin();
+        let mut wrote = false;
+        for _ in 0..budget {
+            let Some((vi, bx, bz)) = self.other_queue.pop_front() else {
+                break;
+            };
+            let places = {
+                let Some(sprigs) = self.near_buckets.get(&(vi, bx, bz)) else {
+                    continue;
+                };
+                places_of(sprigs, origin)
+            };
+            let prop = &mut self.props[vi];
+            let id = match prop.bins.get(&(bx, bz)) {
+                Some(id) => *id,
+                None => {
+                    let id = world.spawn_instanced_like(prop.prototype)?;
+                    prop.bins.insert((bx, bz), id);
+                    id
+                }
+            };
+            world.set_instances(id, &places)?;
+            wrote = true;
+        }
+        if wrote {
+            self.recount_near();
+        }
+        Ok(wrote)
+    }
+
+    fn restand_applied(&mut self, world: &mut World) -> EngineResult<()> {
+        let origin = world.render_origin();
+        for (vi, prop) in self.props.iter().enumerate() {
+            for (&(bx, bz), &id) in &prop.bins {
+                let Some(sprigs) = self.near_buckets.get(&(vi, bx, bz)) else {
+                    continue;
+                };
+                let shown = if prop.class == PropClass::Tree {
+                    self.tree_shown
+                        .get(&(vi, bx, bz))
+                        .copied()
+                        .unwrap_or(0)
+                        .min(sprigs.len())
+                } else {
+                    sprigs.len()
+                };
+                world.set_instances(id, &places_of(&sprigs[..shown], origin))?;
+            }
+        }
+        self.recount_near();
+        Ok(())
+    }
+
+    fn recount_near(&mut self) {
+        let mut n = 0;
+        for (&(vi, bx, bz), sprigs) in &self.near_buckets {
+            if self.props[vi].class == PropClass::Tree {
+                n += self
+                    .tree_shown
+                    .get(&(vi, bx, bz))
+                    .copied()
+                    .unwrap_or(0)
+                    .min(sprigs.len());
+            } else if self.props[vi].bins.contains_key(&(bx, bz)) {
+                n += sprigs.len();
+            }
+        }
+        self.near_placed = n;
+    }
+
+    fn rebuild_tree_bins(&mut self) {
+        self.near_tree_bins.clear();
+        for prop in &self.props {
+            if prop.class != PropClass::Tree {
+                continue;
+            }
+            self.near_tree_bins.extend(prop.bins.keys().copied());
+        }
+    }
+
+    fn rebuild_far_live(&mut self, origin: RenderOrigin) {
+        self.far_live.clear();
+        for sprig in &self.far_sown {
+            let bin = xz_bin(sprig.at.horizontal());
+            if self.near_tree_bins.contains(&bin) {
+                continue;
+            }
             let Ok(render) = sprig.at.to_render(origin) else {
                 continue;
             };
             let at = render.vec3();
-            self.props[sprig.variant].places.push(
+            self.far_live.push((
+                bin,
                 Place::new(at.x, at.y, at.z)
                     .with_yaw_deg(sprig.yaw_deg)
                     .with_scale(sprig.scale),
-            );
-            self.placed += 1;
+            ));
         }
-        for prop in &self.props {
-            world.set_instances(prop.entity, &prop.places)?;
-        }
+    }
+
+    fn upload_far(&mut self, world: &mut World) -> EngineResult<()> {
+        let places: Vec<Place> = self.far_live.iter().map(|(_, p)| *p).collect();
+        self.far_placed = places.len();
+        world.set_instances(self.far_entity, &places)?;
         Ok(())
     }
 }
@@ -818,12 +1246,12 @@ impl Sowing {
         focus: GlobalXZ,
         out: &mut Vec<Sprig>,
     ) {
-        let (surface, brooks) = (self.surface.as_ref(), self.brooks.as_ref());
+        let (surface, ponds) = (self.surface.as_ref(), self.ponds.as_ref());
         // The water a prop stands beside includes the sub-atlas water, or a
         // pond would grow trees.
         let column_at = |p: GlobalXZ| -> SurfaceColumn {
             let mut column = surface.column(p);
-            brooks.carve(p, &mut column, BrookDetail::Channels);
+            ponds.carve(p, &mut column);
             column
         };
         // Past this, nothing hydrological changes: `with_water` leaves the cover
@@ -850,8 +1278,14 @@ impl Sowing {
                 let jz = (cz as f64 + rng.unit() as f64) * spacing;
                 let dx = jx - focus.x;
                 let dz = jz - focus.z;
-                if dx * dx + dz * dz > radius_sq {
+                let dist_sq = dx * dx + dz * dz;
+                if dist_sq > radius_sq {
                     continue;
+                }
+                if let Some(keep) = class.keep_fraction(dist_sq.sqrt()) {
+                    if rng.unit() >= keep {
+                        continue;
+                    }
                 }
                 let p = GlobalXZ::at(jx, jz);
                 if footprint::blocks_prop(&self.plots, p) {
@@ -860,7 +1294,7 @@ impl Sowing {
 
                 let far_from_water = surface
                     .water_reach(p)
-                    .max(brooks.water_reach(Vec2::new(jx as f32, jz as f32)))
+                    .max(ponds.water_reach(Vec2::new(jx as f32, jz as f32)))
                     <= dry_beyond;
                 if far_from_water && needs_water {
                     continue;
@@ -944,6 +1378,116 @@ impl Sowing {
     }
 }
 
+impl FarSowing {
+    fn sow(&self, focus: GlobalXZ) -> Vec<Sprig> {
+        sow_far_forest(
+            self.seed,
+            self.surface.as_ref(),
+            self.ponds.as_ref(),
+            focus,
+            self.inner_m,
+            self.outer_m,
+            self.spacing_m,
+        )
+    }
+}
+
+/// Far-band pines around `focus`, on the same cover field the terrain tint uses.
+///
+/// `inner_m` is exclusive: a cell whose jittered point falls inside it is skipped.
+/// The live far band uses `inner_m = 0` and hides proxies per cell once full-res
+/// trees are standing, so a wood does not vanish and then pop in as one sheet.
+fn sow_far_forest(
+    seed: u64,
+    surface: &ContinentalSurface,
+    ponds: &PondField,
+    focus: GlobalXZ,
+    inner_m: f64,
+    outer_m: f64,
+    spacing_m: f64,
+) -> Vec<Sprig> {
+    let inner_sq = inner_m * inner_m;
+    let outer_sq = outer_m * outer_m;
+    let dry_beyond = -BANK_REACH_M;
+    let (scale_lo, scale_hi) = PropClass::Tree.scale_range();
+    let mut out = Vec::new();
+
+    let cx0 = ((focus.x - outer_m) / spacing_m).floor() as i64;
+    let cx1 = ((focus.x + outer_m) / spacing_m).ceil() as i64;
+    let cz0 = ((focus.z - outer_m) / spacing_m).floor() as i64;
+    let cz1 = ((focus.z + outer_m) / spacing_m).ceil() as i64;
+
+    for cz in cz0..=cz1 {
+        for cx in cx0..=cx1 {
+            let mut rng = CellRng::new(seed ^ FAR_TREE_SALT, cx, cz);
+            let jx = (cx as f64 + rng.unit() as f64) * spacing_m;
+            let jz = (cz as f64 + rng.unit() as f64) * spacing_m;
+            let dx = jx - focus.x;
+            let dz = jz - focus.z;
+            let dist_sq = dx * dx + dz * dz;
+            if dist_sq <= inner_sq || dist_sq > outer_sq {
+                continue;
+            }
+            let p = GlobalXZ::at(jx, jz);
+
+            let far_from_water = surface
+                .water_reach(p)
+                .max(ponds.water_reach(Vec2::new(jx as f32, jz as f32)))
+                <= dry_beyond;
+
+            let mut column = surface.column(p);
+            ponds.carve(p, &mut column);
+            let ground = column.ground();
+            let fall = far_fall(surface, p);
+            let mut cover = GroundCover::sample(surface, p, ground, fall, canopy_noise(seed, p));
+            if !far_from_water {
+                cover = cover.with_water(column.wetness());
+            }
+            let density = cover.tree;
+            if density <= 0.0 || rng.unit() >= density {
+                continue;
+            }
+            if !PropClass::Tree.stands_in(column.wetness()) {
+                continue;
+            }
+
+            let scale = rng.range(scale_lo, scale_hi);
+            let yaw = 360.0 * rng.unit();
+            let y = (ground - MEDIUM.sink_m - PropClass::Tree.bed_in() * scale) as f64;
+            let Ok(at) = p.with_height(y) else {
+                continue;
+            };
+            out.push(Sprig {
+                variant: 0,
+                at,
+                yaw_deg: yaw,
+                scale,
+            });
+        }
+    }
+    out
+}
+
+/// Slope on the medium sample step, from the same surface the chunks bake.
+fn far_fall(surface: &ContinentalSurface, p: GlobalXZ) -> Fall {
+    let step = MEDIUM.sample_m;
+    let h = |x: f64, z: f64| surface.column(GlobalXZ::at(x, z)).ground();
+    let gx = (h(p.x + step, p.z) - h(p.x - step, p.z)) / (2.0 * step as f32);
+    let gz = (h(p.x, p.z + step) - h(p.x, p.z - step)) / (2.0 * step as f32);
+    Fall::of(Vec3::new(-gx, 1.0, -gz).normalize_or_zero())
+}
+
+/// A pine the GPU can instance by the tens of thousands: trunk plus two crowns.
+fn pine_proxy() -> EngineResult<Mesh> {
+    let mut mesh = Mesh::new();
+    let bark = Color::rgb(78, 54, 38);
+    let needle = Color::rgb(46, 74, 42);
+    mesh.add_box(Vec3::new(0.0, 3.2, 0.0), Vec3::new(0.7, 6.4, 0.7), bark)?;
+    mesh.add_box(Vec3::new(0.0, 8.4, 0.0), Vec3::new(5.0, 4.2, 5.0), needle)?;
+    mesh.add_box(Vec3::new(0.0, 11.4, 0.0), Vec3::new(3.2, 3.2, 3.2), needle)?;
+    Ok(mesh)
+}
+
 /// The colour a stone is painted, or `None` for props that brought their own.
 ///
 /// The rock generator bakes its look into albedo and normal maps, and this
@@ -968,6 +1512,58 @@ fn stone_colour(asset: &PropAsset) -> Option<Color> {
 }
 
 /// Run `job`, reporting how long it took in milliseconds.
+fn xz_bin(p: GlobalXZ) -> (i32, i32) {
+    (
+        (p.x / CHUNK_SPAN_M).floor() as i32,
+        (p.z / CHUNK_SPAN_M).floor() as i32,
+    )
+}
+
+fn bin_dist_key(bx: i32, bz: i32, focus: GlobalXZ) -> i64 {
+    let cx = (f64::from(bx) + 0.5) * CHUNK_SPAN_M;
+    let cz = (f64::from(bz) + 0.5) * CHUNK_SPAN_M;
+    let dx = cx - focus.x;
+    let dz = cz - focus.z;
+    (dx * dx + dz * dz) as i64
+}
+
+fn cap_tree_jobs(
+    jobs: Vec<TreeJob>,
+    remaining: impl Fn(&TreeJob) -> usize,
+    cap: usize,
+) -> VecDeque<TreeJob> {
+    let mut q = VecDeque::new();
+    let mut n = 0;
+    for job in jobs {
+        let left = remaining(&job);
+        if left == 0 {
+            continue;
+        }
+        if n >= cap {
+            break;
+        }
+        n += left;
+        q.push_back(job);
+    }
+    q
+}
+
+fn places_of(sprigs: &[Sprig], origin: RenderOrigin) -> Vec<Place> {
+    let mut places = Vec::with_capacity(sprigs.len());
+    for sprig in sprigs {
+        let Ok(render) = sprig.at.to_render(origin) else {
+            continue;
+        };
+        let at = render.vec3();
+        places.push(
+            Place::new(at.x, at.y, at.z)
+                .with_yaw_deg(sprig.yaw_deg)
+                .with_scale(sprig.scale),
+        );
+    }
+    places
+}
+
 fn timed<T>(job: impl FnOnce() -> T) -> (T, f32) {
     let started = std::time::Instant::now();
     let out = job();
@@ -981,5 +1577,176 @@ fn class_salt(class: PropClass) -> u64 {
         PropClass::Tree => 0x7472_6565_7300,
         PropClass::Reed => 0x7265_6564_7300,
         PropClass::Bush => 0x6275_7368_7300,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atlas::ContinentAtlas;
+    use crate::world::ponds::PondField;
+
+    fn world(seed: i32) -> (Arc<ContinentalSurface>, PondField) {
+        let atlas = ContinentAtlas::generate(seed, 64);
+        let surface = Arc::new(ContinentalSurface::new(&atlas).expect("surface"));
+        let ponds = PondField::build(
+            &surface,
+            GlobalXZ::at(
+                surface.bounds().metres() * 0.5,
+                surface.bounds().metres() * 0.5,
+            ),
+        );
+        (surface, ponds)
+    }
+
+    fn forested(surface: &ContinentalSurface) -> GlobalXZ {
+        let metres = surface.bounds().metres();
+        let sea = surface.sea_surface_z();
+        let mut best = None;
+        let mut best_tree = -1.0_f32;
+        let probe = 48usize;
+        let step = metres / probe as f64;
+        for iz in 0..probe {
+            for ix in 0..probe {
+                let p = GlobalXZ::at((ix as f64 + 0.5) * step, (iz as f64 + 0.5) * step);
+                let column = surface.column(p);
+                if column.is_wet() || column.ground() < sea + 20.0 {
+                    continue;
+                }
+                let cover = GroundCover::sample(
+                    surface,
+                    p,
+                    column.ground(),
+                    Fall::default(),
+                    canopy_noise(1, p),
+                );
+                if cover.tree > best_tree {
+                    best_tree = cover.tree;
+                    best = Some(p);
+                }
+            }
+        }
+        assert!(
+            best_tree > 0.15,
+            "no forested probe on this continent: {best_tree}"
+        );
+        best.expect("a forested probe")
+    }
+
+    #[test]
+    fn a_cell_bins_by_the_walked_chunk() {
+        let p = GlobalXZ::at(250.0, -50.0);
+        assert_eq!(xz_bin(p), (1, -1));
+        assert_eq!(xz_bin(GlobalXZ::at(0.0, 0.0)), (0, 0));
+    }
+
+    #[test]
+    fn the_tree_queue_keeps_the_nearest_thousand() {
+        let jobs: Vec<TreeJob> = (0..20)
+            .map(|i| TreeJob {
+                vi: 0,
+                bx: i,
+                bz: 0,
+                shown: 0,
+            })
+            .collect();
+        // 80 pending trees per cell → 13 cells = 1040, so the cap keeps 13 and drops the rest.
+        let remaining = |job: &TreeJob| 80 - job.shown;
+        let q = cap_tree_jobs(jobs, remaining, 1_000);
+        assert_eq!(q.len(), 13);
+        assert_eq!(q.front().unwrap().bx, 0);
+        assert_eq!(q.back().unwrap().bx, 12);
+        let queued: usize = q.iter().map(remaining).sum();
+        assert!(queued >= 1_000);
+        assert!(queued < 1_000 + 80);
+    }
+
+    #[test]
+    fn the_far_pine_is_a_handful_of_boxes() {
+        let mesh = pine_proxy().expect("proxy").build();
+        assert_eq!(mesh.triangle_count(), 36);
+    }
+
+    #[test]
+    fn full_pines_thin_toward_the_walked_ring() {
+        assert_eq!(TREE_RADIUS_M, NEAR.covers_m());
+        assert_eq!(FAR_TREE_RADIUS_M, MEDIUM.reach_m());
+        assert_eq!(PropClass::Tree.keep_fraction(0.0), Some(1.0));
+        assert_eq!(
+            PropClass::Tree.keep_fraction(TREE_DENSE_RADIUS_M),
+            Some(1.0)
+        );
+        let rim = PropClass::Tree.keep_fraction(TREE_RADIUS_M).unwrap();
+        assert!(rim < 0.5, "rim keep {rim} is still a 10 m lattice");
+        assert!(rim > 0.3);
+        assert!(PropClass::Grass.keep_fraction(100.0).is_none());
+    }
+
+    #[test]
+    fn near_and_far_tree_bands_do_not_share_a_cell() {
+        let (surface, ponds) = world(20260809);
+        let focus = forested(&surface);
+        let inner = 180.0;
+        let outer = 420.0;
+        let far = sow_far_forest(7, &surface, &ponds, focus, inner, outer, 24.0);
+        assert!(!far.is_empty(), "no far pines around a forested probe");
+        for sprig in &far {
+            let p = sprig.at.horizontal();
+            let dist = ((p.x - focus.x).powi(2) + (p.z - focus.z).powi(2)).sqrt();
+            assert!(
+                dist > inner,
+                "far pine at {dist:.1} m sits inside the full-mesh ring"
+            );
+            assert!(dist <= outer);
+        }
+    }
+
+    #[test]
+    fn far_pines_use_the_same_cover_field_as_the_ground_tint() {
+        let (surface, ponds) = world(20260809);
+        let focus = forested(&surface);
+        let far = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
+        assert!(!far.is_empty());
+        for sprig in &far {
+            let p = sprig.at.horizontal();
+            let mut column = surface.column(p);
+            ponds.carve(p, &mut column);
+            let fall = far_fall(&surface, p);
+            let mut cover =
+                GroundCover::sample(&surface, p, column.ground(), fall, canopy_noise(7, p));
+            let dry_beyond = -BANK_REACH_M;
+            let far_from_water = surface
+                .water_reach(p)
+                .max(ponds.water_reach(Vec2::new(p.x as f32, p.z as f32)))
+                <= dry_beyond;
+            if !far_from_water {
+                cover = cover.with_water(column.wetness());
+            }
+            assert!(
+                cover.tree > 0.0,
+                "a far pine stood where GroundCover.tree is 0"
+            );
+        }
+    }
+
+    #[test]
+    fn far_forest_sowing_is_deterministic() {
+        let (surface, ponds) = world(20260809);
+        let focus = forested(&surface);
+        let a = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
+        let b = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
+        let pos = |s: &[Sprig]| {
+            s.iter()
+                .map(|s| (s.at.x.to_bits(), s.at.y.to_bits(), s.at.z.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pos(&a), pos(&b));
+        assert_ne!(
+            pos(&a),
+            pos(&sow_far_forest(
+                8, &surface, &ponds, focus, 180.0, 420.0, 24.0
+            )),
+            "a different seed grew the same stand"
+        );
     }
 }

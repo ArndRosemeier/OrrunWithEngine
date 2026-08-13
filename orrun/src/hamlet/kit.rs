@@ -138,9 +138,8 @@ pub fn load_piece_mesh(piece: &PieceId) -> Result<Mesh, KitError> {
         });
     };
     let base = path.parent().unwrap_or_else(|| Path::new("."));
-    Model::load_with(&path, base, &engine::EngineLimits::default()).map_err(|source| {
-        KitError::BadPiece { path, source }
-    })
+    Model::load_with(&path, base, &engine::EngineLimits::default())
+        .map_err(|source| KitError::BadPiece { path, source })
 }
 
 /// Closed, footprint-centred places for every dwelling catalog id.
@@ -178,15 +177,20 @@ pub fn yaw_xz(x: f32, z: f32, yaw_deg: f32) -> (f32, f32) {
 #[cfg(test)]
 pub fn world_place(local: Place, house_at: Vec3, house_yaw_deg: f32) -> Place {
     let (dx, dz) = yaw_xz(local.position.x, local.position.z, house_yaw_deg);
-    Place::new(house_at.x + dx, house_at.y + local.position.y, house_at.z + dz)
-        .with_yaw_deg(house_yaw_deg + local.yaw_degrees)
+    Place::new(
+        house_at.x + dx,
+        house_at.y + local.position.y,
+        house_at.z + dz,
+    )
+    .with_yaw_deg(house_yaw_deg + local.yaw_degrees)
 }
 
 fn centre_footprint(catalog: &Catalog, assembly: &Assembly<'_>) -> ModularResult<Vec<PlacedMesh>> {
     let cells = assembly.occupied_cells();
-    let origin = catalog.pitch().mesh_origin(&cells).unwrap_or_else(|| {
-        panic!("assembly occupancy is empty")
-    });
+    let origin = catalog
+        .pitch()
+        .mesh_origin(&cells)
+        .unwrap_or_else(|| panic!("assembly occupancy is empty"));
     let mut places = assembly.places()?;
     for item in &mut places {
         item.place.position.x -= origin.x;
