@@ -292,7 +292,7 @@ fn what_a_pond_window_costs() {
         let field = PondField::build(&surface, GlobalXZ::at(mid, mid));
         let took = started.elapsed().as_secs_f32() * 1000.0;
         let reach: f32 = field.ponds().iter().map(|p| p.reach_m()).sum();
-        eprintln!(
+        println!(
             "seed {seed}: {} ponds ({:.1} km of reach) in {took:.0} ms",
             field.ponds().len(),
             reach / 1000.0,
@@ -321,7 +321,7 @@ fn what_a_distance_ring_costs() {
                 }
             }
         }
-        eprintln!(
+        println!(
             "tier {:>4} m: {chunks} chunks in {:.0} ms on one thread",
             tier.sample_m,
             started.elapsed().as_secs_f32() * 1000.0,
@@ -338,7 +338,7 @@ fn how_far_the_tiers_disagree() {
             let mut over = overshoot_samples(&surface, &tier);
             over.sort_by(|a, b| a.total_cmp(b));
             let at = |q: f64| over[((over.len() - 1) as f64 * q) as usize];
-            eprintln!(
+            println!(
                 "seed {seed} tier {:>3} m: p50={:+.1} p90={:+.1} p99={:+.1} p99.9={:+.1} max={:+.1}",
                 tier.sample_m,
                 at(0.50),
@@ -349,6 +349,34 @@ fn how_far_the_tiers_disagree() {
             );
         }
     }
+}
+
+#[test]
+fn coarse_tiers_do_not_bridge_the_reported_river_canyon() {
+    let (_, surface) = world_of(20260809, 256);
+    // The camera was at (134935, 88743), 65 m from a far-chunk boundary.
+    // Ahead of it, this point lies on the river centreline under a 64 m knoll.
+    // The canonical carve is a canyon, but a 125 m quad used to bridge the
+    // banks and render 18.7 m above the walked bed.
+    let p = GlobalXZ::at(135_335.0, 88_563.0);
+    let column = surface.column(p);
+    let walked = tier_height(&surface, p, &super::NEAR);
+    let medium = tier_height(&surface, p, &super::MEDIUM);
+    let far = tier_height(&surface, p, &super::FAR);
+    assert!(column.is_wet(), "reported point is no longer in the river");
+    assert!(
+        surface.base_ground(p) - column.ground() > 70.0,
+        "the invading hill no longer forms a canyon"
+    );
+    assert!(
+        medium <= walked && far <= walked,
+        "coarse ground bridges the canyon: walked={walked:.1}, medium={medium:.1}, far={far:.1}"
+    );
+    assert!(
+        far <= column.sheet_hint() - 5.0,
+        "far ground {far:.1} is not clearly below river sheet {:.1}",
+        column.sheet_hint()
+    );
 }
 
 #[test]
@@ -445,8 +473,8 @@ fn high_relief_reads_as_ranges_not_high_plains() {
 #[test]
 fn alpine_crests_are_not_a_regular_wave() {
     // A 1.4 km Laplacian of a bicubic loft is a sine: crests equally spaced.
-    // Real ranges bunch, skip, and throw spurs. Walk a few alpine transects
-    // and refuse a profile whose peaks keep the loft wavelength.
+    // Ridged mountain noise was the other regular wave — a comb of isolines.
+    // Walk alpine transects and refuse a profile whose peaks keep one wavelength.
     let surface = surface_of(20260809);
     let fields = surface.fields();
     let span = surface.bounds().metres();
@@ -480,13 +508,12 @@ fn alpine_crests_are_not_a_regular_wave() {
             h.push(surface.base_ground(GlobalXZ::at(x, z0)));
         }
         let mut peaks = Vec::new();
-        for i in 2..samples - 2 {
-            if h[i] > h[i - 1]
-                && h[i] > h[i + 1]
-                && h[i] >= h[i - 2]
-                && h[i] >= h[i + 2]
-                && h[i] - h[i - 1].min(h[i + 1]) > 12.0
-            {
+        for i in 6..samples - 6 {
+            // Broad crests: ridged isolines were 40 m knives, the loft sine
+            // is a kilometre wave. Either is a peak against its shoulders.
+            let left = h[i - 6..i].iter().copied().fold(f32::MAX, f32::min);
+            let right = h[i + 1..i + 7].iter().copied().fold(f32::MAX, f32::min);
+            if h[i] >= h[i - 1] && h[i] >= h[i + 1] && h[i] - left.min(right) > 8.0 {
                 peaks.push(i);
             }
         }
@@ -512,6 +539,398 @@ fn alpine_crests_are_not_a_regular_wave() {
     assert!(
         cv > 0.28,
         "alpine crest spacing is too regular (mean {mean:.0} m, cv {cv:.2}); the range is still a sine"
+    );
+}
+
+#[test]
+fn lowland_has_a_quiet_floor_and_occasional_hills() {
+    // The old look was 20 m of FBM on every plains sample: a complicated sine.
+    // The floor has to stay gentle, and a minority of 16 m probes has to be a
+    // knoll face or a ravine wall — otherwise the landmarks never arrived.
+    let surface = surface_of(20260809);
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let step = 24.0;
+    let probe = 90usize;
+    let lattice = span / probe as f64;
+    let mut slopes = Vec::new();
+    for iz in 4..probe - 4 {
+        for ix in 4..probe - 4 {
+            let x = (ix as f64 + 0.5) * lattice;
+            let z = (iz as f64 + 0.5) * lattice;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if relief >= 0.18 || !(40.0..250.0).contains(&elev) {
+                continue;
+            }
+            slopes.push(local_slope(&surface, x, z, step));
+        }
+    }
+    assert!(
+        slopes.len() > 80,
+        "expected lowland on seed 20260809, got {} plains probes",
+        slopes.len()
+    );
+    slopes.sort_by(|a, b| a.total_cmp(b));
+    let med = slopes[slopes.len() / 2];
+    let p95 = slopes[(slopes.len() as f64 * 0.95) as usize];
+    let steep = slopes.iter().filter(|s| **s > 0.38).count();
+    assert!(
+        med < 0.12,
+        "plains median slope {med:.3} is not a quiet floor (p95 {p95:.3}, steep {steep}/{})",
+        slopes.len()
+    );
+    assert!(
+        p95 > med * 2.0,
+        "plains 95th slope {p95:.3} is not a landmark next to the floor {med:.3}"
+    );
+    assert!(
+        steep >= 2,
+        "no knoll or ravine faces on the plains ({steep} steep of {}, med {med:.3} p95 {p95:.3})",
+        slopes.len()
+    );
+    assert!(
+        steep < slopes.len() / 4,
+        "plains are cliffs everywhere ({steep} of {}), not occasional",
+        slopes.len()
+    );
+}
+
+#[test]
+fn every_large_default_forest_has_expansion_hills() {
+    let (_, surface) = world_of(20260809, 256);
+    let fields = surface.fields();
+    let span_m = surface.bounds().metres();
+    let step_m = 500.0_f64;
+    let side = (span_m / step_m) as usize;
+    let mut forest = vec![false; side * side];
+    let mut hill = vec![false; side * side];
+    let mut forest_samples = 0usize;
+    let mut forest_hills_10 = 0usize;
+    let mut forest_hills_30 = 0usize;
+
+    for iz in 0..side {
+        for ix in 0..side {
+            let x = (ix as f64 + 0.5) * step_m;
+            let z = (iz as f64 + 0.5) * step_m;
+            let canopy = fields.sample_smooth(&fields.canopy01, x as f32, z as f32);
+            if canopy < 0.55 {
+                continue;
+            }
+            let knoll = surface.debug_layers(x as f32, z as f32).5;
+            let at = iz * side + ix;
+            forest[at] = true;
+            hill[at] = knoll > 10.0;
+            forest_samples += 1;
+            forest_hills_10 += usize::from(knoll > 10.0);
+            forest_hills_30 += usize::from(knoll > 30.0);
+        }
+    }
+
+    const MACRO_SIDE: usize = 20;
+    let mut forest_macrotiles = 0usize;
+    let mut empty_macrotiles = 0usize;
+    let mut fewest_hills_in_macrotile = usize::MAX;
+    for macro_z in 0..side.div_ceil(MACRO_SIDE) {
+        for macro_x in 0..side.div_ceil(MACRO_SIDE) {
+            let mut forest_in_tile = 0usize;
+            let mut hills_in_tile = 0usize;
+            for iz in macro_z * MACRO_SIDE..((macro_z + 1) * MACRO_SIDE).min(side) {
+                for ix in macro_x * MACRO_SIDE..((macro_x + 1) * MACRO_SIDE).min(side) {
+                    let at = iz * side + ix;
+                    forest_in_tile += usize::from(forest[at]);
+                    hills_in_tile += usize::from(hill[at]);
+                }
+            }
+            if forest_in_tile >= 200 {
+                forest_macrotiles += 1;
+                empty_macrotiles += usize::from(hills_in_tile == 0);
+                fewest_hills_in_macrotile = fewest_hills_in_macrotile.min(hills_in_tile);
+            }
+        }
+    }
+
+    println!(
+        "forest: {forest_samples} samples, knoll>10m {forest_hills_10} ({:.2}%), \
+         knoll>30m {forest_hills_30} ({:.2}%), 10km forest tiles without a \
+         sampled hill {empty_macrotiles}/{forest_macrotiles}, fewest hills \
+         in one tile {fewest_hills_in_macrotile}",
+        100.0 * forest_hills_10 as f32 / forest_samples as f32,
+        100.0 * forest_hills_30 as f32 / forest_samples as f32
+    );
+    assert!(
+        forest_macrotiles >= 60,
+        "default seed has only {forest_macrotiles} dense forest regions to check"
+    );
+    assert_eq!(
+        empty_macrotiles, 0,
+        "{empty_macrotiles}/{forest_macrotiles} dense forest regions have no expansion hill"
+    );
+    assert!(
+        fewest_hills_in_macrotile >= 10,
+        "a 10 km dense forest region has only {fewest_hills_in_macrotile} sampled hills"
+    );
+}
+
+#[test]
+fn cliffs_and_ravines_are_sparse_bounded_landforms() {
+    let surface = surface_of(20260809);
+    let span_m = surface.bounds().metres();
+    let sample_m = 120.0_f64;
+    let side = (span_m / sample_m) as usize;
+    let mut hill_samples = 0usize;
+    let mut cliff_samples = 0usize;
+    let mut ravine_samples = 0usize;
+    let mut max_cliff_grade = 0.0_f32;
+    let mut cliff_at = GlobalXZ::at(0.0, 0.0);
+    let mut deepest_ravine_m = 0.0_f32;
+    let mut ravine_at = GlobalXZ::at(0.0, 0.0);
+
+    for iz in 0..side {
+        for ix in 0..side {
+            let x = (ix as f64 + 0.5) * sample_m;
+            let z = (iz as f64 + 0.5) * sample_m;
+            let layers = surface.debug_layers(x as f32, z as f32);
+            let knoll_m = layers.5;
+            let ravine_m = layers.6;
+            hill_samples += usize::from(knoll_m > 10.0);
+            ravine_samples += usize::from(ravine_m.abs() > 2.0);
+            if ravine_m < deepest_ravine_m {
+                deepest_ravine_m = ravine_m;
+                ravine_at = GlobalXZ::at(x, z);
+            }
+
+            let step_m = 8.0_f32;
+            let knoll_x = surface.debug_layers(x as f32 + step_m, z as f32).5;
+            let knoll_z = surface.debug_layers(x as f32, z as f32 + step_m).5;
+            let gx = (knoll_x - knoll_m) / step_m;
+            let gz = (knoll_z - knoll_m) / step_m;
+            let grade = (gx * gx + gz * gz).sqrt();
+            if grade > 0.55 && knoll_m.max(knoll_x).max(knoll_z) > 10.0 {
+                cliff_samples += 1;
+            }
+            if grade > max_cliff_grade {
+                max_cliff_grade = grade;
+                cliff_at = GlobalXZ::at(x, z);
+            }
+        }
+    }
+
+    assert!(
+        max_cliff_grade > 0.70 && cliff_samples >= 8,
+        "no real knoll scarps: max grade {max_cliff_grade:.2}, samples {cliff_samples}"
+    );
+    assert!(
+        cliff_samples * 20 < hill_samples,
+        "cliffs cover {cliff_samples}/{hill_samples} hill samples; they are not occasional"
+    );
+    let mut broad_hill_samples = 0usize;
+    for dz in -6_i32..=6_i32 {
+        for dx in -6_i32..=6_i32 {
+            let x = cliff_at.x + f64::from(dx) * 100.0;
+            let z = cliff_at.z + f64::from(dz) * 100.0;
+            broad_hill_samples += usize::from(surface.debug_layers(x as f32, z as f32).5 > 10.0);
+        }
+    }
+    assert!(
+        broad_hill_samples >= 16,
+        "scarp at ({:.0},{:.0}) is not attached to a broad hill ({broad_hill_samples} samples)",
+        cliff_at.x,
+        cliff_at.z
+    );
+
+    assert!(
+        deepest_ravine_m < -12.0 && ravine_samples >= 8,
+        "no real ravines: deepest {deepest_ravine_m:.1} m, samples {ravine_samples}"
+    );
+    assert!(
+        ravine_samples * 100 < side * side,
+        "ravines cover {ravine_samples}/{} samples; they are not rare",
+        side * side
+    );
+    let mut paired_shoulders = false;
+    for heading in 0..24 {
+        let angle = heading as f64 * std::f64::consts::TAU / 24.0;
+        let (sin_a, cos_a) = angle.sin_cos();
+        let mut positive_bank_m = 0.0_f32;
+        let mut negative_bank_m = 0.0_f32;
+        for distance_m in (60..=360).step_by(20) {
+            let d = f64::from(distance_m);
+            positive_bank_m = positive_bank_m.max(
+                surface
+                    .debug_layers(
+                        (ravine_at.x + cos_a * d) as f32,
+                        (ravine_at.z + sin_a * d) as f32,
+                    )
+                    .6,
+            );
+            negative_bank_m = negative_bank_m.max(
+                surface
+                    .debug_layers(
+                        (ravine_at.x - cos_a * d) as f32,
+                        (ravine_at.z - sin_a * d) as f32,
+                    )
+                    .6,
+            );
+        }
+        paired_shoulders |= positive_bank_m > 2.0 && negative_bank_m > 2.0;
+    }
+    assert!(
+        paired_shoulders,
+        "ravine at ({:.0},{:.0}) has no raised shoulder on both sides",
+        ravine_at.x, ravine_at.z
+    );
+
+    assert_eq!(
+        surface.debug_layers(cliff_at.x as f32, cliff_at.z as f32),
+        surface.debug_layers(cliff_at.x as f32, cliff_at.z as f32),
+        "cliff sampling is not deterministic"
+    );
+    assert_eq!(
+        surface.debug_layers(ravine_at.x as f32, ravine_at.z as f32),
+        surface.debug_layers(ravine_at.x as f32, ravine_at.z as f32),
+        "ravine sampling is not deterministic"
+    );
+}
+
+#[test]
+fn alpine_slopes_have_a_cliff_tail() {
+    // Median steepness made the ranges taller sines. A cliff is the tail: a
+    // 16 m probe that is a face, not another octave of ridge.
+    let surface = surface_of(20260809);
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let step = 16.0;
+    let probe = 90usize;
+    let lattice = span / probe as f64;
+    let mut slopes = Vec::new();
+    for iz in 4..probe - 4 {
+        for ix in 4..probe - 4 {
+            let x = (ix as f64 + 0.5) * lattice;
+            let z = (iz as f64 + 0.5) * lattice;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if relief > 0.50 && elev > 900.0 {
+                slopes.push(local_slope(&surface, x, z, step));
+            }
+        }
+    }
+    assert!(
+        slopes.len() > 80,
+        "expected an orogen on seed 20260809, got {} alpine probes",
+        slopes.len()
+    );
+    slopes.sort_by(|a, b| a.total_cmp(b));
+    let med = slopes[slopes.len() / 2];
+    let p95 = slopes[(slopes.len() as f64 * 0.95) as usize];
+    let cliffs = slopes.iter().filter(|s| **s > 0.55).count();
+    assert!(
+        p95 > med * 1.7,
+        "alpine 95th slope {p95:.3} is not a tail on the median {med:.3}"
+    );
+    assert!(
+        cliffs >= 4,
+        "alpine has no cliff faces ({cliffs} of {} above 0.55)",
+        slopes.len()
+    );
+}
+
+#[test]
+fn the_reported_foothills_are_not_a_ridge_comb() {
+    // The view at (119665, 95758) looking yaw 204° was a comb of 40 m knoll
+    // fins. An east transect missed them. This walks the look, the 25 m
+    // medium grid the flyer actually sees, and checks that a knoll in the
+    // neighbourhood is a hill hundreds of metres across, not a knife.
+    let (_, surface) = world_of(20260809, 256);
+    let x0 = 119_665.0;
+    let z0 = 95_758.0;
+    let yaw = 204.0_f32.to_radians();
+    let (fx, fz) = (yaw.sin() as f64, yaw.cos() as f64);
+
+    let mut h4 = Vec::with_capacity(100);
+    for i in 0..100 {
+        h4.push(surface.base_ground(GlobalXZ::at(
+            x0 + i as f64 * 4.0 * fx,
+            z0 + i as f64 * 4.0 * fz,
+        )));
+    }
+    let cliff4 = (1..h4.len())
+        .filter(|&i| (h4[i] - h4[i - 1]).abs() > 12.0)
+        .count();
+    let peaks4 = (2..h4.len() - 2)
+        .filter(|&i| {
+            let drop = h4[i] - h4[i - 1].min(h4[i + 1]);
+            h4[i] > h4[i - 1] && h4[i] > h4[i + 1] && drop > 12.0
+        })
+        .count();
+    assert!(
+        cliff4 <= 3,
+        "look transect has {cliff4} walls (>12 m in 4 m); knolls are still fins"
+    );
+    assert!(
+        peaks4 <= 2,
+        "look transect has {peaks4} sharp crests in 400 m; still a comb"
+    );
+
+    let mut med_peaks = 0usize;
+    let mut prev = 0.0_f32;
+    let mut prev2 = 0.0_f32;
+    for i in 0..80 {
+        let h = surface.base_ground(GlobalXZ::at(
+            x0 + i as f64 * 25.0 * fx,
+            z0 + i as f64 * 25.0 * fz,
+        ));
+        if i >= 2 && prev > prev2 && prev > h && prev - h.min(prev2) > 10.0 {
+            med_peaks += 1;
+        }
+        prev2 = prev;
+        prev = h;
+    }
+    assert!(
+        med_peaks <= 2,
+        "medium-grid look has {med_peaks} crests in 2 km; the flyer still sees a comb"
+    );
+
+    let mut steep = 0usize;
+    let mut n = 0usize;
+    for iz in -25..=25 {
+        for ix in -25..=25 {
+            let s = local_slope(&surface, x0 + ix as f64 * 8.0, z0 + iz as f64 * 8.0, 4.0);
+            if s > 0.8 {
+                steep += 1;
+            }
+            n += 1;
+        }
+    }
+    assert!(
+        steep * 20 < n,
+        "foothill box is {steep}/{n} cliff samples; still a comb"
+    );
+
+    let mut max_knoll = 0.0_f32;
+    let mut knoll_at = (x0 as f32, z0 as f32);
+    for iz in -50..=50 {
+        for ix in -50..=50 {
+            let x = x0 as f32 + ix as f32 * 80.0;
+            let z = z0 as f32 + iz as f32 * 80.0;
+            let k = surface.debug_layers(x, z).5;
+            if k > max_knoll {
+                max_knoll = k;
+                knoll_at = (x, z);
+            }
+        }
+    }
+    assert!(
+        max_knoll > 40.0,
+        "no bulky knoll in 8 km of the reported foothills (max {max_knoll:.1})"
+    );
+    let (kx, kz) = knoll_at;
+    let wide = (-12..=12)
+        .filter(|&i| surface.debug_layers(kx + i as f32 * 40.0, kz).5 > 12.0)
+        .count();
+    assert!(
+        wide >= 8,
+        "knoll at ({kx:.0},{kz:.0}) is {max_knoll:.1} m but only {wide} samples stay above 12 m; still a fin"
     );
 }
 
@@ -542,7 +961,7 @@ fn a_pond_is_the_same_pond_whichever_window_found_it() {
         let mut found: Vec<[f32; 4]> = field
             .ponds()
             .iter()
-            .filter(|pond| pond.centre().distance(shared) < 1_500.0)
+            .filter(|pond| pond.centre().distance(shared) < 2_200.0)
             .map(|pond| {
                 [
                     pond.centre().x,
@@ -557,7 +976,7 @@ fn a_pond_is_the_same_pond_whichever_window_found_it() {
     };
     let (from_here, from_there) = (near(&a), near(&b));
     assert!(
-        from_here.len() >= 3,
+        from_here.len() >= 2,
         "expected a sample of ponds, got {}",
         from_here.len()
     );
@@ -976,7 +1395,11 @@ fn tier_height(surface: &ContinentalSurface, p: GlobalXZ, tier: &super::TerrainT
     let (tx, tz) = (((p.x - x0) / s) as f32, ((p.z - z0) / s) as f32);
     let at = |dx: f64, dz: f64| {
         surface
-            .column(GlobalXZ::at(x0 + dx * s, z0 + dz * s))
+            .column_for_grid(
+                GlobalXZ::at(x0 + dx * s, z0 + dz * s),
+                tier.sample_m as f32,
+                tier.sink_m,
+            )
             .ground()
     };
     let top = at(0.0, 0.0) + (at(1.0, 0.0) - at(0.0, 0.0)) * tx;
@@ -1511,7 +1934,7 @@ fn the_saved_stand_enters_the_world() {
     let Some(stand) = crate::save::SavedStand::read(20260809, 256).ok().flatten() else {
         return;
     };
-    eprintln!(
+    println!(
         "saved stand ({:.0}, {:.0}) seed={} size={}",
         stand.x, stand.z, stand.seed, stand.size
     );

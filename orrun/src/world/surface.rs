@@ -28,6 +28,7 @@ use thiserror::Error;
 use super::atlas_fields::AtlasFields;
 use super::coords::AtlasBounds;
 use super::hydro_geom::{HydroIndex, OCEAN_SHELF_DEPTH, SHORE_BAND_M};
+use super::rng::CellRng;
 use crate::atlas::hydro::HydroVectors;
 use crate::atlas::{
     bake_road_paths, cell_population, ContinentAtlas, NodeKind, RoadPath, CELL_METRES,
@@ -61,8 +62,6 @@ const HILL_HEIGHT: f32 = 38.0;
 const RIPPLE_HEIGHT: f32 = 8.0;
 const GRIT_HEIGHT: f32 = 2.2;
 const MOUNTAIN_DETAIL: f32 = 90.0;
-/// Secondary crests and hanging valleys, shorter than the loft wave.
-const SPUR_DETAIL: f32 = 48.0;
 const WARP_STRENGTH: f32 = 70.0;
 /// Extra domain warp of the loft in high relief. Without it the kilometre
 /// interpolant, the neighbourhood contrast, and the swell all share one
@@ -75,6 +74,39 @@ const MACRO_CONTRAST: f32 = 2.45;
 /// Height where the land starts to read alpine, and where that is complete.
 const ALPINE_M: f32 = 450.0;
 const ALPINE_FULL_M: f32 = 1_500.0;
+
+/// Isolated plains knolls: tall enough to read as a hill, small enough that
+/// the atlas never had to know they were there.
+const KNOLL_LOW_M: f32 = 52.0;
+const KNOLL_HIGH_M: f32 = 96.0;
+/// Low-frequency edge warp that keeps a hill's footprint from being a perfect
+/// ellipse without turning a noise contour into the landform itself.
+const KNOLL_EDGE_WARP_FREQ: f32 = 0.00038;
+const KNOLL_EDGE_WARP_X_SCALE: f32 = 1.08;
+const KNOLL_EDGE_WARP_Z_SCALE: f32 = 0.88;
+/// One independently jittered hill site per cell. Unlike a slow noise gate,
+/// this cannot cluster all hills into one district and leave a forest flat for
+/// tens of kilometres.
+const KNOLL_CELL_M: f32 = 2_800.0;
+const KNOLL_JITTER_M: f32 = 900.0;
+const KNOLL_RADIUS_LOW_M: f32 = 540.0;
+const KNOLL_RADIUS_HIGH_M: f32 = 920.0;
+const KNOLL_CLIFF_CHANCE: f32 = 0.16;
+
+/// Rare, finite ravines. Each active site owns one cut with two shoulders;
+/// there is no thresholded noise contour that can repeat across the world.
+const RAVINE_CELL_M: f32 = 11_000.0;
+const RAVINE_CHANCE: f32 = 0.32;
+const RAVINE_JITTER_M: f32 = 3_000.0;
+const RAVINE_HALF_LENGTH_LOW_M: f32 = 700.0;
+const RAVINE_HALF_LENGTH_HIGH_M: f32 = 1_500.0;
+const RAVINE_HALF_WIDTH_LOW_M: f32 = 70.0;
+const RAVINE_HALF_WIDTH_HIGH_M: f32 = 130.0;
+const RAVINE_DEPTH_LOW_M: f32 = 24.0;
+const RAVINE_DEPTH_HIGH_M: f32 = 42.0;
+
+/// How far mountain detail is pulled along its own derivative (drainage).
+const ERODE_M: f32 = 240.0;
 
 #[derive(Debug, Error)]
 pub enum SurfaceError {
@@ -239,6 +271,15 @@ impl SurfaceColumn {
 }
 
 /// Structural terrain detail shared by every consumer of the surface.
+///
+/// Atlas loft is a kilometre-smooth field. Everything that makes a place — a
+/// knoll on the plain, a scarp, a hanging bench — lives here, so the walked
+/// mesh and the thirty-kilometre horizon are looking at the same landform.
+/// Adding more FBM cannot put a break in a slope; the knolls and ravines
+/// are the breaks. Both are gated on **peaks** of a blob field. Isolines of
+/// a noise field stack as concentric fins, which is not a hill. River valleys
+/// pass `detail_amt = 0` and those features fade, so a hill cannot dam an
+/// authored channel.
 #[derive(Clone, Debug)]
 struct TerrainDetail {
     swell: Noise,
@@ -246,9 +287,13 @@ struct TerrainDetail {
     ripples: Noise,
     grit: Noise,
     mountain: Noise,
-    spurs: Noise,
     warp_a: Noise,
     warp_b: Noise,
+    knolls: Noise,
+    knoll_seed: u64,
+    ravine_dir: Noise,
+    ravine_seed: u64,
+    erode: Noise,
 }
 
 impl TerrainDetail {
@@ -260,9 +305,13 @@ impl TerrainDetail {
             ripples: Noise::new(seed ^ 0x2199_1E55),
             grit: Noise::new(seed ^ 0x6717_0001),
             mountain: Noise::new(seed ^ 0xB01D),
-            spurs: Noise::new(seed ^ 0x5B09),
             warp_a: Noise::new(seed ^ 0xC0DE),
             warp_b: Noise::new(seed ^ 0xD00D),
+            knolls: Noise::new(seed ^ 0x6E01_11A1),
+            knoll_seed: u64::from(seed) ^ 0x6E01_11A1_D1A6_0007,
+            ravine_dir: Noise::new(seed ^ 0x5CA9_9001),
+            ravine_seed: u64::from(seed) ^ 0xFA01_7C11_5CA9_9001,
+            erode: Noise::new(seed ^ 0xE80D_E001),
         }
     }
 
@@ -278,40 +327,250 @@ impl TerrainDetail {
 
         let base = self.steepen_base(fields, px, pz, relief);
         let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, base);
+        let (ex, ez) = self.eroded_point(px, pz, alpine * relief);
+        let mut h = base + self.grain(ex, ez, relief, alpine, detail_amt);
+        h += self.orogeny(ex, ez, relief, alpine, detail_amt);
+        h += self.knolls(px, pz, relief, alpine, detail_amt);
+        h += self.ravines(px, pz, relief, alpine, detail_amt);
+        h
+    }
+
+    #[cfg(test)]
+    fn debug_layers(
+        &self,
+        fields: &AtlasFields,
+        x: f32,
+        z: f32,
+    ) -> (f32, f32, f32, f32, f32, f32, f32) {
+        let relief = fields.sample_smooth(&fields.relief01, x, z).clamp(0.0, 1.0);
+        let e_atlas = fields.sample_smooth(&fields.elevation_m, x, z);
+        let alpine_hint = smoothstep(ALPINE_M, ALPINE_FULL_M, e_atlas) * relief;
+        let warp_m = WARP_STRENGTH + ALPINE_WARP_M * alpine_hint;
+        let warp_x = self.warp_a.sample2(x * 0.00032, z * 0.00032) * warp_m;
+        let warp_z = self.warp_b.sample2(x * 0.00032 + 40.0, z * 0.00032) * warp_m;
+        let px = x + warp_x;
+        let pz = z + warp_z;
+        let base = self.steepen_base(fields, px, pz, relief);
+        let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, base);
+        let (ex, ez) = self.eroded_point(px, pz, alpine * relief);
+        (
+            relief,
+            e_atlas,
+            base,
+            self.grain(ex, ez, relief, alpine, 1.0),
+            self.orogeny(ex, ez, relief, alpine, 1.0),
+            self.knolls(px, pz, relief, alpine, 1.0),
+            self.ravines(px, pz, relief, alpine, 1.0),
+        )
+    }
+
+    /// Quiet floor: swell at a kilometre, a little FBM, grit underfoot.
+    /// Plains used to wear 20 m of hill noise everywhere; that was the sine.
+    fn grain(&self, px: f32, pz: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
         let swell = self.swell.sample2(px * 0.0008, pz * 0.0008)
             * SWELL_HEIGHT
             * lerp(1.0, 0.4, relief)
             * lerp(1.0, 0.12, alpine);
-        let hills = self.hills.fbm2(px * 0.0024, pz * 0.0024, 4, 2.05, 0.5)
+        let hills = self.hills.fbm2(px * 0.0024, pz * 0.0024, 3, 2.05, 0.5)
             * HILL_HEIGHT
-            * lerp(0.55, 1.0, relief)
+            * lerp(0.14, 1.0, relief)
             * lerp(1.0, 0.22, alpine)
             * lerp(0.35, 1.0, detail_amt);
         let ripples = self.ripples.fbm2(px * 0.006, pz * 0.006, 3, 2.1, 0.5)
             * RIPPLE_HEIGHT
-            * lerp(0.7, 1.0, relief)
+            * lerp(0.32, 1.0, relief)
             * detail_amt;
         let grit = self.grit.fbm2(px * 0.02, pz * 0.02, 2, 2.2, 0.5) * GRIT_HEIGHT * detail_amt;
-        // Crests sit off the loft wavelength (~700 m, not 1.4 km) so amplifying
-        // the atlas cannot keep a parallel wave.
-        let ridge01 = self
-            .mountain
-            .ridged2(px * 0.0014, pz * 0.0014, 4, 2.18, 0.46)
-            * 0.5
-            + 0.5;
-        let shaped = ridge01.clamp(0.0, 1.0).powf(lerp(1.45, 2.15, alpine));
-        let ridge = (shaped - 0.40)
-            * MOUNTAIN_DETAIL
-            * lerp(0.35, 1.0, relief)
-            * lerp(0.50, 1.85, alpine)
-            * lerp(0.25, 1.0, detail_amt);
-        let spur01 = self.spurs.ridged2(px * 0.0038, pz * 0.0038, 3, 2.25, 0.5) * 0.5 + 0.5;
-        let spur = (spur01.clamp(0.0, 1.0).powf(1.85) - 0.38)
-            * SPUR_DETAIL
-            * relief
-            * alpine
-            * lerp(0.20, 1.0, detail_amt);
-        base + swell + hills + ripples + grit + ridge + spur
+        swell + hills + ripples + grit
+    }
+
+    /// Pull later mountain octaves along the derivative of an erosion field so
+    /// crests bunch, skip, and drain instead of stacking at one wavelength.
+    fn eroded_point(&self, x: f32, z: f32, amount: f32) -> (f32, f32) {
+        if amount < 0.04 {
+            return (x, z);
+        }
+        let e = 22.0;
+        let freq = 0.00095;
+        let n = self.erode.sample2(x * freq, z * freq);
+        let nx = self.erode.sample2((x + e) * freq, z * freq);
+        let nz = self.erode.sample2(x * freq, (z + e) * freq);
+        let k = ERODE_M * amount;
+        let x1 = x + (nx - n) / e * k;
+        let z1 = z + (nz - n) / e * k;
+        let f2 = 0.0024;
+        let e2 = 12.0;
+        let m = self.erode.sample2(x1 * f2 + 17.0, z1 * f2);
+        let mx = self.erode.sample2((x1 + e2) * f2 + 17.0, z1 * f2);
+        let mz = self.erode.sample2(x1 * f2 + 17.0, (z1 + e2) * f2);
+        let k2 = ERODE_M * 0.38 * amount;
+        (x1 + (mx - m) / e2 * k2, z1 + (mz - m) / e2 * k2)
+    }
+
+    /// Rounded mountain grain. Ridged noise puts a wall on every isoline of
+    /// the field — a comb of fins — so it is not used here. Cliffs come from
+    /// knolls, which are peaks, not contours.
+    fn orogeny(&self, px: f32, pz: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
+        if relief < 0.08 && alpine < 0.05 {
+            return 0.0;
+        }
+        let n = self.mountain.fbm2(px * 0.0009, pz * 0.0009, 3, 2.05, 0.5);
+        n * MOUNTAIN_DETAIL
+            * lerp(0.06, 0.80, relief)
+            * lerp(0.18, 1.20, alpine)
+            * lerp(0.25, 1.0, detail_amt)
+    }
+
+    /// Occasional bulky knolls, independently jittered across large cells.
+    ///
+    /// Every site is a full two-dimensional mound hundreds of metres across.
+    /// Some have a shorter windward flank, but retain the long backslope that
+    /// makes the feature a hill. Noise gates and face remaps are deliberately
+    /// absent: their contour boundaries were the parallel fins seen in flight.
+    fn knolls(&self, x: f32, z: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
+        let plains = (1.0 - alpine) * lerp(1.0, 0.22, relief);
+        let upland = alpine * relief * 0.80;
+        let want = (plains + upland) * detail_amt;
+        if want < 0.06 {
+            return 0.0;
+        }
+        let cell_x = (x / KNOLL_CELL_M).floor() as i64;
+        let cell_z = (z / KNOLL_CELL_M).floor() as i64;
+        let mut height_m = 0.0_f32;
+
+        for dz in -1_i64..=1_i64 {
+            for dx in -1_i64..=1_i64 {
+                let site_x = cell_x + dx;
+                let site_z = cell_z + dz;
+                let mut rng = CellRng::new(self.knoll_seed, site_x, site_z);
+                let centre_x = (site_x as f32 + 0.5) * KNOLL_CELL_M
+                    + rng.range(-KNOLL_JITTER_M, KNOLL_JITTER_M);
+                let centre_z = (site_z as f32 + 0.5) * KNOLL_CELL_M
+                    + rng.range(-KNOLL_JITTER_M, KNOLL_JITTER_M);
+                let rel_x = x - centre_x;
+                let rel_z = z - centre_z;
+                const MAX_REACH_M: f32 = KNOLL_RADIUS_HIGH_M * 1.24;
+                if rel_x.abs() > MAX_REACH_M || rel_z.abs() > MAX_REACH_M {
+                    continue;
+                }
+                let radius_m = rng.range(KNOLL_RADIUS_LOW_M, KNOLL_RADIUS_HIGH_M);
+                let across_radius_m = radius_m * rng.range(0.72, 1.0);
+                let angle_rad = rng.range(0.0, std::f32::consts::TAU);
+                let amplitude_m = rng.range(KNOLL_LOW_M, KNOLL_HIGH_M);
+                let has_cliff = rng.unit() < KNOLL_CLIFF_CHANCE;
+                let cliff_position_m = radius_m * rng.range(0.34, 0.48);
+                let cliff_width_m = rng.range(20.0, 42.0);
+                let cliff_drop_m = amplitude_m * rng.range(0.30, 0.40);
+
+                let (sin_a, cos_a) = angle_rad.sin_cos();
+                let along_m = rel_x * cos_a + rel_z * sin_a;
+                let across_m = -rel_x * sin_a + rel_z * cos_a;
+                let mut radial =
+                    ((along_m / radius_m).powi(2) + (across_m / across_radius_m).powi(2)).sqrt();
+                let edge_warp = self.knolls.sample2(
+                    x * KNOLL_EDGE_WARP_FREQ * KNOLL_EDGE_WARP_X_SCALE,
+                    z * KNOLL_EDGE_WARP_FREQ * KNOLL_EDGE_WARP_Z_SCALE,
+                ) * 0.08
+                    * smoothstep(0.20, 0.85, radial);
+                radial += edge_warp;
+                if radial >= 1.0 {
+                    continue;
+                }
+                let body = smoothstep(0.0, 1.0, 1.0 - radial);
+                let mut candidate_m = body * amplitude_m;
+
+                if has_cliff && along_m > cliff_position_m - cliff_width_m {
+                    // A single planar scarp on the outward half of this mound.
+                    // The lateral mask caps both ends; the apron follows the
+                    // original hill body to zero, so no second wall appears at
+                    // the footprint edge.
+                    let lateral = (across_m.abs() / across_radius_m).clamp(0.0, 1.0);
+                    let lateral_mask = 1.0 - smoothstep(0.38, 0.82, lateral);
+                    let face_step = smoothstep(
+                        cliff_position_m - cliff_width_m * 0.5,
+                        cliff_position_m + cliff_width_m * 0.5,
+                        along_m,
+                    );
+                    let face_radial = ((cliff_position_m / radius_m).powi(2)
+                        + (across_m / across_radius_m).powi(2))
+                    .sqrt();
+                    let face_body = smoothstep(0.0, 1.0, 1.0 - face_radial).max(0.10);
+                    let apron = (body / face_body).clamp(0.0, 1.0);
+                    candidate_m =
+                        (candidate_m - cliff_drop_m * face_step * lateral_mask * apron).max(0.0);
+                }
+
+                height_m = height_m.max(candidate_m);
+            }
+        }
+
+        height_m * want
+    }
+
+    /// Rare finite ravines, each with a cut and a raised shoulder on both sides.
+    ///
+    /// Sites are independently hashed and bounded in both axes. Noise only
+    /// meanders the centreline; it never decides where a wall exists.
+    fn ravines(&self, x: f32, z: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
+        let want = detail_amt * lerp(0.65, 1.0, relief) * lerp(1.0, 0.40, alpine);
+        if want < 0.08 {
+            return 0.0;
+        }
+        let cell_x = (x / RAVINE_CELL_M).floor() as i64;
+        let cell_z = (z / RAVINE_CELL_M).floor() as i64;
+        let mut contribution_m = 0.0_f32;
+
+        for dz in -1_i64..=1_i64 {
+            for dx in -1_i64..=1_i64 {
+                let site_x = cell_x + dx;
+                let site_z = cell_z + dz;
+                let mut rng = CellRng::new(self.ravine_seed, site_x, site_z);
+                if rng.unit() >= RAVINE_CHANCE {
+                    continue;
+                }
+                let centre_x = (site_x as f32 + 0.5) * RAVINE_CELL_M
+                    + rng.range(-RAVINE_JITTER_M, RAVINE_JITTER_M);
+                let centre_z = (site_z as f32 + 0.5) * RAVINE_CELL_M
+                    + rng.range(-RAVINE_JITTER_M, RAVINE_JITTER_M);
+                let rel_x = x - centre_x;
+                let rel_z = z - centre_z;
+                const MAX_REACH_M: f32 = RAVINE_HALF_LENGTH_HIGH_M + RAVINE_HALF_WIDTH_HIGH_M * 3.0;
+                if rel_x.abs() > MAX_REACH_M || rel_z.abs() > MAX_REACH_M {
+                    continue;
+                }
+
+                let angle_rad = rng.range(0.0, std::f32::consts::TAU);
+                let half_length_m = rng.range(RAVINE_HALF_LENGTH_LOW_M, RAVINE_HALF_LENGTH_HIGH_M);
+                let half_width_m = rng.range(RAVINE_HALF_WIDTH_LOW_M, RAVINE_HALF_WIDTH_HIGH_M);
+                let depth_m = rng.range(RAVINE_DEPTH_LOW_M, RAVINE_DEPTH_HIGH_M);
+                let phase = rng.range(-80.0, 80.0);
+                let (sin_a, cos_a) = angle_rad.sin_cos();
+                let along_m = rel_x * cos_a + rel_z * sin_a;
+                if along_m.abs() >= half_length_m {
+                    continue;
+                }
+                let envelope = 1.0 - smoothstep(0.62, 1.0, along_m.abs() / half_length_m);
+                let wobble_m = self
+                    .ravine_dir
+                    .sample2((along_m + phase) * 0.00075, phase * 0.013)
+                    * half_width_m
+                    * 0.38
+                    * envelope;
+                let across_m = (-rel_x * sin_a + rel_z * cos_a - wobble_m).abs();
+
+                let cut_t = (across_m / half_width_m).clamp(0.0, 1.0);
+                let cut = (1.0 - cut_t).powf(1.35);
+                let shoulder_u =
+                    ((across_m - half_width_m) / (half_width_m * 1.20)).clamp(0.0, 1.0);
+                let shoulder = (4.0 * shoulder_u * (1.0 - shoulder_u)).powi(2);
+                let ravine_m = (-depth_m * cut + depth_m * 0.42 * shoulder) * envelope * want;
+                if ravine_m.abs() > contribution_m.abs() {
+                    contribution_m = ravine_m;
+                }
+            }
+        }
+
+        contribution_m
     }
 
     /// Pull atlas loft away from a neighbourhood in high relief.
@@ -539,6 +798,11 @@ impl ContinentalSurface {
             .elevation(&self.fields, p.x as f32, p.z as f32, 1.0)
     }
 
+    #[cfg(test)]
+    pub(super) fn debug_layers(&self, x: f32, z: f32) -> (f32, f32, f32, f32, f32, f32, f32) {
+        self.detail.debug_layers(&self.fields, x, z)
+    }
+
     /// Fully resolved column at `p`.
     ///
     /// Every tier of the visibility ladder, from the four-metre ground under the
@@ -674,6 +938,35 @@ impl ContinentalSurface {
             sheet,
             body,
         }
+    }
+
+    /// Column used by a drawn grid whose cells are wider than a river.
+    ///
+    /// A 125 m quad can straddle a 68 m channel without any corner landing in
+    /// it. Interpolating four dry banks then lays a solid slab over the river.
+    /// For an unresolved channel, vertices within half a cell diagonal of it
+    /// are conservatively capped to the real centreline bed. The ordinary
+    /// four- and twenty-five-metre grids resolve the channel and are unchanged.
+    pub(super) fn column_for_grid(&self, p: GlobalXZ, sample_m: f32, sink_m: f32) -> SurfaceColumn {
+        let mut column = self.column(p);
+        let xz = Vec2::new(p.x as f32, p.z as f32);
+        let Some(hit) = self.index.nearest_river(&self.hydro, xz) else {
+            return column;
+        };
+        let channel_width_m = hit.half_width.max(1.0) * 2.0;
+        if sample_m <= channel_width_m {
+            return column;
+        }
+        let half_diagonal_m = sample_m * std::f32::consts::FRAC_1_SQRT_2;
+        if hit.dist > hit.half_width + half_diagonal_m {
+            return column;
+        }
+
+        let centreline = self.column(GlobalXZ::at(f64::from(hit.at.x), f64::from(hit.at.y)));
+        // The builder subtracts `sink_m` after sampling. Include it here so the
+        // rendered coarse bed lands at the canonical centreline bed.
+        column.cap_ground(centreline.ground() + sink_m);
+        column
     }
 
     pub fn sample(&self, p: GlobalXZ) -> SurfaceSample {

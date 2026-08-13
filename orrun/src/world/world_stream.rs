@@ -99,9 +99,9 @@ pub const MEDIUM: TerrainTier = TerrainTier {
     span_m: 1_000.0,
     sample_m: 25.0,
     radius: 6,
-    // A 25 m grid shaves a few metres off a ridge; more than that, and the
-    // detailed ground it overlaps would poke through it instead.
-    sink_m: 6.0,
+    // A 25 m grid shaves a few metres off a ridge and a knoll face; more than
+    // that, and the detailed ground it overlaps would poke through it instead.
+    sink_m: 7.0,
     max_bakes_per_frame: 3,
     max_uploads_per_frame: 2,
 };
@@ -119,7 +119,7 @@ pub const FAR: TerrainTier = TerrainTier {
     // A 125 m grid cuts the top off a ridge and bridges a gorge; this covers
     // ninety-nine hundredths of the continent, and the cliffs it cannot cover
     // no sink could without leaving the tier hanging under the world.
-    sink_m: 25.0,
+    sink_m: 27.0,
     max_bakes_per_frame: 8,
     max_uploads_per_frame: 6,
 };

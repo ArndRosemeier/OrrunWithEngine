@@ -219,7 +219,9 @@ impl TerrainChunkBuilder {
         for sz in -1..(stride as i32 - 1) {
             for sx in -1..(stride as i32 - 1) {
                 let p = GlobalXZ::at(origin.x + sx as f64 * step, origin.z + sz as f64 * step);
-                let mut column = self.surface.column(p);
+                let mut column = self
+                    .surface
+                    .column_for_grid(p, self.sample_m as f32, self.sink_m);
                 if let Some(field) = &ponds {
                     field.carve(p, &mut column);
                 }
