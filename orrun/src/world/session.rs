@@ -11,6 +11,7 @@
 //! window gives it back on Escape or when it loses focus.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use engine::camera::{Camera, MAX_PITCH_DEGREES};
 use engine::error::EngineError;
@@ -22,6 +23,7 @@ use thiserror::Error;
 
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+use super::fauna::{FaunaError, FaunaLayer};
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
@@ -57,6 +59,9 @@ pub enum SessionError {
 
     #[error(transparent)]
     Settlement(#[from] SettlementError),
+
+    #[error(transparent)]
+    Fauna(#[from] FaunaError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -229,6 +234,8 @@ pub struct WorldSession {
     settlements: Option<SettlementLayer>,
     /// Draped roads and measured bridges.
     paths: Option<PathLayer>,
+    /// Near-player wildlife, once the animal meshes have been loaded.
+    fauna: Option<FaunaLayer>,
     state: SessionState,
     /// The request being loaded, until the water under it has been scanned and
     /// the spawn it resolves to is known.
@@ -248,6 +255,7 @@ impl WorldSession {
             scatter: None,
             settlements: None,
             paths: None,
+            fauna: None,
             state: SessionState::Atlas,
             entering: None,
             spawn: None,
@@ -315,6 +323,9 @@ impl WorldSession {
         if let Some(paths) = self.paths.as_mut() {
             paths.clear(world)?;
         }
+        if let Some(fauna) = self.fauna.as_mut() {
+            fauna.clear(world)?;
+        }
 
         self.stream.reset(world);
         world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
@@ -368,6 +379,12 @@ impl WorldSession {
         }
         if self.scatter.as_ref().is_some_and(ScatterLayer::busy) {
             return "growing cover…".into();
+        }
+        if self.fauna.as_ref().is_some_and(FaunaLayer::busy) {
+            return "reading animals…".into();
+        }
+        if self.fauna.as_ref().is_some_and(FaunaLayer::filling) {
+            return "wildlife…".into();
         }
         format!(
             "streaming ground… {:.0}%   ({} chunks resident)",
@@ -430,6 +447,7 @@ impl WorldSession {
                 self.settlements =
                     Some(SettlementLayer::install(world, self.surface.world_seed())?);
                 self.paths = Some(PathLayer::new());
+                self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
             }
             if !self.ponds.traced(request.requested()) {
                 return Ok(());
@@ -486,6 +504,7 @@ impl WorldSession {
             .map(|s| s.plots().to_vec())
             .unwrap_or_default();
         if let Some(scatter) = self.scatter.as_mut() {
+            let t = Instant::now();
             scatter.follow(
                 world,
                 &self.stream,
@@ -495,7 +514,47 @@ impl WorldSession {
                 &plots,
                 false,
             )?;
+            world.hitch_span(
+                "scatter",
+                hitch_ms(t),
+                format!(
+                    "placed={} backlog={} far_queue={} sow_ms={:.1} busy={}",
+                    scatter.placed_count(),
+                    scatter.upload_backlog(),
+                    scatter.far_backlog(),
+                    scatter.sow_ms(),
+                    scatter.busy(),
+                ),
+            );
             if scatter.busy() {
+                return Ok(());
+            }
+        }
+        if let Some(fauna) = self.fauna.as_mut() {
+            let t = Instant::now();
+            fauna.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                &self.ponds.field(),
+                &plots,
+                focus,
+                focus,
+                0.0,
+            )?;
+            world.hitch_span(
+                "fauna",
+                hitch_ms(t),
+                format!(
+                    "agents={} born={} died={} backlog={} loading={}",
+                    fauna.agent_count(),
+                    fauna.last_born(),
+                    fauna.last_died(),
+                    fauna.filling(),
+                    fauna.busy(),
+                ),
+            );
+            if fauna.filling() {
                 return Ok(());
             }
         }
@@ -548,7 +607,11 @@ impl WorldSession {
         let foot = player.position.horizontal();
         // Before the streamer, so a chunk is never baked against a window that
         // has stopped reaching it.
+        let t = Instant::now();
         self.ponds.follow(foot);
+        world.hitch_span("ponds", hitch_ms(t), String::new());
+
+        let t = Instant::now();
         let rebased = self.stream.maybe_rebase(world, foot)?;
         let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
             settlements.follow(
@@ -571,12 +634,24 @@ impl WorldSession {
             self.stream.set_house_plots(world, plots)?;
         }
         self.stream.sync(world, foot, Some(player.heading))?;
+        world.hitch_span(
+            "stream",
+            hitch_ms(t),
+            format!(
+                "resident={} pending={} walked_pending={} rebase={rebased} hamlet_rebuild={rebuilt} houses={}",
+                self.stream.resident_count(),
+                self.stream.pending_count(),
+                self.stream.walked_pending_count(),
+                self.settlements.as_ref().map_or(0, SettlementLayer::placed_count),
+            ),
+        );
         let plots = self
             .settlements
             .as_ref()
             .map(|s| s.plots().to_vec())
             .unwrap_or_default();
         if let Some(scatter) = self.scatter.as_mut() {
+            let t = Instant::now();
             scatter.follow(
                 world,
                 &self.stream,
@@ -586,6 +661,18 @@ impl WorldSession {
                 &plots,
                 rebased,
             )?;
+            world.hitch_span(
+                "scatter",
+                hitch_ms(t),
+                format!(
+                    "placed={} backlog={} far_queue={} sow_ms={:.1} busy={}",
+                    scatter.placed_count(),
+                    scatter.upload_backlog(),
+                    scatter.far_backlog(),
+                    scatter.sow_ms(),
+                    scatter.busy(),
+                ),
+            );
         }
         let hamlets = self
             .settlements
@@ -593,6 +680,7 @@ impl WorldSession {
             .map(|s| s.hamlets().to_vec())
             .unwrap_or_default();
         if let Some(paths) = self.paths.as_mut() {
+            let t = Instant::now();
             paths.follow(
                 world,
                 &self.surface,
@@ -603,6 +691,32 @@ impl WorldSession {
                 self.stream.walked_pending_count(),
                 rebased,
             )?;
+            world.hitch_span("paths", hitch_ms(t), format!("hamlets={}", hamlets.len()));
+        }
+        if let Some(fauna) = self.fauna.as_mut() {
+            let t = Instant::now();
+            fauna.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                &self.ponds.field(),
+                &plots,
+                foot,
+                foot,
+                input.dt,
+            )?;
+            world.hitch_span(
+                "fauna",
+                hitch_ms(t),
+                format!(
+                    "agents={} born={} died={} backlog={} loading={}",
+                    fauna.agent_count(),
+                    fauna.last_born(),
+                    fauna.last_died(),
+                    fauna.filling(),
+                    fauna.busy(),
+                ),
+            );
         }
 
         match player.mode {
@@ -662,6 +776,11 @@ impl WorldSession {
             .map_or(0, SettlementLayer::placed_count)
     }
 
+    /// Live animals around the player.
+    pub fn fauna_count(&self) -> usize {
+        self.fauna.as_ref().map_or(0, FaunaLayer::agent_count)
+    }
+
     /// What the last sow of ground cover took on its own thread.
     pub fn sow_ms(&self) -> f32 {
         self.scatter.as_ref().map_or(0.0, ScatterLayer::sow_ms)
@@ -679,6 +798,10 @@ fn wrap_degrees(degrees: f32) -> f32 {
     } else {
         wrapped
     }
+}
+
+fn hitch_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f32() * 1000.0
 }
 
 fn apply_walk_height(player: &mut Player, ground: Option<f32>, jump: bool, dt: f32) {

@@ -136,6 +136,11 @@ pub fn path_for(seed: i32, size: usize) -> Result<PathBuf, SaveError> {
     Ok(save_dir()?.join(format!("stand-{seed}-{size}.json")))
 }
 
+/// `%APPDATA%/Orrun` on Windows, XDG or `~/.local/share/orrun` elsewhere.
+pub fn data_dir() -> Result<PathBuf, SaveError> {
+    save_dir()
+}
+
 fn save_dir() -> Result<PathBuf, SaveError> {
     if let Some(appdata) = std::env::var_os("APPDATA") {
         return Ok(Path::new(&appdata).join("Orrun"));

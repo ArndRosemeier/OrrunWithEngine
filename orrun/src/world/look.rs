@@ -5,7 +5,7 @@
 
 use engine::color::rgb;
 use engine::texture::{TerrainAlbedo, TerrainMaterialDesc, WaterMaterialDesc};
-use engine::world::{Haze, Sky, World};
+use engine::world::{Haze, ShadowSettings, Sky, World};
 
 use super::chunk_mesh::WATER_DEPTH_SCALE_M;
 use super::world_stream::FAR_VIEW_M;
@@ -27,12 +27,22 @@ const VISIBILITY_M: f32 = 12_000.0;
 /// so the scatter reads it rather than guessing.
 pub const SUN_DIR: (f32, f32, f32) = (0.62, 0.68, 0.38);
 
+/// Height above sea where shaded, gentle ground can hold snow.
+///
+/// Shared with scatter so a bush is not standing on a cap the terrain shader
+/// has already painted white. Shaded faces hold snow lower; sunny ones stay
+/// rock longer. Full cover is a band, not a contour, and steep faces shed it.
+pub const SNOW_LINE_M: f32 = 1_050.0;
+pub const SNOW_FULL_M: f32 = 2_100.0;
+pub const SNOW_SLOPE_START: f32 = 0.32;
+pub const SNOW_SLOPE_END: f32 = 0.68;
+
 /// Mid-morning sun, a cool northern sky, and enough fill that a north slope
 /// is still readable.
 ///
 /// The sky, the haze, and the clear colour share one horizon so distant ground
-/// dissolves into the same band the dome is already showing. Nothing casts
-/// shadows yet, so ambient is doing the work of bounced light.
+/// dissolves into the same band the dome is already showing. Shadows are the
+/// Engine default: height-marched terrain, cascaded depth for trees and animals.
 pub fn install_daylight(world: &mut World) {
     let sky = Sky::daylight();
     world.set_sun(SUN_DIR, 0.34);
@@ -42,6 +52,7 @@ pub fn install_daylight(world: &mut World) {
     world.set_haze(Some(
         Haze::new(sky.horizon, VISIBILITY_M).thinning_above(0.0, 1_400.0),
     ));
+    world.set_shadows(Some(ShadowSettings::default()));
     world
         .set_view_distance(FAR_VIEW_M)
         .expect("a horizon-scale view distance");
@@ -80,12 +91,10 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
             // Textures carry the soil now; tint is only the last shade under a
             // stand, not the whole meadow going one green.
             tint_strength: 0.18,
-            // Shaded faces hold snow lower; sunny ones stay rock longer. Full
-            // cover is a band, not a contour, and steep faces shed it.
-            snow_line_m: 1_050.0,
-            snow_full_m: 2_100.0,
-            snow_slope_start: 0.32,
-            snow_slope_end: 0.68,
+            snow_line_m: SNOW_LINE_M,
+            snow_full_m: SNOW_FULL_M,
+            snow_slope_start: SNOW_SLOPE_START,
+            snow_slope_end: SNOW_SLOPE_END,
         })
         .expect("terrain material");
     world.set_default_terrain_material(Some(ground));
@@ -122,5 +131,6 @@ mod tests {
         assert_eq!(sky.horizon, haze.color);
         assert_eq!(world.clear_color, sky.horizon);
         assert!(world.sky().is_some());
+        assert_eq!(world.shadows(), Some(ShadowSettings::default()));
     }
 }

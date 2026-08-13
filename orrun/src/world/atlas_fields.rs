@@ -15,6 +15,8 @@ pub struct AtlasFields {
     pub relief01: Vec<f32>,
     /// Fraction of the cell the atlas expects under canopy.
     pub canopy01: Vec<f32>,
+    /// Nearest-cell landcover. Biomes are labels, not a field you interpolate.
+    biome: Vec<Biome>,
 }
 
 impl AtlasFields {
@@ -26,13 +28,15 @@ impl AtlasFields {
         let mut humidity01 = vec![0.0; count];
         let mut relief01 = vec![0.0; count];
         let mut canopy01 = vec![0.0; count];
+        let mut biome = vec![Biome::Ocean; count];
 
         for i in 0..count {
             let cell = atlas.cells[i];
             elevation_m[i] = pack::elevation_to_metres(pack::elevation(cell)) as f32;
             humidity01[i] = pack::humidity(cell) as f32 / 255.0;
             relief01[i] = pack::relief(cell) as f32 / 63.0;
-            canopy01[i] = canopy_of(pack::biome(cell), humidity01[i]);
+            biome[i] = pack::biome(cell);
+            canopy01[i] = canopy_of(biome[i], humidity01[i]);
         }
 
         Self {
@@ -42,6 +46,7 @@ impl AtlasFields {
             humidity01,
             relief01,
             canopy01,
+            biome,
         }
     }
 
@@ -90,6 +95,13 @@ impl AtlasFields {
 
     pub fn sample_smooth(&self, field: &[f32], world_x: f32, world_z: f32) -> f32 {
         self.sample_bicubic(field, world_x, world_z)
+    }
+
+    /// Atlas landcover of the kilometre cell that contains `world_x`, `world_z`.
+    pub fn biome_at(&self, world_x: f32, world_z: f32) -> Biome {
+        let ax = (world_x / CELL_METRES).floor() as i32;
+        let az = (world_z / CELL_METRES).floor() as i32;
+        self.biome[self.index(ax, az)]
     }
 }
 

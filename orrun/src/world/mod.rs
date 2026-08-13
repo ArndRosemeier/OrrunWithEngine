@@ -10,6 +10,7 @@ mod atlas_fields;
 mod chunk_mesh;
 mod coords;
 mod entry;
+mod fauna;
 mod footprint;
 mod hydro_geom;
 mod look;
@@ -33,6 +34,7 @@ pub use coords::{
     CHUNK_SPAN_M,
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaRole, FaunaSpec};
 pub use footprint::HousePlot;
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;

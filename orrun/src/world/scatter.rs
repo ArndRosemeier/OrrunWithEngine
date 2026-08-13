@@ -37,7 +37,7 @@ use glam::{Vec2, Vec3};
 
 use super::coords::CHUNK_SPAN_M;
 use super::footprint::{self, HousePlot};
-use super::look::SUN_DIR;
+use super::look::{SNOW_FULL_M, SNOW_LINE_M, SNOW_SLOPE_END, SNOW_SLOPE_START, SUN_DIR};
 use super::ponds::PondField;
 use super::rng::{hash3, unit01, value_noise, CellRng};
 use super::surface::{lerp, smoothstep, ContinentalSurface, SurfaceColumn};
@@ -81,6 +81,10 @@ const MAX_TREE_QUEUE: usize = 1_000;
 const MAX_TREES_PER_FRAME: usize = 40;
 /// Grass / rock / bush bins to upload per walking frame.
 const MAX_OTHER_BINS_PER_FRAME: usize = 4;
+/// Horizon pine *draw* cells to upload per frame. Each is a kilometre, not 200 m.
+const MAX_FAR_BINS_PER_FRAME: usize = 8;
+/// How many walked chunks fold into one far draw call. 5 × 200 m = 1 km.
+const FAR_DRAW_FOLD: i32 = 5;
 
 /// Highest ground trees still grow on, and the band they thin out over.
 const TREELINE_M: f32 = 780.0;
@@ -320,6 +324,8 @@ pub struct GroundCover {
     /// How square the ground faces the sun: 0 in the shade of its own slope,
     /// 0.5 on the flat, 1 straight into it.
     pub aspect: f32,
+    /// How much of this ground the terrain shader will draw as snow.
+    pub snow: f32,
 }
 
 /// Which way the drawn ground falls under one point.
@@ -349,6 +355,33 @@ impl Fall {
         let sun = Vec2::new(SUN_DIR.0, SUN_DIR.2).normalize_or_zero();
         0.5 + 0.5 * self.downhill.dot(sun) * smoothstep(0.0, 0.35, self.steep)
     }
+
+    /// `n · light`, matching the terrain shader's snow shade.
+    fn ndl(self) -> f32 {
+        let ny = (1.0 - self.steep).clamp(0.0, 1.0);
+        let horiz = (1.0 - ny * ny).max(0.0).sqrt();
+        let normal = Vec3::new(self.downhill.x * horiz, ny, self.downhill.y * horiz);
+        let sun = Vec3::new(SUN_DIR.0, SUN_DIR.1, SUN_DIR.2).normalize();
+        normal.dot(sun).max(0.0)
+    }
+}
+
+/// How much of this ground the terrain shader will draw as snow, in `[0, 1]`.
+///
+/// Same line, full-cover height, and slope-cling as the terrain material,
+/// so a bush is not standing on a white cap the GPU has already covered.
+fn snow_cover(height_above_sea: f32, fall: Fall) -> f32 {
+    let shade = 1.0 - fall.ndl();
+    let line = lerp(SNOW_LINE_M + 160.0, SNOW_LINE_M - 240.0, shade);
+    let mut snow = smoothstep(line, SNOW_FULL_M, height_above_sea);
+    let cling = 1.0 - smoothstep(SNOW_SLOPE_START, SNOW_SLOPE_END, fall.steep);
+    snow = snow * cling + snow * snow * 0.22 * (1.0 - cling);
+    snow.clamp(0.0, 1.0)
+}
+
+/// How much rooted cover still belongs once the ground reads as snow.
+fn thaw(snow: f32) -> f32 {
+    1.0 - smoothstep(0.04, 0.28, snow)
 }
 
 impl GroundCover {
@@ -390,16 +423,24 @@ impl GroundCover {
         let flat = (1.0 - smoothstep(0.18, 0.62, slope)).clamp(0.0, 1.0);
         let beach = 1.0 - smoothstep(0.0, 6.0, ground_m - sea);
         let alpine = smoothstep(TREELINE_M - TREELINE_FADE_M, TREELINE_M, ground_m);
+        let snow = snow_cover(ground_m - sea, fall);
+        // Green tufts and scrub on a white cap read as a mistake; stones stay.
+        let rooted = thaw(snow);
 
         // Torn canopy edges: a kilometre-wide biome cell would otherwise fade
         // into open ground as one smooth gradient, with no clearings.
         let tree = smoothstep(0.20, 0.58, canopy * shade + canopy_noise * 0.30)
             * flat
             * (1.0 - alpine)
-            * (1.0 - beach);
+            * (1.0 - beach)
+            * rooted;
 
-        let grass =
-            (0.30 + 0.62 * humidity) * shade * flat * (1.0 - 0.75 * beach) * (1.0 - 0.35 * alpine);
+        let grass = (0.30 + 0.62 * humidity)
+            * shade
+            * flat
+            * (1.0 - 0.75 * beach)
+            * (1.0 - 0.35 * alpine)
+            * rooted;
 
         // Stones come loose where the ground is steep, high, or bare.
         let rock =
@@ -408,11 +449,13 @@ impl GroundCover {
         // Scrub is the cover of open ground: it fills the gaps a wood leaves
         // and the ground a wood never took. A floor so low that dry country
         // reads as empty is what left whole hillsides as grass and nothing.
+        // Alpine keeps a thinner stand of low shrubs; snow takes even those.
         let bush = (0.22 + 0.32 * humidity)
             * flat
             * (1.0 - 0.85 * beach)
             * lerp(1.0, 0.48, alpine)
-            * lerp(0.40, 1.0, 1.0 - tree);
+            * lerp(0.40, 1.0, 1.0 - tree)
+            * rooted;
 
         Self {
             grass: grass.clamp(0.0, 1.0),
@@ -432,6 +475,7 @@ impl GroundCover {
             footing: flat,
             bank: 0.0,
             aspect,
+            snow,
         }
     }
 
@@ -446,12 +490,14 @@ impl GroundCover {
         self.moisture = (self.moisture + 0.45 * self.bank).clamp(0.0, 1.0);
         // Gallery woodland: a line of trees follows water across ground far too
         // dry to carry a wood of its own.
-        self.tree = (self.tree + 0.40 * self.bank * (1.0 - self.alpine)).clamp(0.0, 1.0);
+        self.tree =
+            (self.tree + 0.40 * self.bank * (1.0 - self.alpine) * thaw(self.snow)).clamp(0.0, 1.0);
         self.openness = (1.0 - self.tree).clamp(0.0, 1.0);
         // Scrub grows anywhere flat and damp enough, and crowds the edge of the
         // water on top of that — added rather than scaled, or a bank running
-        // through dry country would have nothing on it.
-        let fringe = self.bank * self.footing * (1.0 - self.alpine);
+        // through dry country would have nothing on it. Snow still wins: a
+        // frozen shore is not a reed-bed's cousin in green shrubs.
+        let fringe = self.bank * self.footing * (1.0 - self.alpine) * thaw(self.snow);
         self.bush = (self.bush + 0.34 * fringe).clamp(0.0, 1.0);
         self.reed = (0.45 + 0.5 * self.moisture).clamp(0.0, 1.0) * self.bank;
         self
@@ -492,6 +538,11 @@ impl PropTaste {
         if stem.contains("sparse") {
             taste.dry = 0.75;
             taste.open = 0.8;
+        }
+        // Valley scrub; `bush_alpine_low` overrides below. Neutral 0.5 would
+        // still pick berry and lush clumps on a snow line.
+        if stem.contains("bush") {
+            taste.alpine = 0.1;
         }
         if stem.contains("alpine") || stem.contains("talus") || stem.contains("basalt") {
             taste.alpine = 1.0;
@@ -728,8 +779,12 @@ pub struct ScatterLayer {
     tree_shown: HashMap<(usize, i32, i32), usize>,
     /// Walked-tier cells that already have full-res trees, so far proxies hide.
     near_tree_bins: HashSet<(i32, i32)>,
-    /// Far proxies in render space, so a tree promotion does not rebuild them.
-    far_live: Vec<((i32, i32), Place)>,
+    /// Far proxies in render space, one list per walked chunk.
+    far_live: HashMap<(i32, i32), Vec<Place>>,
+    /// GPU bin for each far cell. The prototype [`far_entity`] stays empty.
+    far_bins: HashMap<(i32, i32), EntityId>,
+    /// Far cells not yet on the GPU, nearest-last (FIFO after a sow).
+    far_queue: VecDeque<(i32, i32)>,
 }
 
 impl std::fmt::Debug for ScatterLayer {
@@ -747,7 +802,7 @@ impl ScatterLayer {
     /// Upload every catalogue mesh once; nothing is placed yet.
     ///
     /// Bin entities for the walked ring are spawned on demand as the window
-    /// fills. The far-band proxy is one mesh, one entity.
+    /// fills. Far pines share one mesh and draw in kilometre bins.
     pub fn install(
         world: &mut World,
         catalog: &ScatterCatalog,
@@ -768,6 +823,11 @@ impl ScatterLayer {
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
             let prototype = world.spawn_instanced(mesh);
+            if asset.class != PropClass::Tree {
+                world
+                    .set_casts_shadow(prototype, false)
+                    .expect("just spawned prop prototype");
+            }
             props.push(LiveProp {
                 class: asset.class,
                 taste: PropTaste::of(&stem),
@@ -776,9 +836,13 @@ impl ScatterLayer {
             });
         }
         let far_mesh = pine_proxy().expect("far-band pine proxy");
+        let far_entity = world.spawn_instanced(far_mesh);
+        world
+            .set_casts_shadow(far_entity, false)
+            .expect("just spawned far pine prototype");
         Ok(Self {
             props,
-            far_entity: world.spawn_instanced(far_mesh),
+            far_entity,
             seed: seed as u32 as u64,
             centre: None,
             resident_chunks: 0,
@@ -796,7 +860,9 @@ impl ScatterLayer {
             other_queue: VecDeque::new(),
             tree_shown: HashMap::new(),
             near_tree_bins: HashSet::new(),
-            far_live: Vec::new(),
+            far_live: HashMap::new(),
+            far_bins: HashMap::new(),
+            far_queue: VecDeque::new(),
         })
     }
 
@@ -815,6 +881,16 @@ impl ScatterLayer {
         self.sow_ms
     }
 
+    /// Bins still waiting to upload this window.
+    pub fn upload_backlog(&self) -> usize {
+        self.tree_queue.len() + self.other_queue.len()
+    }
+
+    /// Horizon pine cells not yet on the GPU.
+    pub fn far_backlog(&self) -> usize {
+        self.far_queue.len()
+    }
+
     /// Take everything down (leaving the world).
     ///
     /// A sow already in flight is abandoned rather than waited for: whatever it
@@ -827,6 +903,10 @@ impl ScatterLayer {
             prop.bins.clear();
         }
         world.set_instances(self.far_entity, &[])?;
+        for id in self.far_bins.values().copied() {
+            world.despawn(id);
+        }
+        self.far_bins.clear();
         self.pending = None;
         self.far_pending = None;
         self.sown.clear();
@@ -843,6 +923,7 @@ impl ScatterLayer {
         self.tree_shown.clear();
         self.near_tree_bins.clear();
         self.far_live.clear();
+        self.far_queue.clear();
         Ok(())
     }
 
@@ -883,8 +964,7 @@ impl ScatterLayer {
                 let (sown, _) = pending.job.join().expect("scatter far thread");
                 self.far_sown = sown;
                 self.far_centre = Some(pending.focus);
-                self.rebuild_far_live(world.render_origin());
-                self.upload_far(world)?;
+                self.apply_far_sown(world)?;
                 changed = true;
             } else {
                 self.far_pending = Some(pending);
@@ -896,8 +976,7 @@ impl ScatterLayer {
                 changed = true;
             }
             if !self.far_sown.is_empty() {
-                self.rebuild_far_live(world.render_origin());
-                self.upload_far(world)?;
+                self.apply_far_sown(world)?;
                 changed = true;
             }
         }
@@ -907,11 +986,9 @@ impl ScatterLayer {
         }
         let trees = self.drain_trees(world, MAX_TREES_PER_FRAME)?;
         let other = self.drain_other(world, MAX_OTHER_BINS_PER_FRAME)?;
-        if trees {
-            self.upload_far(world)?;
-        }
+        let far = self.drain_far(world, MAX_FAR_BINS_PER_FRAME)?;
         self.follow_far(surface, ponds, focus)?;
-        Ok(changed || trees || other)
+        Ok(changed || trees || other || far)
     }
 
     fn follow_near(
@@ -1123,16 +1200,15 @@ impl ScatterLayer {
             if done {
                 if self.near_tree_bins.insert((job.bx, job.bz)) {
                     completed_cell = true;
+                    self.hide_far_bin(world, (job.bx, job.bz))?;
                 }
             } else {
                 self.tree_queue.push_front(job);
                 break;
             }
         }
-        self.recount_near();
-        if completed_cell {
-            self.far_live
-                .retain(|(bin, _)| !self.near_tree_bins.contains(bin));
+        if left != budget {
+            self.recount_near();
         }
         Ok(completed_cell)
     }
@@ -1218,8 +1294,15 @@ impl ScatterLayer {
         }
     }
 
+    fn apply_far_sown(&mut self, world: &mut World) -> EngineResult<()> {
+        self.rebuild_far_live(world.render_origin());
+        self.retire_stale_far_bins(world);
+        self.queue_all_far();
+        Ok(())
+    }
+
     fn rebuild_far_live(&mut self, origin: RenderOrigin) {
-        self.far_live.clear();
+        let mut grouped: HashMap<(i32, i32), Vec<Place>> = HashMap::new();
         for sprig in &self.far_sown {
             let bin = xz_bin(sprig.at.horizontal());
             if self.near_tree_bins.contains(&bin) {
@@ -1229,20 +1312,114 @@ impl ScatterLayer {
                 continue;
             };
             let at = render.vec3();
-            self.far_live.push((
-                bin,
+            grouped.entry(bin).or_default().push(
                 Place::new(at.x, at.y, at.z)
                     .with_yaw_deg(sprig.yaw_deg)
                     .with_scale(sprig.scale),
-            ));
+            );
+        }
+        self.far_live = grouped;
+    }
+
+    fn retire_stale_far_bins(&mut self, world: &mut World) {
+        let stale: Vec<(i32, i32)> = self
+            .far_bins
+            .keys()
+            .copied()
+            .filter(|draw| !self.draw_bin_has_live(*draw))
+            .collect();
+        for draw in stale {
+            if let Some(id) = self.far_bins.remove(&draw) {
+                world.despawn(id);
+            }
+        }
+        self.recount_far();
+    }
+
+    fn queue_all_far(&mut self) {
+        self.far_queue.clear();
+        let mut seen = HashSet::new();
+        for cell in self.far_live.keys() {
+            let draw = far_draw_bin(*cell);
+            if seen.insert(draw) {
+                self.far_queue.push_back(draw);
+            }
         }
     }
 
-    fn upload_far(&mut self, world: &mut World) -> EngineResult<()> {
-        let places: Vec<Place> = self.far_live.iter().map(|(_, p)| *p).collect();
-        self.far_placed = places.len();
-        world.set_instances(self.far_entity, &places)?;
+    fn hide_far_bin(&mut self, world: &mut World, cell: (i32, i32)) -> EngineResult<()> {
+        self.far_live.remove(&cell);
+        self.refresh_far_draw(world, far_draw_bin(cell))?;
+        self.recount_far();
         Ok(())
+    }
+
+    fn refresh_far_draw(&mut self, world: &mut World, draw: (i32, i32)) -> EngineResult<()> {
+        let places = self.places_for_draw_bin(draw);
+        if places.is_empty() {
+            self.far_queue.retain(|b| *b != draw);
+            if let Some(id) = self.far_bins.remove(&draw) {
+                world.despawn(id);
+            }
+            return Ok(());
+        }
+        if let Some(&id) = self.far_bins.get(&draw) {
+            world.set_instances(id, &places)?;
+        }
+        Ok(())
+    }
+
+    fn drain_far(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+        let mut wrote = false;
+        for _ in 0..budget {
+            let Some(draw) = self.far_queue.pop_front() else {
+                break;
+            };
+            let places = self.places_for_draw_bin(draw);
+            if places.is_empty() {
+                if let Some(id) = self.far_bins.remove(&draw) {
+                    world.despawn(id);
+                }
+                continue;
+            }
+            let id = match self.far_bins.get(&draw) {
+                Some(id) => *id,
+                None => {
+                    let id = world.spawn_instanced_like(self.far_entity)?;
+                    self.far_bins.insert(draw, id);
+                    id
+                }
+            };
+            world.set_instances(id, &places)?;
+            wrote = true;
+        }
+        if wrote {
+            self.recount_far();
+        }
+        Ok(wrote)
+    }
+
+    fn draw_bin_has_live(&self, draw: (i32, i32)) -> bool {
+        self.far_live.keys().any(|cell| far_draw_bin(*cell) == draw)
+    }
+
+    fn places_for_draw_bin(&self, draw: (i32, i32)) -> Vec<Place> {
+        let mut places = Vec::new();
+        for (cell, list) in &self.far_live {
+            if far_draw_bin(*cell) == draw {
+                places.extend_from_slice(list);
+            }
+        }
+        places
+    }
+
+    fn recount_far(&mut self) {
+        self.far_placed = self
+            .far_live
+            .iter()
+            .filter(|(cell, _)| self.far_bins.contains_key(&far_draw_bin(**cell)))
+            .map(|(_, list)| list.len())
+            .sum();
     }
 }
 
@@ -1539,6 +1716,13 @@ fn stone_colour(asset: &PropAsset) -> Option<Color> {
 }
 
 /// Run `job`, reporting how long it took in milliseconds.
+fn far_draw_bin(cell: (i32, i32)) -> (i32, i32) {
+    (
+        cell.0.div_euclid(FAR_DRAW_FOLD),
+        cell.1.div_euclid(FAR_DRAW_FOLD),
+    )
+}
+
 fn xz_bin(p: GlobalXZ) -> (i32, i32) {
     (
         (p.x / CHUNK_SPAN_M).floor() as i32,
@@ -1612,6 +1796,7 @@ mod tests {
     use super::*;
     use crate::atlas::ContinentAtlas;
     use crate::world::ponds::PondField;
+    use glam::Vec2;
 
     fn world(seed: i32) -> (Arc<ContinentalSurface>, PondField) {
         let atlas = ContinentAtlas::generate(seed, 64);
@@ -1665,6 +1850,14 @@ mod tests {
         let p = GlobalXZ::at(250.0, -50.0);
         assert_eq!(xz_bin(p), (1, -1));
         assert_eq!(xz_bin(GlobalXZ::at(0.0, 0.0)), (0, 0));
+    }
+
+    #[test]
+    fn far_draw_bins_fold_five_walked_chunks() {
+        assert_eq!(far_draw_bin((0, 0)), (0, 0));
+        assert_eq!(far_draw_bin((4, 4)), (0, 0));
+        assert_eq!(far_draw_bin((5, -1)), (1, -1));
+        assert_eq!(far_draw_bin((-1, -6)), (-1, -2));
     }
 
     #[test]
@@ -1775,5 +1968,87 @@ mod tests {
             )),
             "a different seed grew the same stand"
         );
+    }
+
+    #[test]
+    fn flat_high_ground_holds_snow_and_lowland_does_not() {
+        let fall = Fall::default();
+        assert!(snow_cover(80.0, fall) < 0.01, "a meadow is already snow");
+        let cap = snow_cover(1_800.0, fall);
+        assert!(cap > 0.5, "a high plateau is not snow: {cap}");
+        assert_eq!(thaw(cap), 0.0, "rooted cover still belongs on a snow cap");
+    }
+
+    #[test]
+    fn steep_faces_shed_snow_that_a_plateau_keeps() {
+        let high = 1_800.0;
+        let flat = snow_cover(high, Fall::default());
+        let cliff = snow_cover(
+            high,
+            Fall {
+                steep: 0.85,
+                downhill: Vec2::new(0.0, 1.0),
+            },
+        );
+        assert!(
+            cliff < flat * 0.35,
+            "a cliff kept snow ({cliff}) the plateau holds ({flat})"
+        );
+    }
+
+    #[test]
+    fn bushes_and_grass_do_not_stand_on_snow() {
+        let (surface, _) = world(20260809);
+        let p = forested(&surface);
+        let low = GroundCover::sample(&surface, p, 80.0, Fall::default(), 0.0);
+        let cap = GroundCover::sample(&surface, p, 1_800.0, Fall::default(), 0.0);
+        assert!(low.bush > 0.08, "open lowland grew no scrub: {}", low.bush);
+        assert!(
+            low.grass > 0.15,
+            "open lowland grew no grass: {}",
+            low.grass
+        );
+        assert!(
+            cap.snow > 0.5,
+            "1 800 m on the flat is not snow: {}",
+            cap.snow
+        );
+        assert!(
+            cap.bush < 0.02,
+            "scrub still belongs on a snow cap: {}",
+            cap.bush
+        );
+        assert!(
+            cap.grass < 0.02,
+            "grass tufts still belong on a snow cap: {}",
+            cap.grass
+        );
+        assert!(cap.rock > low.rock, "high ground lost its stones");
+    }
+
+    #[test]
+    fn alpine_scrub_still_belongs_below_the_snow() {
+        let (surface, _) = world(20260809);
+        let p = forested(&surface);
+        // Treeline is complete by 780 m; snow on the flat starts around 1 050 m.
+        let alpine = GroundCover::sample(&surface, p, 820.0, Fall::default(), 0.0);
+        assert!(
+            alpine.snow < 0.05,
+            "just above the treeline is already snow: {}",
+            alpine.snow
+        );
+        assert!(
+            alpine.bush > 0.04,
+            "rocky alpine grew no low scrub: {}",
+            alpine.bush
+        );
+        assert_eq!(alpine.tree, 0.0, "trees climbed past the treeline");
+    }
+
+    #[test]
+    fn valley_bushes_do_not_taste_alpine() {
+        assert!(PropTaste::of("bush_broad_lush").alpine < 0.2);
+        assert!(PropTaste::of("bush_berries").alpine < 0.2);
+        assert_eq!(PropTaste::of("bush_alpine_low").alpine, 1.0);
     }
 }

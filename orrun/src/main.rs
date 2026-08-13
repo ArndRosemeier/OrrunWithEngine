@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use engine::egui::{
     self, Align2, Color32, ColorImage, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
@@ -30,6 +31,7 @@ use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
 use orrun::save::SavedStand;
+use orrun::settings::{self, Settings};
 use orrun::world::{
     install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Heading,
     Locomotion, MapPoint, SessionState, WorldEntryRequest, WorldSession,
@@ -594,6 +596,11 @@ fn main() {
     let mut title_art: Option<TextureHandle> = None;
     let mut on_title = true;
     let mut dressed = false;
+    let mut settings_ui = SettingsUi {
+        open: false,
+        prefs: Settings::load().unwrap_or_else(|err| panic!("{err}")),
+        applied: false,
+    };
 
     let last_stand = Arc::new(Mutex::new(remembered));
     let stand_in_loop = Arc::clone(&last_stand);
@@ -601,6 +608,10 @@ fn main() {
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);
+        }
+        if !settings_ui.applied {
+            apply_hitch_log(world, settings_ui.prefs.hitch_log, false);
+            settings_ui.applied = true;
         }
 
         if let Some(job) = generating.take() {
@@ -624,7 +635,13 @@ fn main() {
 
         if !dressed {
             if let Some(session) = &session {
+                let t = Instant::now();
                 install_materials(world, seed, session.surface().sea_surface_z());
+                world.hitch_span(
+                    "materials",
+                    t.elapsed().as_secs_f32() * 1000.0,
+                    format!("seed={seed}"),
+                );
                 dressed = true;
             }
         }
@@ -659,6 +676,7 @@ fn main() {
                     );
                 }
             }
+            draw_settings(&mut settings_ui, world, frame);
             return;
         }
 
@@ -698,6 +716,7 @@ fn main() {
             }
             SessionState::World => draw_world_hud(session, world, frame),
         }
+        draw_settings(&mut settings_ui, world, frame);
     });
 
     let stand = *last_stand.lock().expect("last stand");
@@ -1160,6 +1179,85 @@ fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame, art
         });
 }
 
+struct SettingsUi {
+    open: bool,
+    prefs: Settings,
+    applied: bool,
+}
+
+fn apply_hitch_log(world: &mut World, on: bool, replace: bool) {
+    if on {
+        let path = settings::hitch_log_path().unwrap_or_else(|err| panic!("{err}"));
+        if replace {
+            settings::begin_hitch_log(&path).unwrap_or_else(|err| panic!("{err}"));
+        }
+        world.set_hitch_log(Some(path));
+    } else {
+        world.set_hitch_log(None);
+    }
+}
+
+fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    egui::Area::new(egui::Id::new("settings_btn"))
+        .anchor(Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        .order(egui::Order::Foreground)
+        .show(&ctx, |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Settings")
+                            .size(14.0)
+                            .color(Color32::from_rgb(235, 230, 210)),
+                    )
+                    .fill(Color32::from_rgba_unmultiplied(10, 14, 20, 200))
+                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(168, 186, 204))),
+                )
+                .clicked()
+            {
+                ui_state.open = true;
+                world.set_pointer_lock(false);
+            }
+        });
+
+    let mut hitch = ui_state.prefs.hitch_log;
+    let log_path = settings::hitch_log_path().ok();
+    frame.ui.modal("Settings", &mut ui_state.open, |panel, open| {
+        let ui = panel.ui();
+        if ui.checkbox(&mut hitch, "Hitch log").changed() {
+            apply_hitch_log(world, hitch, hitch);
+            ui_state.prefs.hitch_log = hitch;
+            ui_state
+                .prefs
+                .write()
+                .unwrap_or_else(|err| panic!("{err}"));
+        }
+        if hitch {
+            let where_to = log_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(no data directory)".into());
+            ui.label(
+                egui::RichText::new(format!(
+                    "Frames over 33 ms append to\n{where_to}\nTurning this on replaces the last log."
+                ))
+                .size(13.0)
+                .color(Color32::from_rgb(180, 188, 196)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Off. The console is not written.")
+                    .size(13.0)
+                    .color(Color32::from_rgb(180, 188, 196)),
+            );
+        }
+        ui.add_space(8.0);
+        if ui.button("Close").clicked() {
+            *open = false;
+        }
+    });
+}
+
 fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     if ctx.input(|i| i.key_pressed(egui::Key::M)) {
@@ -1188,11 +1286,12 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         "click to look"
     };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  {:.0} fps  |  F fly  |  Space jump  |  M map  |  {mouse}",
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps  |  F fly  |  Space jump  |  M map  |  {mouse}",
         p.x,
         p.z,
         p.y,
         session.stream().resident_count(),
+        session.fauna_count(),
         frame.fps,
     );
     // Non-interactive: the pointer belongs to mouse-look, not to the HUD.

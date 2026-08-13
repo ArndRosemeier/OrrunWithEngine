@@ -3,6 +3,7 @@
 pub mod atlas;
 pub mod hamlet;
 pub mod save;
+pub mod settings;
 pub mod world;
 
 pub use atlas::{AtlasError, ContinentAtlas};
