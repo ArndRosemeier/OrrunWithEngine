@@ -51,8 +51,8 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
 
 #[test]
 fn vendored_kit_pieces_keep_their_baked_albedo() {
-    // Kit cells bake the look into a baseColor map. Scatter props are untextured
-    // on purpose; stripping those maps on kit pieces leaves a white 1×1 albedo.
+    // Kit cells bake the look into a baseColor map. Scatter rocks do the same;
+    // stripping those maps leaves a white 1×1 albedo.
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/kit/medieval/med_wall.glb");
     let blob = std::fs::read(&path).expect("med_wall.glb");
@@ -69,6 +69,39 @@ fn vendored_kit_pieces_keep_their_baked_albedo() {
         mesh.uvs.iter().any(|uv| uv[0] > 0.01 || uv[1] > 0.01),
         "wall UVs are missing; albedo would sample a single texel"
     );
+}
+
+#[test]
+fn vendored_rocks_keep_their_baked_albedo() {
+    // Rocks bake veins into a baseColor map. The old sync dropped that map and
+    // the game painted a flat grey, which is the untextured stone in the world.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/props/rocks");
+    let mut found = 0;
+    for entry in std::fs::read_dir(&dir).expect("rocks dir") {
+        let path = entry.expect("entry").path();
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("glb"))
+        {
+            continue;
+        }
+        found += 1;
+        let blob = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            blob.windows(b"baseColorTexture".len())
+                .any(|w| w == b"baseColorTexture"),
+            "{} lost its albedo map",
+            path.display()
+        );
+        let mesh = engine::model::Model::load(&path)
+            .unwrap_or_else(|e| panic!("{} loads: {e}", path.display()));
+        assert!(
+            mesh.albedo().is_some(),
+            "{} loaded without an albedo map",
+            path.display()
+        );
+    }
+    assert!(found >= 4, "expected several rock meshes, found {found}");
 }
 
 #[test]

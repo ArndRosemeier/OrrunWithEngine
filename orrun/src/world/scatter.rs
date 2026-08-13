@@ -39,7 +39,7 @@ use super::coords::CHUNK_SPAN_M;
 use super::footprint::{self, HousePlot};
 use super::look::{SNOW_FULL_M, SNOW_LINE_M, SNOW_SLOPE_END, SNOW_SLOPE_START, SUN_DIR};
 use super::ponds::PondField;
-use super::rng::{hash3, unit01, value_noise, CellRng};
+use super::rng::{value_noise, CellRng};
 use super::surface::{lerp, smoothstep, ContinentalSurface, SurfaceColumn};
 use super::world_stream::{WorldStream, MEDIUM, NEAR};
 
@@ -153,6 +153,11 @@ pub enum ScatterError {
         #[source]
         source: engine::error::EngineError,
     },
+
+    #[error(
+        "rock {0} has no baked albedo; generate it in the Asset Lab and re-run tools/sync_props.py"
+    )]
+    UntexturedRock(PathBuf),
 }
 
 /// What a scattered prop is, which decides how it is placed.
@@ -203,9 +208,10 @@ impl PropClass {
             // The generated tufts are ankle height; a meadow needs knee height.
             Self::Grass => (1.0, 2.1),
             Self::Rock => (0.5, 1.6),
-            // The pines are authored 9–17 m tall; anything above about 1.2
-            // turns a wood into a redwood grove.
-            Self::Tree => (0.7, 1.2),
+            // Measured: sapling 4.8 m, alpine 9.4 m, ponderosa 14.9 m, spruce
+            // 16.8 m. Floor at 1.05 so timber is not shrunk below authored size;
+            // 2.0 lets spruce reach ~34 m, which is tall timber, not redwood.
+            Self::Tree => (1.05, 2.0),
             // The clumps are authored just under two metres, which is a reed.
             Self::Reed => (0.7, 1.15),
             // The tall shrub is authored ~2 m; the low ones half that. A wide
@@ -810,12 +816,12 @@ impl ScatterLayer {
     ) -> Result<Self, ScatterError> {
         let mut props = Vec::with_capacity(catalog.assets.len());
         for asset in &catalog.assets {
-            let mut mesh = Model::load(&asset.path).map_err(|source| ScatterError::BadProp {
+            let mesh = Model::load(&asset.path).map_err(|source| ScatterError::BadProp {
                 path: asset.path.clone(),
                 source,
             })?;
-            if let Some(stone) = stone_colour(asset) {
-                mesh.paint_all(stone);
+            if asset.class == PropClass::Rock && mesh.albedo().is_none() {
+                return Err(ScatterError::UntexturedRock(asset.path.clone()));
             }
             let stem = asset
                 .path
@@ -1690,29 +1696,6 @@ fn pine_proxy() -> EngineResult<Mesh> {
     mesh.add_box(Vec3::new(0.0, 8.4, 0.0), Vec3::new(5.0, 4.2, 5.0), needle)?;
     mesh.add_box(Vec3::new(0.0, 11.4, 0.0), Vec3::new(3.2, 3.2, 3.2), needle)?;
     Ok(mesh)
-}
-
-/// The colour a stone is painted, or `None` for props that brought their own.
-///
-/// The rock generator bakes its look into albedo and normal maps, and this
-/// pipeline has no textured prop material to sample them with, so a stone would
-/// arrive plain white. The game names the stone instead, varying the shade per
-/// variant so a scree slope is not one flat grey.
-fn stone_colour(asset: &PropAsset) -> Option<Color> {
-    if asset.class != PropClass::Rock {
-        return None;
-    }
-    let name = asset.path.file_stem()?.to_string_lossy();
-    let h = name
-        .bytes()
-        .fold(0x2545_F491_4F6C_DD1Du64, |acc, b| hash3(acc, b as i64, 7));
-    let t = unit01(h);
-    let warm = unit01(h >> 20);
-    Some(Color::rgb(
-        (86.0 + 54.0 * t + 16.0 * warm) as u8,
-        (84.0 + 50.0 * t + 6.0 * warm) as u8,
-        (80.0 + 44.0 * t) as u8,
-    ))
 }
 
 /// Run `job`, reporting how long it took in milliseconds.

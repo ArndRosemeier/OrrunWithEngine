@@ -11,9 +11,10 @@ Only the ids listed below are copied: everything under `assets/props` is loaded
 at startup, so an unused mesh would cost upload time for nothing. Kit pieces
 land under `assets/kit/medieval` and are loaded by name.
 
-Scatter props shade from vertex colour / material factor, so their baked maps
-are dropped on the way in. Kit cells bake the look into albedo; those copies
-keep `baseColorTexture` and drop the unused normal/roughness maps.
+Most scatter props shade from vertex colour / material factor, so their maps
+are dropped on the way in. Rocks bake veins and grit into albedo — the engine
+samples that map — so those copies keep `baseColorTexture`. Kit cells do the
+same. Unused normal/roughness maps are dropped either way.
 """
 
 from __future__ import annotations
@@ -183,7 +184,7 @@ def _keep_albedo_only(doc: dict) -> None:
 
 
 def copy_glb(source: Path, target: Path, *, keep_albedo: bool) -> None:
-    """Copy a glb. Scatter props drop every map; kit cells keep albedo."""
+    """Copy a glb. Rocks and kit cells keep albedo; other scatter props drop maps."""
     doc, binary = _read_glb(source)
     if keep_albedo:
         _keep_albedo_only(doc)
@@ -247,7 +248,7 @@ def main() -> int:
             if not glb.is_file():
                 missing.append(asset_id)
                 continue
-            copy_glb(glb, target / glb.name, keep_albedo=False)
+            copy_glb(glb, target / glb.name, keep_albedo=folder == "rocks")
             copied += 1
     for folder, ids in KIT.items():
         target = kit_root / folder
