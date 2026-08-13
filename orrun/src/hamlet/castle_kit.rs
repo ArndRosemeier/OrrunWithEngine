@@ -28,11 +28,7 @@ pub const PIECE_GLBS: &[(&str, &str)] = &[
     ("plinth", "castle_plinth.glb"),
 ];
 
-const RECIPE_IDS: &[&str] = &[
-    "castle_keep_8x6",
-    "castle_keep_12x10",
-    "castle_keep_16x14",
-];
+const RECIPE_IDS: &[&str] = &["castle_keep_8x6", "castle_keep_12x10", "castle_keep_16x14"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Side {

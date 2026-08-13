@@ -201,9 +201,8 @@ fn place_castle(
     }
     let half_x = spec.half_x();
     let half_z = spec.half_z();
-    let layout = castle::layout_for(catalog_id).unwrap_or_else(|| {
-        panic!("{catalog_id} is not a castle layout")
-    });
+    let layout = castle::layout_for(catalog_id)
+        .unwrap_or_else(|| panic!("{catalog_id} is not a castle layout"));
     let reach = (half_x * half_x + half_z * half_z).sqrt();
 
     let mut min_r = 0.0_f32;

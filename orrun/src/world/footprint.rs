@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use engine::collision::{ColliderShape, StaticCollider};
 use engine::space::{ChunkCoord, ChunkSpan, GlobalXZ};
 use glam::Vec2;
 
@@ -25,6 +26,10 @@ pub const DOOR_HALF_M: f32 = 1.1;
 pub const DOOR_DEPTH_M: f32 = 0.9;
 /// Metres the interior ground sits below the kit floor, so the two do not z-fight.
 pub const FLOOR_CLEAR_M: f32 = 0.18;
+/// Timber/stone wall thickness for dwelling colliders. Castle curtains use `wall_m`.
+const HOUSE_WALL_M: f32 = 0.45;
+/// Gate opening on a castle curtain (local −Z). Wider than a house door.
+const GATE_HALF_M: f32 = 1.8;
 
 /// One seated dwelling, for scatter and terrain to keep out of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,6 +89,21 @@ impl HousePlot {
             self.at.x + ex,
             self.at.z + ez,
         )
+    }
+
+    /// Wall boxes with a door on local −Z. The room itself is empty.
+    pub fn colliders(self) -> Vec<StaticCollider> {
+        let mut out = Vec::new();
+        push_wall_ring(
+            &mut out,
+            self.at,
+            self.yaw,
+            self.half_x,
+            self.half_z,
+            HOUSE_WALL_M,
+            DOOR_HALF_M,
+        );
+        out
     }
 }
 
@@ -172,6 +192,32 @@ impl CastlePlot {
             self.at.z + ez,
         )
     }
+
+    /// Curtain ring with a gate on local −Z, plus keep walls with a door.
+    pub fn colliders(self) -> Vec<StaticCollider> {
+        let mut out = Vec::new();
+        push_wall_ring(
+            &mut out,
+            self.at,
+            self.yaw,
+            self.half_x,
+            self.half_z,
+            self.wall_m,
+            GATE_HALF_M,
+        );
+        let keep_at = local_to_world(self.at, self.yaw, self.keep_offset.x, self.keep_offset.y);
+        let keep_wall = self.wall_m.min(self.keep_half_x).min(self.keep_half_z);
+        push_wall_ring(
+            &mut out,
+            keep_at,
+            self.yaw,
+            self.keep_half_x,
+            self.keep_half_z,
+            keep_wall,
+            DOOR_HALF_M,
+        );
+        out
+    }
 }
 
 /// House room or castle ring/keep. Scatter and terrain query this, not a filled castle OBB.
@@ -207,6 +253,13 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.aabb(),
             Self::Castle(c) => c.aabb(),
+        }
+    }
+
+    fn colliders(self) -> Vec<StaticCollider> {
+        match self {
+            Self::House(h) => h.colliders(),
+            Self::Castle(c) => c.colliders(),
         }
     }
 }
@@ -312,6 +365,85 @@ impl BuildingIndex {
     pub fn overlapping_chunks(&self, span: ChunkSpan) -> Vec<ChunkCoord> {
         overlapping_chunks(&self.plots, span)
     }
+
+    /// Wall and curtain boxes for the engine collision world.
+    pub fn colliders(&self) -> Vec<StaticCollider> {
+        self.plots
+            .iter()
+            .flat_map(|plot| plot.colliders())
+            .collect()
+    }
+}
+
+fn local_to_world(at: GlobalXZ, yaw: f32, lx: f32, lz: f32) -> GlobalXZ {
+    let (sin, cos) = (yaw.sin(), yaw.cos());
+    GlobalXZ::at(
+        at.x + f64::from(lx * cos + lz * sin),
+        at.z + f64::from(-lx * sin + lz * cos),
+    )
+}
+
+fn push_box(
+    out: &mut Vec<StaticCollider>,
+    at: GlobalXZ,
+    yaw: f32,
+    lx: f32,
+    lz: f32,
+    half_x: f32,
+    half_z: f32,
+) {
+    if half_x < 0.05 || half_z < 0.05 {
+        return;
+    }
+    out.push(StaticCollider {
+        at: local_to_world(at, yaw, lx, lz),
+        yaw,
+        shape: ColliderShape::Box { half_x, half_z },
+    });
+}
+
+/// Hollow rectangle: four walls, optional opening on local −Z.
+fn push_wall_ring(
+    out: &mut Vec<StaticCollider>,
+    at: GlobalXZ,
+    yaw: f32,
+    half_x: f32,
+    half_z: f32,
+    thickness: f32,
+    opening_half: f32,
+) {
+    let t = thickness.min(half_x).min(half_z);
+    if t <= 0.0 {
+        panic!("wall thickness must be > 0, got {thickness}");
+    }
+    let ht = t * 0.5;
+    push_box(out, at, yaw, 0.0, half_z - ht, half_x, ht);
+    push_box(out, at, yaw, half_x - ht, 0.0, ht, half_z);
+    push_box(out, at, yaw, -(half_x - ht), 0.0, ht, half_z);
+    let open = opening_half.min((half_x - t).max(0.0));
+    if open <= 0.0 {
+        push_box(out, at, yaw, 0.0, -(half_z - ht), half_x, ht);
+        return;
+    }
+    let stub = (half_x - open) * 0.5;
+    push_box(
+        out,
+        at,
+        yaw,
+        -(half_x + open) * 0.5,
+        -(half_z - ht),
+        stub,
+        ht,
+    );
+    push_box(
+        out,
+        at,
+        yaw,
+        (half_x + open) * 0.5,
+        -(half_z - ht),
+        stub,
+        ht,
+    );
 }
 
 /// Walked-tier chunks whose samples can fall inside a house.
@@ -340,6 +472,7 @@ fn overlapping_chunks(plots: &[BuildingPlot], span: ChunkSpan) -> Vec<ChunkCoord
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::collision::{ActorBody, CollisionWorld};
 
     fn plot() -> HousePlot {
         HousePlot {
@@ -464,5 +597,73 @@ mod tests {
         let index = BuildingIndex::new(vec![BuildingPlot::Castle(castle)]);
         assert!(!index.urban_cover(GlobalXZ::at(110.0, 200.0)));
         assert!(index.urban_cover(GlobalXZ::at(100.0, 200.0 - 12.0)));
+    }
+
+    fn collide(plot: BuildingPlot, from: GlobalXZ, dx: f64, dz: f64) -> GlobalXZ {
+        let mut world = CollisionWorld::new();
+        world
+            .replace_layer(1, plot.colliders())
+            .expect("building colliders");
+        world.move_xz(&ActorBody::player(), from, dx, dz)
+    }
+
+    #[test]
+    fn a_walker_fits_through_the_door() {
+        let house = BuildingPlot::House(plot());
+        let from = GlobalXZ::at(100.0, 200.0 - 5.0);
+        let to = collide(house, from, 0.0, 4.0);
+        assert!(
+            to.z > 198.0,
+            "door should admit the player into the room, got z={}",
+            to.z
+        );
+    }
+
+    #[test]
+    fn a_walker_does_not_pass_the_wall() {
+        let house = BuildingPlot::House(plot());
+        let from = GlobalXZ::at(103.0, 200.0 - 5.0);
+        let to = collide(house, from, 0.0, 4.0);
+        assert!(
+            to.z < 196.5,
+            "the south wall beside the door should stop the player, got z={}",
+            to.z
+        );
+    }
+
+    #[test]
+    fn the_room_is_not_a_solid() {
+        let house = BuildingPlot::House(plot());
+        let from = GlobalXZ::at(100.0, 200.0);
+        let to = collide(house, from, 0.5, 0.0);
+        assert!(
+            (to.x - 100.5).abs() < 0.05,
+            "inside the house should be free, got x={}",
+            to.x
+        );
+    }
+
+    #[test]
+    fn castle_gate_lets_a_walker_into_the_bailey() {
+        let castle = BuildingPlot::Castle(village_castle());
+        let from = GlobalXZ::at(100.0, 200.0 - 14.0);
+        let to = collide(castle, from, 0.0, 8.0);
+        assert!(
+            to.z > 190.0,
+            "gate should admit the player into the bailey, got z={}",
+            to.z
+        );
+    }
+
+    #[test]
+    fn the_curtain_stops_a_walker() {
+        let castle = BuildingPlot::Castle(village_castle());
+        let from = GlobalXZ::at(108.0, 200.0 - 14.0);
+        let to = collide(castle, from, 0.0, 8.0);
+        assert!(
+            to.z < 189.0,
+            "curtain beside the gate should stop the player, got z={}",
+            to.z
+        );
     }
 }

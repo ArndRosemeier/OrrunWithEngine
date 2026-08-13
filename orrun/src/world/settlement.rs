@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use engine::collision::ColliderLayer;
 use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
@@ -46,6 +47,8 @@ const MAX_TILES_LOADING: usize = 64;
 const ROAD_CLEAR_M: f32 = 4.0;
 /// Extra metres past the outermost house where the dirt ribbon still pauses.
 const HAMLET_ROAD_PAD_M: f32 = 10.0;
+/// Engine collider layer for house walls and castle curtains.
+const COLLIDER_LAYER: ColliderLayer = 2;
 
 #[derive(Debug, Error)]
 pub enum SettlementError {
@@ -169,7 +172,7 @@ struct Packing {
     ground: ContactSnapshot,
     piece_ids: Vec<PieceId>,
     castle_piece_ids: Vec<PieceId>,
-    recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
+    dwelling_recipes: Arc<kit::DwellingRecipes>,
     castle_recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
 }
 
@@ -186,7 +189,7 @@ struct Pending {
 pub struct SettlementLayer {
     pieces: Vec<PieceProto>,
     castle_pieces: Vec<PieceProto>,
-    recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
+    dwelling_recipes: Arc<kit::DwellingRecipes>,
     castle_recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
     well: EntityId,
     seed: i32,
@@ -206,7 +209,7 @@ impl SettlementLayer {
     /// Upload kit piece meshes and the well once; nothing is seated yet.
     pub fn install(world: &mut World, seed: i32) -> Result<Self, SettlementError> {
         let catalog = kit::catalog();
-        let recipes = kit::dwelling_recipes(&catalog)?;
+        let dwelling_recipes = Arc::new(kit::DwellingRecipes::roll(&catalog)?);
         let pieces = spawn_batches(world, kit::PIECE_GLBS, kit::load_piece_mesh)?;
         let castle_catalog = castle_kit::catalog();
         let castle_recipes = castle_kit::castle_recipes(&castle_catalog)?;
@@ -217,7 +220,7 @@ impl SettlementLayer {
         Ok(Self {
             pieces,
             castle_pieces,
-            recipes: Arc::new(recipes),
+            dwelling_recipes,
             castle_recipes: Arc::new(castle_recipes),
             well,
             seed,
@@ -288,6 +291,7 @@ impl SettlementLayer {
         self.plans.clear();
         self.hamlets.clear();
         self.plot_index = Arc::new(BuildingIndex::new(Vec::new()));
+        self.sync_building_colliders(world);
         Ok(())
     }
 
@@ -323,6 +327,7 @@ impl SettlementLayer {
 
         if plots_changed {
             self.rebuild_live();
+            self.sync_building_colliders(world);
             self.sync_tile_set(world, focus)?;
         }
 
@@ -355,7 +360,7 @@ impl SettlementLayer {
                         .iter()
                         .map(|batch| batch.piece.clone())
                         .collect(),
-                    recipes: Arc::clone(&self.recipes),
+                    dwelling_recipes: Arc::clone(&self.dwelling_recipes),
                     castle_recipes: Arc::clone(&self.castle_recipes),
                 };
                 self.pending = Some(Pending {
@@ -413,6 +418,13 @@ impl SettlementLayer {
         }
         self.plot_index = Arc::new(BuildingIndex::new(plots));
         self.rebuild_tile_items();
+    }
+
+    fn sync_building_colliders(&self, world: &mut World) {
+        world
+            .collision_mut()
+            .replace_layer(COLLIDER_LAYER, self.plot_index.colliders())
+            .expect("building colliders");
     }
 
     fn rebuild_tile_items(&mut self) {
@@ -557,7 +569,8 @@ impl Packing {
                 &self.ground,
                 &self.piece_ids,
                 &self.castle_piece_ids,
-                &self.recipes,
+                self.seed,
+                &self.dwelling_recipes,
                 &self.castle_recipes,
                 &mut standing,
                 &mut houses,
@@ -621,7 +634,8 @@ fn seat_plan(
     ground: &ContactSnapshot,
     piece_ids: &[PieceId],
     castle_piece_ids: &[PieceId],
-    recipes: &HashMap<String, Vec<PlacedMesh>>,
+    world_seed: i32,
+    dwelling_recipes: &kit::DwellingRecipes,
     castle_recipes: &HashMap<String, Vec<PlacedMesh>>,
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
@@ -647,9 +661,17 @@ fn seat_plan(
                 houses,
                 plots,
             ),
-            ShapeKind::House => {
-                seat_house(shape, pin, &plot, piece_ids, recipes, out, houses, plots)
-            }
+            ShapeKind::House => seat_house(
+                shape,
+                pin,
+                &plot,
+                piece_ids,
+                world_seed,
+                dwelling_recipes,
+                out,
+                houses,
+                plots,
+            ),
         }
     }
 }
@@ -659,7 +681,8 @@ fn seat_house(
     pin: SettlementPin,
     plot: &GroundPlot<'_>,
     piece_ids: &[PieceId],
-    recipes: &HashMap<String, Vec<PlacedMesh>>,
+    world_seed: i32,
+    dwelling_recipes: &kit::DwellingRecipes,
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
     plots: &mut Vec<BuildingPlot>,
@@ -697,9 +720,8 @@ fn seat_house(
         return;
     }
 
-    let recipe = recipes
-        .get(spec.id)
-        .unwrap_or_else(|| panic!("dwelling '{}' has no modular recipe", spec.id));
+    let seed = house_seed(world_seed, pin.id, shape.center.x, shape.center.y);
+    let recipe = dwelling_recipes.get(spec.id, seed);
     let floor_y = seat.floor_z - DOOR_SINK_M;
     plots.push(BuildingPlot::House(HousePlot {
         at: GlobalXZ::at(x, z),
@@ -803,6 +825,12 @@ fn layout_config(pin: SettlementPin) -> HamletLabConfig {
 fn plan_seed(world_seed: i32, node_id: i32) -> u64 {
     (world_seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (node_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+}
+
+fn house_seed(world_seed: i32, node_id: i32, cx: f32, cz: f32) -> u64 {
+    plan_seed(world_seed, node_id)
+        ^ (u64::from(cx.to_bits())).wrapping_mul(0xD1B5_4A32_D192_ED03)
+        ^ (u64::from(cz.to_bits())).rotate_left(21)
 }
 
 fn spawn_batches(

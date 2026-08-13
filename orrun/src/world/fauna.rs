@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use engine::anim::AnimatedModel;
+use engine::collision::{ActorBody, CollisionWorld};
 use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
 use engine::limits::EngineLimits;
@@ -231,6 +232,8 @@ struct Agent {
     state_time: f32,
     clip: String,
     rng: CellRng,
+    /// Collision is off until a later pass turns it on for wildlife.
+    body: ActorBody,
 }
 
 enum ModelSlot {
@@ -620,6 +623,7 @@ impl FaunaLayer {
             state_time: 0.0,
             clip: idle,
             rng,
+            body: ActorBody::new(0.4, 1.2),
         });
         Ok(())
     }
@@ -663,7 +667,17 @@ impl FaunaLayer {
         let mut caught: Vec<u32> = Vec::new();
         let n = self.agents.len();
         for i in 0..n {
-            let catch = self.step_agent(i, surface, ponds, plots, hamlets, ground, player, dt);
+            let catch = self.step_agent(
+                i,
+                surface,
+                ponds,
+                plots,
+                hamlets,
+                ground,
+                player,
+                world.collision(),
+                dt,
+            );
             if let Some(id) = catch {
                 caught.push(id);
             }
@@ -688,6 +702,7 @@ impl FaunaLayer {
         hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         player: GlobalXZ,
+        collision: &CollisionWorld,
         dt: f32,
     ) -> Option<u32> {
         self.agents[i].state_time += dt;
@@ -699,7 +714,7 @@ impl FaunaLayer {
             self.tick_prey(i, player, dt);
             None
         };
-        self.integrate(i, surface, ponds, plots, hamlets, ground, dt);
+        self.integrate(i, surface, ponds, plots, hamlets, ground, collision, dt);
         catch
     }
 
@@ -827,6 +842,7 @@ impl FaunaLayer {
         plots: &BuildingIndex,
         hamlets: &[HamletStand],
         ground: &ContactSnapshot,
+        collision: &CollisionWorld,
         dt: f32,
     ) {
         let spec_i = self.agents[i].spec_i;
@@ -865,9 +881,13 @@ impl FaunaLayer {
         let heading = Heading::from_degrees(self.agents[i].yaw)
             .map(|h| h.direction())
             .unwrap_or(Vec2::Y);
-        let next = GlobalXZ::at(
-            self.agents[i].pos.x + f64::from(heading.x * speed * dt),
-            self.agents[i].pos.z + f64::from(heading.y * speed * dt),
+        let dx = f64::from(heading.x * speed * dt);
+        let dz = f64::from(heading.y * speed * dt);
+        let dest = collision.move_xz(
+            &self.agents[i].body,
+            self.agents[i].pos.horizontal(),
+            dx,
+            dz,
         );
         if may_stand(
             &self.catalog.specs[spec_i],
@@ -876,11 +896,11 @@ impl FaunaLayer {
             plots,
             hamlets,
             ground,
-            next,
+            dest,
         ) {
-            if let Some(y) = ground.height_at(next) {
-                self.agents[i].pos.x = next.x;
-                self.agents[i].pos.z = next.z;
+            if let Some(y) = ground.height_at(dest) {
+                self.agents[i].pos.x = dest.x;
+                self.agents[i].pos.z = dest.z;
                 self.agents[i].pos.y = f64::from(y + FOOT_CLEARANCE_M);
                 return;
             }

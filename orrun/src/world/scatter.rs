@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use engine::collision::{ColliderLayer, ColliderShape, StaticCollider};
 use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::EngineResult;
@@ -85,6 +86,10 @@ const MAX_OTHER_BINS_PER_FRAME: usize = 4;
 const MAX_FAR_BINS_PER_FRAME: usize = 8;
 /// How many walked chunks fold into one far draw call. 5 × 200 m = 1 km.
 const FAR_DRAW_FOLD: i32 = 5;
+/// Engine collider layer for full-res tree trunks. Far proxies do not collide.
+const COLLIDER_LAYER: ColliderLayer = 1;
+/// Trunk radius at scale 1. Grows with the placed tree.
+const TREE_TRUNK_RADIUS_M: f32 = 0.32;
 
 /// Highest ground trees still grow on, and the band they thin out over.
 const TREELINE_M: f32 = 780.0;
@@ -935,6 +940,7 @@ impl ScatterLayer {
         self.near_tree_bins.clear();
         self.far_live.clear();
         self.far_queue.clear();
+        self.sync_tree_colliders(world);
         Ok(())
     }
 
@@ -957,6 +963,8 @@ impl ScatterLayer {
         let resident = stream.resident_count();
         let mut changed = false;
 
+        let mut trees_dirty = false;
+
         if let Some(pending) = self.pending.take() {
             if pending.job.is_finished() {
                 let (sown, took_ms) = pending.job.join().expect("scatter thread");
@@ -965,6 +973,7 @@ impl ScatterLayer {
                 self.centre = Some(pending.focus);
                 self.resident_chunks = pending.resident_chunks;
                 self.queue_near(world, pending.focus);
+                trees_dirty = true;
                 changed = true;
             } else {
                 self.pending = Some(pending);
@@ -999,6 +1008,9 @@ impl ScatterLayer {
         let other = self.drain_other(world, MAX_OTHER_BINS_PER_FRAME)?;
         let far = self.drain_far(world, MAX_FAR_BINS_PER_FRAME)?;
         self.follow_far(surface, ponds, focus)?;
+        if trees_dirty || trees {
+            self.sync_tree_colliders(world);
+        }
         Ok(changed || trees || other || far)
     }
 
@@ -1304,6 +1316,43 @@ impl ScatterLayer {
             }
             self.near_tree_bins.extend(prop.bins.keys().copied());
         }
+    }
+
+    fn sync_tree_colliders(&self, world: &mut World) {
+        world
+            .collision_mut()
+            .replace_layer(COLLIDER_LAYER, self.shown_tree_colliders())
+            .expect("tree colliders");
+    }
+
+    fn shown_tree_colliders(&self) -> Vec<StaticCollider> {
+        let mut out = Vec::new();
+        for (vi, prop) in self.props.iter().enumerate() {
+            if prop.class != PropClass::Tree {
+                continue;
+            }
+            for &(bx, bz) in prop.bins.keys() {
+                let Some(sprigs) = self.near_buckets.get(&(vi, bx, bz)) else {
+                    continue;
+                };
+                let shown = self
+                    .tree_shown
+                    .get(&(vi, bx, bz))
+                    .copied()
+                    .unwrap_or(0)
+                    .min(sprigs.len());
+                for sprig in &sprigs[..shown] {
+                    out.push(StaticCollider {
+                        at: sprig.at.horizontal(),
+                        yaw: 0.0,
+                        shape: ColliderShape::Cylinder {
+                            radius: TREE_TRUNK_RADIUS_M * sprig.scale,
+                        },
+                    });
+                }
+            }
+        }
+        out
     }
 
     fn apply_far_sown(&mut self, world: &mut World) -> EngineResult<()> {

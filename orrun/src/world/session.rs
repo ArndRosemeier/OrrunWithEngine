@@ -2,9 +2,10 @@
 //!
 //! The session owns the player, the stream, and the transition between looking
 //! at the map and standing on it. Control is withheld until the ground under
-//! the spawn is *actually* resident, because the drawn chunk carries the only
-//! collision data there is — a guessed spawn height would drop the player
-//! through the terrain or leave them hovering.
+//! the spawn is *actually* resident, because the drawn chunk carries the walk
+//! surface — a guessed spawn height would drop the player through the terrain
+//! or leave them hovering. Trees and house walls are separate colliders on
+//! that same world, and the player body collides with them by default.
 //!
 //! The view is first person: there is no avatar to draw, the camera *is* the
 //! player. The mouse is captured only once they click in the world, and the
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use engine::camera::{Camera, MAX_PITCH_DEGREES};
+use engine::collision::ActorBody;
 use engine::error::EngineError;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{Frame, World};
@@ -212,6 +214,8 @@ struct Player {
     /// Vertical speed while a jump is in the air. Zero on the ground and in flight.
     vy: f32,
     airborne: bool,
+    /// Capsule the engine slides against trees and walls. Collision is on.
+    body: ActorBody,
 }
 
 impl Player {
@@ -470,6 +474,7 @@ impl WorldSession {
                 heading: pose.heading().direction(),
                 vy: 0.0,
                 airborne: false,
+                body: ActorBody::player(),
             });
             self.entering = None;
         }
@@ -580,6 +585,7 @@ impl WorldSession {
             heading: spawn.heading().direction(),
             vy: 0.0,
             airborne: false,
+            body: ActorBody::player(),
         });
         self.state = SessionState::World;
         Ok(())
@@ -598,15 +604,28 @@ impl WorldSession {
             .clamp(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES);
 
         let step = input.step_m as f64;
+        let mut dx = 0.0;
+        let mut dz = 0.0;
         if input.direction.length_squared() > 0.0 {
-            player.position.x += input.direction.x as f64 * step;
-            player.position.z += input.direction.z as f64 * step;
+            dx = input.direction.x as f64 * step;
+            dz = input.direction.z as f64 * step;
             if player.mode == Locomotion::Fly {
                 player.position.y += input.direction.y as f64 * step;
             }
             let flat = Vec2::new(input.direction.x, input.direction.z);
             if flat.length_squared() > 0.0 {
                 player.heading = flat.normalize();
+            }
+        }
+        match player.mode {
+            Locomotion::Walk => {
+                let to = world.move_actor(&player.body, player.position.horizontal(), dx, dz);
+                player.position.x = to.x;
+                player.position.z = to.z;
+            }
+            Locomotion::Fly => {
+                player.position.x += dx;
+                player.position.z += dz;
             }
         }
 

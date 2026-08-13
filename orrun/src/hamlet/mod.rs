@@ -5,9 +5,9 @@
 //! on the lowest corner.
 
 mod castle;
+pub(crate) mod castle_kit;
 mod catalog;
 mod config;
-pub(crate) mod castle_kit;
 pub(crate) mod kit;
 mod occupancy;
 mod planner;

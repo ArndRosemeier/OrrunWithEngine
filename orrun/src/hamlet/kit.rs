@@ -2,6 +2,8 @@
 //!
 //! Pieces come from Asset Lab `med_*` products. Catalog JSON is the Modular
 //! medieval kit. Door wall is the south (−Z) long side, matching planner yaw 0.
+//! Footprint and storey layout stay a recipe; each slot picks a seeded member
+//! of the catalog family that shares its seams.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,8 @@ use engine::place::Place;
 #[cfg(test)]
 use glam::Vec3;
 use modular::prelude::*;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use thiserror::Error;
 
 const MEDIEVAL_JSON: &str = include_str!(concat!(
@@ -40,6 +44,7 @@ pub const PIECE_GLBS: &[(&str, &str)] = &[
     ("roof", "med_roof.glb"),
     ("roof_b", "med_roof_b.glb"),
     ("chimney", "med_chimney.glb"),
+    ("floor", "med_floor.glb"),
     ("plinth", "med_plinth.glb"),
     ("plinth_b", "med_plinth_b.glb"),
 ];
@@ -79,6 +84,16 @@ fn pid(id: &str) -> PieceId {
 
 fn did(id: &str) -> DockId {
     DockId::new(id).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn fid(id: &str) -> FamilyId {
+    FamilyId::new(id).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn pick(catalog: &Catalog, family: &str, rng: &mut StdRng) -> PieceId {
+    catalog
+        .pick_family(&fid(family), rng)
+        .unwrap_or_else(|err| panic!("{err}"))
 }
 
 /// Load the medieval kit catalog shipped next to this crate.
@@ -149,21 +164,17 @@ pub fn load_piece_mesh(piece: &PieceId) -> Result<Mesh, KitError> {
         .map_err(|source| KitError::BadPiece { path, source })
 }
 
-/// Closed, footprint-centred places for every dwelling catalog id.
-pub fn dwelling_recipes(catalog: &Catalog) -> Result<HashMap<String, Vec<PlacedMesh>>, KitError> {
-    let mut out = HashMap::new();
-    for id in DWELLING_IDS {
-        out.insert((*id).to_string(), assemble_dwelling(catalog, id)?);
-    }
-    Ok(out)
-}
-
-pub fn assemble_dwelling(catalog: &Catalog, catalog_id: &str) -> Result<Vec<PlacedMesh>, KitError> {
+pub fn assemble_dwelling(
+    catalog: &Catalog,
+    catalog_id: &str,
+    seed: u64,
+) -> Result<Vec<PlacedMesh>, KitError> {
+    let mut rng = StdRng::seed_from_u64(seed);
     let assembly = match catalog_id {
-        "house_hut_thatch" => assemble_hut(catalog)?,
-        "house_cabin_timber" => assemble_cabin(catalog)?,
-        "house_cottage_stone" => assemble_townhouse(catalog)?,
-        "house_hall_large" => assemble_hall(catalog)?,
+        "house_hut_thatch" => assemble_hut(catalog, &mut rng)?,
+        "house_cabin_timber" => assemble_cabin(catalog, &mut rng)?,
+        "house_cottage_stone" => assemble_townhouse(catalog, &mut rng)?,
+        "house_hall_large" => assemble_hall(catalog, &mut rng)?,
         other => panic!("'{other}' is not a modular dwelling"),
     };
     let open = assembly.unmated_seams()?;
@@ -171,6 +182,39 @@ pub fn assemble_dwelling(catalog: &Catalog, catalog_id: &str) -> Result<Vec<Plac
         panic!("{catalog_id} has free seams (kit bug): {open:?}");
     }
     Ok(centre_footprint(catalog, &assembly)?)
+}
+
+/// Seeded layouts kept per dwelling catalog id.
+///
+/// Family picks live in the recipe, not in Modular. Ports stamp hundreds of
+/// houses; seating looks these up instead of assembling each plot.
+pub const VARIATIONS_PER_DWELLING: u32 = 16;
+
+#[derive(Clone, Debug)]
+pub struct DwellingRecipes {
+    by_id: HashMap<&'static str, Vec<Vec<PlacedMesh>>>,
+}
+
+impl DwellingRecipes {
+    pub fn roll(catalog: &Catalog) -> Result<Self, KitError> {
+        let mut by_id = HashMap::new();
+        for id in DWELLING_IDS {
+            let mut variations = Vec::with_capacity(VARIATIONS_PER_DWELLING as usize);
+            for seed in 0..u64::from(VARIATIONS_PER_DWELLING) {
+                variations.push(assemble_dwelling(catalog, id, seed)?);
+            }
+            by_id.insert(*id, variations);
+        }
+        Ok(Self { by_id })
+    }
+
+    pub fn get(&self, catalog_id: &str, seed: u64) -> &[PlacedMesh] {
+        let variations = self
+            .by_id
+            .get(catalog_id)
+            .unwrap_or_else(|| panic!("'{catalog_id}' is not a modular dwelling"));
+        &variations[(seed % variations.len() as u64) as usize]
+    }
 }
 
 /// Rotate a local XZ offset by house yaw (engine Y-up, matching `Place::to_matrix`).
@@ -320,117 +364,192 @@ fn roofs(
     Ok(())
 }
 
-fn assemble_hut(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
+fn fill_interior_3x4(
+    assembly: &mut Assembly<'_>,
+    floor: &str,
+    plinth: &str,
+    roof: &str,
+) -> ModularResult<()> {
+    // A 3×4 ring leaves (1, *, 1) and (1, *, 2) empty. Wall floors only cover
+    // the ring; these stacks close the room on both storeys.
+    for z in 1..=2 {
+        let ground = assembly.place(pid(floor), Cell::new(1, 0, z), YawQuarter::Deg0)?;
+        assembly.mate(ground, did("down"), pid(plinth), did("up"))?;
+        let upper = assembly.mate(ground, did("up"), pid(floor), did("down"))?;
+        assembly.mate(upper, did("up"), pid(roof), did("down"))?;
+    }
+    Ok(())
+}
+
+fn assemble_hut<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> ModularResult<Assembly<'a>> {
     let mut assembly = Assembly::new(catalog);
+    let corner = pick(catalog, "corner", rng);
+    let door = pick(catalog, "door", rng);
+    let north = pick(catalog, "straight", rng);
     let ring = ring_3x2(
         &mut assembly,
         Cell::new(0, 0, 0),
-        "corner",
-        "door_b",
-        "corner",
-        "corner",
-        "wall_b",
-        "corner",
+        corner.as_str(),
+        door.as_str(),
+        corner.as_str(),
+        corner.as_str(),
+        north.as_str(),
+        corner.as_str(),
     )?;
-    plinths(&mut assembly, &ring, "plinth_b")?;
-    roofs(&mut assembly, &ring, "roof_b", None)?;
+    let plinth = pick(catalog, "plinth", rng);
+    let roof = pick(catalog, "roof", rng);
+    plinths(&mut assembly, &ring, plinth.as_str())?;
+    roofs(&mut assembly, &ring, roof.as_str(), None)?;
     Ok(assembly)
 }
 
-fn assemble_cabin(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
+fn assemble_cabin<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> ModularResult<Assembly<'a>> {
     let mut assembly = Assembly::new(catalog);
+    let corner = pick(catalog, "corner", rng);
+    let door = pick(catalog, "door", rng);
+    let north = pick(catalog, "straight", rng);
     let ring = ring_3x2(
         &mut assembly,
         Cell::new(0, 0, 0),
-        "corner",
-        "door",
-        "corner",
-        "corner",
-        "window_c",
-        "corner",
+        corner.as_str(),
+        door.as_str(),
+        corner.as_str(),
+        corner.as_str(),
+        north.as_str(),
+        corner.as_str(),
     )?;
-    plinths(&mut assembly, &ring, "plinth_b")?;
-    roofs(&mut assembly, &ring, "roof_b", Some(4))?;
+    let plinth = pick(catalog, "plinth", rng);
+    let roof = pick(catalog, "roof", rng);
+    plinths(&mut assembly, &ring, plinth.as_str())?;
+    roofs(
+        &mut assembly,
+        &ring,
+        roof.as_str(),
+        Some(rng.gen_range(0..ring.len())),
+    )?;
     Ok(assembly)
 }
 
-fn assemble_townhouse(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
+fn stack_upper_3x2(
+    assembly: &mut Assembly<'_>,
+    catalog: &Catalog,
+    ground: &[InstanceId; 6],
+    rng: &mut StdRng,
+) -> ModularResult<[InstanceId; 6]> {
+    let corner = pick(catalog, "corner_jetty", rng);
+    let ids = [
+        corner.clone(),
+        pick(catalog, "straight_jetty", rng),
+        corner.clone(),
+        corner.clone(),
+        pick(catalog, "straight_jetty", rng),
+        corner,
+    ];
+    let upper = [
+        assembly.mate(ground[0], did("up"), ids[0].clone(), did("down"))?,
+        assembly.mate(ground[1], did("up"), ids[1].clone(), did("down"))?,
+        assembly.mate(ground[2], did("up"), ids[2].clone(), did("down"))?,
+        assembly.mate(ground[3], did("up"), ids[3].clone(), did("down"))?,
+        assembly.mate(ground[4], did("up"), ids[4].clone(), did("down"))?,
+        assembly.mate(ground[5], did("up"), ids[5].clone(), did("down"))?,
+    ];
+    join_ring_3x2(assembly, &upper)?;
+    Ok(upper)
+}
+
+fn assemble_townhouse<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> ModularResult<Assembly<'a>> {
     let mut assembly = Assembly::new(catalog);
+    let corner = pick(catalog, "corner", rng);
+    let door = pick(catalog, "door", rng);
+    let north = pick(catalog, "straight", rng);
     let ground = ring_3x2(
         &mut assembly,
         Cell::new(0, 0, 0),
-        "corner",
-        "door_b",
-        "corner",
-        "corner",
-        "window_c",
-        "corner",
+        corner.as_str(),
+        door.as_str(),
+        corner.as_str(),
+        corner.as_str(),
+        north.as_str(),
+        corner.as_str(),
     )?;
-    plinths(&mut assembly, &ground, "plinth")?;
-    let upper_ids = [
-        "corner_jetty",
-        "window_c_jetty",
-        "corner_jetty",
-        "corner_jetty",
-        "wall_b_jetty",
-        "corner_jetty",
-    ];
-    let upper = [
-        assembly.mate(ground[0], did("up"), pid(upper_ids[0]), did("down"))?,
-        assembly.mate(ground[1], did("up"), pid(upper_ids[1]), did("down"))?,
-        assembly.mate(ground[2], did("up"), pid(upper_ids[2]), did("down"))?,
-        assembly.mate(ground[3], did("up"), pid(upper_ids[3]), did("down"))?,
-        assembly.mate(ground[4], did("up"), pid(upper_ids[4]), did("down"))?,
-        assembly.mate(ground[5], did("up"), pid(upper_ids[5]), did("down"))?,
-    ];
-    join_ring_3x2(&mut assembly, &upper)?;
-    roofs(&mut assembly, &upper, "roof", Some(4))?;
+    let plinth = pick(catalog, "plinth", rng);
+    plinths(&mut assembly, &ground, plinth.as_str())?;
+    let upper = stack_upper_3x2(&mut assembly, catalog, &ground, rng)?;
+    let roof = pick(catalog, "roof", rng);
+    roofs(
+        &mut assembly,
+        &upper,
+        roof.as_str(),
+        Some(rng.gen_range(0..upper.len())),
+    )?;
     Ok(assembly)
 }
 
-fn assemble_hall(catalog: &Catalog) -> ModularResult<Assembly<'_>> {
+fn assemble_hall<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> ModularResult<Assembly<'a>> {
     let mut assembly = Assembly::new(catalog);
+    let corner = pick(catalog, "corner", rng);
+    let door = pick(catalog, "door", rng);
+    let e1 = pick(catalog, "straight", rng);
+    let e2 = pick(catalog, "straight", rng);
+    let north = pick(catalog, "straight", rng);
+    let w1 = pick(catalog, "straight", rng);
+    let w2 = pick(catalog, "straight", rng);
     let ground = ring_3x4(
         &mut assembly,
         Cell::new(0, 0, 0),
-        "corner",
-        "door_b",
-        "corner",
-        "window_c",
-        "window_b",
-        "corner",
-        "window_c",
-        "corner",
-        "window",
-        "wall_b",
+        corner.as_str(),
+        door.as_str(),
+        corner.as_str(),
+        e1.as_str(),
+        e2.as_str(),
+        corner.as_str(),
+        north.as_str(),
+        corner.as_str(),
+        w1.as_str(),
+        w2.as_str(),
     )?;
-    plinths(&mut assembly, &ground, "plinth")?;
+    let plinth = pick(catalog, "plinth", rng);
+    plinths(&mut assembly, &ground, plinth.as_str())?;
+    let corner_j = pick(catalog, "corner_jetty", rng);
     let upper_ids = [
-        "corner_jetty",
-        "window_c_jetty",
-        "corner_jetty",
-        "window_jetty",
-        "window_b_jetty",
-        "corner_jetty",
-        "window_c_jetty",
-        "corner_jetty",
-        "window_jetty",
-        "wall_b_jetty",
+        corner_j.clone(),
+        pick(catalog, "straight_jetty", rng),
+        corner_j.clone(),
+        pick(catalog, "straight_jetty", rng),
+        pick(catalog, "straight_jetty", rng),
+        corner_j.clone(),
+        pick(catalog, "straight_jetty", rng),
+        corner_j.clone(),
+        pick(catalog, "straight_jetty", rng),
+        pick(catalog, "straight_jetty", rng),
     ];
     let upper = [
-        assembly.mate(ground[0], did("up"), pid(upper_ids[0]), did("down"))?,
-        assembly.mate(ground[1], did("up"), pid(upper_ids[1]), did("down"))?,
-        assembly.mate(ground[2], did("up"), pid(upper_ids[2]), did("down"))?,
-        assembly.mate(ground[3], did("up"), pid(upper_ids[3]), did("down"))?,
-        assembly.mate(ground[4], did("up"), pid(upper_ids[4]), did("down"))?,
-        assembly.mate(ground[5], did("up"), pid(upper_ids[5]), did("down"))?,
-        assembly.mate(ground[6], did("up"), pid(upper_ids[6]), did("down"))?,
-        assembly.mate(ground[7], did("up"), pid(upper_ids[7]), did("down"))?,
-        assembly.mate(ground[8], did("up"), pid(upper_ids[8]), did("down"))?,
-        assembly.mate(ground[9], did("up"), pid(upper_ids[9]), did("down"))?,
+        assembly.mate(ground[0], did("up"), upper_ids[0].clone(), did("down"))?,
+        assembly.mate(ground[1], did("up"), upper_ids[1].clone(), did("down"))?,
+        assembly.mate(ground[2], did("up"), upper_ids[2].clone(), did("down"))?,
+        assembly.mate(ground[3], did("up"), upper_ids[3].clone(), did("down"))?,
+        assembly.mate(ground[4], did("up"), upper_ids[4].clone(), did("down"))?,
+        assembly.mate(ground[5], did("up"), upper_ids[5].clone(), did("down"))?,
+        assembly.mate(ground[6], did("up"), upper_ids[6].clone(), did("down"))?,
+        assembly.mate(ground[7], did("up"), upper_ids[7].clone(), did("down"))?,
+        assembly.mate(ground[8], did("up"), upper_ids[8].clone(), did("down"))?,
+        assembly.mate(ground[9], did("up"), upper_ids[9].clone(), did("down"))?,
     ];
     join_ring_3x4(&mut assembly, &upper)?;
-    roofs(&mut assembly, &upper, "roof", Some(6))?;
+    let roof = pick(catalog, "roof", rng);
+    roofs(
+        &mut assembly,
+        &upper,
+        roof.as_str(),
+        Some(rng.gen_range(0..upper.len())),
+    )?;
+    let floor = pick(catalog, "floor", rng);
+    fill_interior_3x4(
+        &mut assembly,
+        floor.as_str(),
+        plinth.as_str(),
+        roof.as_str(),
+    )?;
     Ok(assembly)
 }
 
@@ -448,11 +567,12 @@ mod tests {
         for id in DWELLING_IDS {
             let spec = super::super::catalog::spec_for(id).expect("catalog");
             assert!(spec.is_dwelling());
+            let mut rng = StdRng::seed_from_u64(1);
             let assembly = match *id {
-                "house_hut_thatch" => assemble_hut(&catalog).unwrap(),
-                "house_cabin_timber" => assemble_cabin(&catalog).unwrap(),
-                "house_cottage_stone" => assemble_townhouse(&catalog).unwrap(),
-                "house_hall_large" => assemble_hall(&catalog).unwrap(),
+                "house_hut_thatch" => assemble_hut(&catalog, &mut rng).unwrap(),
+                "house_cabin_timber" => assemble_cabin(&catalog, &mut rng).unwrap(),
+                "house_cottage_stone" => assemble_townhouse(&catalog, &mut rng).unwrap(),
+                "house_hall_large" => assemble_hall(&catalog, &mut rng).unwrap(),
                 other => panic!("{other}"),
             };
             let open = assembly.unmated_seams().unwrap();
@@ -470,11 +590,12 @@ mod tests {
     #[test]
     fn cabin_puts_the_door_on_the_south_wall() {
         let catalog = catalog();
-        let assembly = assemble_cabin(&catalog).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let assembly = assemble_cabin(&catalog, &mut rng).unwrap();
         let door = assembly
             .instances()
             .into_iter()
-            .find(|p| p.piece == pid("door"))
+            .find(|p| catalog.piece(&p.piece).unwrap().family().as_str() == "door")
             .expect("door");
         let min_z = assembly
             .occupied_cells()
@@ -490,13 +611,35 @@ mod tests {
     #[test]
     fn townhouse_upper_ring_is_jettied() {
         let catalog = catalog();
-        let assembly = assemble_townhouse(&catalog).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let assembly = assemble_townhouse(&catalog, &mut rng).unwrap();
         let jetty = assembly
             .instances()
             .into_iter()
             .filter(|p| p.cell.y == 1)
             .count();
         assert_eq!(jetty, 6);
+    }
+
+    #[test]
+    fn hall_fills_the_interior_cells() {
+        let catalog = catalog();
+        let mut rng = StdRng::seed_from_u64(1);
+        let assembly = assemble_hall(&catalog, &mut rng).unwrap();
+        let ground: std::collections::HashSet<_> = assembly
+            .occupied_cells()
+            .into_iter()
+            .filter(|cell| cell.y == 0)
+            .collect();
+        assert_eq!(ground.len(), 12);
+        assert!(ground.contains(&Cell::new(1, 0, 1)));
+        assert!(ground.contains(&Cell::new(1, 0, 2)));
+        let floor_cells = assembly
+            .instances()
+            .into_iter()
+            .filter(|placed| placed.piece.as_str() == "floor")
+            .count();
+        assert_eq!(floor_cells, 4);
     }
 
     #[test]
@@ -507,5 +650,45 @@ mod tests {
         assert!((moved.position.y - 5.0).abs() < 1e-4);
         assert!((moved.position.z - 20.0).abs() < 1e-4);
         assert!((moved.yaw_degrees - 90.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn same_seed_reproduces_pieces_and_different_seeds_can_vary() {
+        let catalog = catalog();
+        let a = assemble_dwelling(&catalog, "house_hall_large", 3).unwrap();
+        let b = assemble_dwelling(&catalog, "house_hall_large", 3).unwrap();
+        let c = assemble_dwelling(&catalog, "house_hall_large", 11).unwrap();
+        let names = |places: &[PlacedMesh]| {
+            places
+                .iter()
+                .map(|item| item.piece.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&a), names(&b));
+        assert_ne!(names(&a), names(&c));
+    }
+
+    #[test]
+    fn rolled_variations_stay_in_memory_for_the_same_slot() {
+        let catalog = catalog();
+        let recipes = DwellingRecipes::roll(&catalog).unwrap();
+        let a = recipes.get("house_hall_large", 3);
+        let b = recipes.get("house_hall_large", 3 + u64::from(VARIATIONS_PER_DWELLING));
+        let assembled = assemble_dwelling(&catalog, "house_hall_large", 3).unwrap();
+        let names = |places: &[PlacedMesh]| {
+            places
+                .iter()
+                .map(|item| item.piece.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(a), names(&assembled));
+        assert_eq!(names(a), names(b));
+        assert!(std::ptr::eq(a, b));
+        for id in DWELLING_IDS {
+            assert_eq!(
+                recipes.get(id, 0).len(),
+                assemble_dwelling(&catalog, id, 0).unwrap().len()
+            );
+        }
     }
 }
