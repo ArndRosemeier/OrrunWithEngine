@@ -5,7 +5,7 @@
 
 use engine::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
 use engine::prelude::*;
-use orrun::hamlet::{plan, HamletLabConfig, Plan2D, ShapeKind};
+use orrun::hamlet::{castle_layout, plan, HamletLabConfig, Plan2D, Shape, ShapeKind};
 
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 48.0;
@@ -27,6 +27,7 @@ impl HamletLab {
         config.apply_tier_defaults(0);
         config.seed = 1;
         config.show_occupancy = false;
+        config.place_castle = true;
         let mut lab = Self {
             config,
             plan: Plan2D::default(),
@@ -111,32 +112,30 @@ impl HamletLab {
         }
 
         for shape in &self.plan.shapes {
-            if shape.kind != ShapeKind::House {
-                continue;
+            match shape.kind {
+                ShapeKind::Market => {}
+                ShapeKind::Castle => self.draw_castle(painter, origin, shape),
+                ShapeKind::House => {
+                    let color = catalog_color(&shape.catalog_id);
+                    self.draw_obb(
+                        painter,
+                        origin,
+                        shape.center,
+                        shape.half_size.x,
+                        shape.half_size.y,
+                        shape.yaw,
+                        color,
+                        Stroke::new(1.0_f32, Color32::from_rgb(20, 20, 20)),
+                    );
+                    let facing = glam::Vec2::new(shape.yaw.sin(), shape.yaw.cos());
+                    let door = shape.center - facing * shape.half_size.y;
+                    painter.circle_filled(
+                        self.world_to_panel(origin, door),
+                        2.0,
+                        Color32::from_rgb(255, 220, 120),
+                    );
+                }
             }
-            let color = catalog_color(&shape.catalog_id);
-            let corners = obb_corners(
-                shape.center,
-                shape.half_size.x,
-                shape.half_size.y,
-                shape.yaw,
-            );
-            let pts: Vec<Pos2> = corners
-                .iter()
-                .map(|p| self.world_to_panel(origin, *p))
-                .collect();
-            painter.add(egui::Shape::convex_polygon(
-                pts,
-                color,
-                Stroke::new(1.0_f32, Color32::from_rgb(20, 20, 20)),
-            ));
-            let facing = glam::Vec2::new(shape.yaw.sin(), shape.yaw.cos());
-            let door = shape.center - facing * shape.half_size.y;
-            painter.circle_filled(
-                self.world_to_panel(origin, door),
-                2.0,
-                Color32::from_rgb(255, 220, 120),
-            );
         }
 
         painter.circle_filled(
@@ -144,6 +143,85 @@ impl HamletLab {
             3.0,
             Color32::from_rgb(255, 247, 217),
         );
+    }
+
+    fn draw_castle(&self, painter: &egui::Painter, origin: Pos2, shape: &Shape) {
+        let Some(layout) = castle_layout(&shape.catalog_id) else {
+            panic!("planned castle '{}' has no layout", shape.catalog_id);
+        };
+        let wall = Color32::from_rgb(118, 124, 136);
+        let keep = Color32::from_rgb(78, 84, 96);
+        let yard = Color32::from_rgb(52, 58, 48);
+        let stroke = Stroke::new(1.2_f32, Color32::from_rgb(28, 28, 32));
+        self.draw_obb(
+            painter,
+            origin,
+            shape.center,
+            shape.half_size.x,
+            shape.half_size.y,
+            shape.yaw,
+            wall,
+            stroke,
+        );
+        let chx = shape.half_size.x - layout.wall_m;
+        let chz = shape.half_size.y - layout.wall_m;
+        if chx > 0.5 && chz > 0.5 {
+            self.draw_obb(
+                painter,
+                origin,
+                shape.center,
+                chx,
+                chz,
+                shape.yaw,
+                yard,
+                Stroke::NONE,
+            );
+        }
+        if layout.keep_half_x > 0.5 && layout.keep_half_z > 0.5 {
+            let kc = layout.keep_center(shape.center, shape.yaw);
+            self.draw_obb(
+                painter,
+                origin,
+                kc,
+                layout.keep_half_x,
+                layout.keep_half_z,
+                shape.yaw,
+                keep,
+                stroke,
+            );
+            if layout.keep_is_ward {
+                let ihx = layout.keep_half_x - layout.wall_m;
+                let ihz = layout.keep_half_z - layout.wall_m;
+                if ihx > 0.5 && ihz > 0.5 {
+                    self.draw_obb(painter, origin, kc, ihx, ihz, shape.yaw, yard, Stroke::NONE);
+                }
+            }
+        }
+        let facing = glam::Vec2::new(shape.yaw.sin(), shape.yaw.cos());
+        let gate = shape.center - facing * shape.half_size.y;
+        painter.circle_filled(
+            self.world_to_panel(origin, gate),
+            3.0,
+            Color32::from_rgb(255, 220, 120),
+        );
+    }
+
+    fn draw_obb(
+        &self,
+        painter: &egui::Painter,
+        origin: Pos2,
+        center: glam::Vec2,
+        half_x: f32,
+        half_z: f32,
+        yaw: f32,
+        fill: Color32,
+        stroke: Stroke,
+    ) {
+        let pts: Vec<Pos2> = obb_corners(center, half_x, half_z, yaw)
+            .iter()
+            .map(|p| self.world_to_panel(origin, *p))
+            .collect();
+        painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
     }
 }
 
@@ -282,6 +360,12 @@ fn main() {
                 {
                     lab.dirty = true;
                 }
+                if ui
+                    .checkbox(&mut lab.config.place_castle, "place castle")
+                    .changed()
+                {
+                    lab.dirty = true;
+                }
 
                 ui.separator();
                 if ui.button("Regenerate (R)").clicked() {
@@ -293,12 +377,20 @@ fn main() {
 
                 ui.separator();
                 ui.label(format!(
-                    "houses {} / {}   civics {}   markets {}",
+                    "houses {} / {}   civics {}   castle {}   markets {}",
                     lab.plan.house_count,
                     lab.plan.want_count,
                     lab.plan.civic_count,
+                    lab.plan.castle_count,
                     lab.plan.markets.len()
                 ));
+                if lab.plan.castle_count > 0 {
+                    if let Some(shape) =
+                        lab.plan.shapes.iter().find(|s| s.kind == ShapeKind::Castle)
+                    {
+                        ui.label(shape.catalog_id.as_str());
+                    }
+                }
                 ui.label(format!("envelope {:.1} m", lab.plan.built_envelope));
                 if let Some(err) = &lab.error {
                     ui.colored_label(Color32::from_rgb(255, 120, 100), err);

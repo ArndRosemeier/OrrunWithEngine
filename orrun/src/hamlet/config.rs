@@ -52,6 +52,9 @@ pub struct HamletLabConfig {
     /// Small random noise on fitness.
     pub fitness_noise: f32,
     pub show_occupancy: bool,
+    /// Place a tier-scaled castle on the rim, gate toward the plaza. Off in the
+    /// 3D world until kit seating exists; the hamlet lab turns it on.
+    pub place_castle: bool,
 }
 
 impl Default for HamletLabConfig {
@@ -77,6 +80,7 @@ impl Default for HamletLabConfig {
             wall_share_boost: 0.12,
             fitness_noise: 0.08,
             show_occupancy: false,
+            place_castle: false,
         }
     }
 }

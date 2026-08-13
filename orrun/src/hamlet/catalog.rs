@@ -13,6 +13,7 @@ const HALL_SIZE_Z: f32 = 16.0;
 pub enum BuildingRole {
     Dwelling,
     Civic,
+    Castle,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +43,10 @@ impl BuildingSpec {
 
     pub fn is_civic(self) -> bool {
         self.role == BuildingRole::Civic
+    }
+
+    pub fn is_castle(self) -> bool {
+        self.role == BuildingRole::Castle
     }
 }
 
@@ -153,6 +158,42 @@ const SPECS: &[BuildingSpec] = &[
         size_z: 5.39,
         yaw_offset: 0.0,
         foundation_m: 0.5,
+    },
+    BuildingSpec {
+        id: "castle_tower_house",
+        role: BuildingRole::Castle,
+        min_tier: 0,
+        size_x: 16.0,
+        size_z: 16.0,
+        yaw_offset: 0.0,
+        foundation_m: KIT_STOREY_M,
+    },
+    BuildingSpec {
+        id: "castle_small_bailey",
+        role: BuildingRole::Castle,
+        min_tier: 1,
+        size_x: 32.0,
+        size_z: 24.0,
+        yaw_offset: 0.0,
+        foundation_m: KIT_STOREY_M,
+    },
+    BuildingSpec {
+        id: "castle_keep_and_curtain",
+        role: BuildingRole::Castle,
+        min_tier: 2,
+        size_x: 48.0,
+        size_z: 40.0,
+        yaw_offset: 0.0,
+        foundation_m: KIT_STOREY_M,
+    },
+    BuildingSpec {
+        id: "castle_concentric",
+        role: BuildingRole::Castle,
+        min_tier: 3,
+        size_x: 64.0,
+        size_z: 48.0,
+        yaw_offset: 0.0,
+        foundation_m: KIT_STOREY_M,
     },
 ];
 

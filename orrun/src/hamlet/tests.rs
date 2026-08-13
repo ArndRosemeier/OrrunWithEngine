@@ -6,7 +6,7 @@ use super::planner::plan;
 use super::{Plot, Shape, ShapeKind};
 
 fn house_obb_overlap(a: &Shape, b: &Shape) -> bool {
-    if a.kind != ShapeKind::House || b.kind != ShapeKind::House {
+    if a.kind == ShapeKind::Market || b.kind == ShapeKind::Market {
         return false;
     }
     const TOUCH_EPS: f32 = 0.05;
@@ -150,6 +150,102 @@ fn higher_tier_has_more_market_sides() {
     assert!(super::tier_market_sides(1) < super::tier_market_sides(2));
     assert_eq!(super::tier_market_sides(3), 24);
     assert!(!catalog::ids_with_role(BuildingRole::Dwelling, 0).is_empty());
+}
+
+fn castle_cfg(tier: u8, seed: u64) -> HamletLabConfig {
+    let mut cfg = HamletLabConfig::default();
+    cfg.apply_tier_defaults(tier);
+    cfg.seed = seed;
+    cfg.place_castle = true;
+    cfg
+}
+
+#[test]
+fn game_layouts_do_not_place_a_castle() {
+    let mut cfg = HamletLabConfig::default();
+    cfg.apply_tier_defaults(2);
+    cfg.seed = 3;
+    cfg.dwelling_min = 30;
+    cfg.dwelling_max = 30;
+    let plan = plan(&cfg).expect("plan");
+    assert_eq!(plan.castle_count, 0);
+    assert!(plan.shapes.iter().all(|s| s.kind != ShapeKind::Castle));
+}
+
+#[test]
+fn hamlet_lab_places_a_tower_house() {
+    let mut cfg = castle_cfg(0, 1);
+    cfg.dwelling_min = 6;
+    cfg.dwelling_max = 6;
+    let plan = plan(&cfg).expect("plan");
+    assert_eq!(plan.castle_count, 1);
+    let castle = plan
+        .shapes
+        .iter()
+        .find(|s| s.kind == ShapeKind::Castle)
+        .expect("castle");
+    assert_eq!(castle.catalog_id, "castle_tower_house");
+    assert!((castle.half_size.x * 2.0 - 16.0).abs() < 1e-4);
+    assert!((castle.half_size.y * 2.0 - 16.0).abs() < 1e-4);
+}
+
+#[test]
+fn town_lab_places_keep_and_curtain() {
+    let mut cfg = castle_cfg(2, 3);
+    cfg.dwelling_min = 30;
+    cfg.dwelling_max = 30;
+    let plan = plan(&cfg).expect("plan");
+    assert_eq!(plan.castle_count, 1);
+    let castle = plan
+        .shapes
+        .iter()
+        .find(|s| s.kind == ShapeKind::Castle)
+        .expect("castle");
+    assert_eq!(castle.catalog_id, "castle_keep_and_curtain");
+    assert_eq!(plan.house_count, 30, "{}", plan.underfill_message);
+    assert!(plan.civic_count >= 4);
+}
+
+#[test]
+fn castle_gate_faces_the_plaza() {
+    let plan = plan(&castle_cfg(0, 11)).expect("plan");
+    let castle = plan
+        .shapes
+        .iter()
+        .find(|s| s.kind == ShapeKind::Castle)
+        .expect("castle");
+    let facing = Vec2::new(castle.yaw.sin(), castle.yaw.cos());
+    let gate = castle.center - facing * castle.half_size.y;
+    assert!(
+        gate.distance(plan.plaza) < castle.center.distance(plan.plaza),
+        "gate {} should sit closer to the plaza than the keep centre {}",
+        gate,
+        castle.center
+    );
+}
+
+#[test]
+fn houses_do_not_overlap_the_castle() {
+    let mut cfg = castle_cfg(1, 11);
+    cfg.dwelling_min = 20;
+    cfg.dwelling_max = 20;
+    let plan = plan(&cfg).expect("plan");
+    let buildings: Vec<_> = plan
+        .shapes
+        .iter()
+        .filter(|s| s.kind == ShapeKind::House || s.kind == ShapeKind::Castle)
+        .collect();
+    assert!(buildings.iter().any(|s| s.kind == ShapeKind::Castle));
+    for i in 0..buildings.len() {
+        for j in (i + 1)..buildings.len() {
+            assert!(
+                !house_obb_overlap(buildings[i], buildings[j]),
+                "overlap {} vs {}",
+                buildings[i].catalog_id,
+                buildings[j].catalog_id
+            );
+        }
+    }
 }
 
 struct Flat;

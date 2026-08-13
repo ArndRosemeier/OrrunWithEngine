@@ -4,6 +4,7 @@
 //! or high-relief ground lose, and the door is later seated at grade rather than
 //! on the lowest corner.
 
+mod castle;
 mod catalog;
 mod config;
 pub(crate) mod kit;
@@ -14,6 +15,7 @@ mod seat;
 #[cfg(test)]
 mod tests;
 
+pub use castle::{id_for_tier as castle_id_for_tier, layout_for as castle_layout, CastleLayout};
 pub use catalog::{ids_with_role, spec_for, BuildingRole, BuildingSpec};
 pub use config::{tier_market_radius, tier_market_sides, HamletLabConfig, CIVIC_BY_TIER};
 pub use planner::{plan, plan_on};
@@ -29,6 +31,7 @@ use thiserror::Error;
 pub enum ShapeKind {
     House,
     Market,
+    Castle,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +57,7 @@ pub struct Plan2D {
     pub built_envelope: f32,
     pub house_count: u32,
     pub civic_count: u32,
+    pub castle_count: u32,
     pub want_count: u32,
     /// Non-empty when `house_count < want_count`.
     pub underfill_message: String,

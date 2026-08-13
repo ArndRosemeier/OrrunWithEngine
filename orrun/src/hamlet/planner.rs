@@ -5,6 +5,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use super::castle;
 use super::catalog::{self, BuildingRole};
 use super::config::{self, HamletLabConfig};
 use super::occupancy::{point_in_polygon, Occupancy};
@@ -89,6 +90,18 @@ pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan
     }
     let expand_step = max_depth * 0.65 + config.alley;
 
+    if config.place_castle {
+        place_castle(
+            config,
+            &mut out,
+            &mut occ,
+            &mut houses,
+            &mut rng,
+            max_depth,
+            plot,
+        )?;
+    }
+
     for civic_id in civic_ids_for_tier(config.tier)? {
         let placed = place_building(
             config,
@@ -162,6 +175,147 @@ pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan
         out.occupancy_dots = occ.occupied_dots(3);
     }
     Ok(out)
+}
+
+fn place_castle(
+    config: &HamletLabConfig,
+    plan: &mut Plan2D,
+    occ: &mut Occupancy,
+    houses: &mut Vec<PlacedBuilding>,
+    rng: &mut ChaCha8Rng,
+    house_depth: f32,
+    plot: Option<&dyn Plot>,
+) -> Result<(), HamletError> {
+    let catalog_id = castle::id_for_tier(config.tier);
+    let spec = catalog::spec_for(catalog_id).ok_or_else(|| HamletError::UnknownCatalogId {
+        id: catalog_id.to_string(),
+    })?;
+    if spec.min_tier > config.tier {
+        return Err(HamletError::CivicTier {
+            id: catalog_id.to_string(),
+            min_tier: spec.min_tier,
+            settlement_tier: config.tier,
+        });
+    }
+    let half_x = spec.half_x();
+    let half_z = spec.half_z();
+    let reach = (half_x * half_x + half_z * half_z).sqrt();
+
+    let mut min_r = 0.0_f32;
+    for i in 0..plan.markets.len() {
+        let extent = polygon_extent_from(plan.market_centers[i], &plan.markets[i]);
+        min_r = min_r.max(
+            plan.market_centers[i].length()
+                + extent
+                + config.market_front_gap
+                + house_depth
+                + config.alley
+                + half_z,
+        );
+    }
+    let max_r = (config.max_settle_radius - reach).max(0.0);
+    if min_r > max_r {
+        return Err(HamletError::PlaceFailed {
+            catalog_id: catalog_id.to_string(),
+        });
+    }
+
+    let mut pick: Option<Candidate> = None;
+    let mut local_max = (min_r + house_depth * 2.0 + 12.0).min(max_r);
+    let mut attempts = 0;
+    while pick.is_none() && attempts < 8 {
+        attempts += 1;
+        let mut tries = config.candidates_per_settler as usize;
+        if attempts >= 7 {
+            tries *= 3;
+        }
+        let mut scored = Vec::new();
+        for _ in 0..tries {
+            let ang = rng.gen::<f32>() * std::f32::consts::TAU;
+            let dir = Vec2::new(ang.cos(), ang.sin());
+            let span = (local_max - min_r).max(0.0);
+            let dist = min_r + span * rng.gen::<f32>().powf(1.6);
+            let center = plan.plaza + dir * dist;
+            if center.length() + reach > config.max_settle_radius {
+                continue;
+            }
+            let away = center - plan.plaza;
+            if away.length_squared() < 1e-8 {
+                continue;
+            }
+            let facing = away.normalize();
+            let yaw = facing.x.atan2(facing.y);
+            if !occ.fits_obb(center, half_x, half_z, yaw, config.alley * 0.5) {
+                continue;
+            }
+            if houses_obb_overlap(houses, center, half_x, half_z, yaw) {
+                continue;
+            }
+            let gate = center - facing * half_z;
+            if signed_distance_to_markets(gate, &plan.markets) < 0.4 {
+                continue;
+            }
+            if signed_distance_to_markets(center, &plan.markets) < half_z {
+                continue;
+            }
+            let Some(score) = scored_plot(
+                config,
+                &plan.markets,
+                gate,
+                center,
+                half_x,
+                half_z,
+                yaw,
+                spec.foundation_m,
+                plot,
+                rng,
+                0.0,
+            ) else {
+                continue;
+            };
+            scored.push(Candidate {
+                score,
+                center,
+                yaw,
+                half_x,
+                half_z,
+            });
+        }
+        pick = best_scored(&scored);
+        if pick.is_none() {
+            let next_max = (local_max + house_depth * 0.65 + config.alley).min(max_r);
+            if next_max <= local_max + 1e-4 {
+                break;
+            }
+            local_max = next_max;
+        }
+    }
+
+    let Some(pick) = pick else {
+        return Err(HamletError::PlaceFailed {
+            catalog_id: catalog_id.to_string(),
+        });
+    };
+
+    plan.shapes.push(Shape {
+        kind: ShapeKind::Castle,
+        center: pick.center,
+        half_size: Vec2::new(pick.half_x, pick.half_z),
+        yaw: pick.yaw,
+        radius: 0.0,
+        catalog_id: catalog_id.to_string(),
+        polygon: Vec::new(),
+    });
+    occ.stamp_obb(pick.center, pick.half_x, pick.half_z, pick.yaw, 0.0);
+    houses.push(PlacedBuilding {
+        center: pick.center,
+        half_x: pick.half_x,
+        half_z: pick.half_z,
+        yaw: pick.yaw,
+        catalog_id: catalog_id.to_string(),
+    });
+    plan.castle_count = 1;
+    Ok(())
 }
 
 fn civic_ids_for_tier(tier: u8) -> Result<Vec<&'static str>, HamletError> {
