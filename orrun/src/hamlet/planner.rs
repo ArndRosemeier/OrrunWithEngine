@@ -186,7 +186,9 @@ fn place_castle(
     house_depth: f32,
     plot: Option<&dyn Plot>,
 ) -> Result<(), HamletError> {
-    let catalog_id = castle::id_for_tier(config.tier);
+    let Some(catalog_id) = castle::id_for_tier(config.tier) else {
+        return Ok(());
+    };
     let spec = catalog::spec_for(catalog_id).ok_or_else(|| HamletError::UnknownCatalogId {
         id: catalog_id.to_string(),
     })?;
@@ -199,6 +201,9 @@ fn place_castle(
     }
     let half_x = spec.half_x();
     let half_z = spec.half_z();
+    let layout = castle::layout_for(catalog_id).unwrap_or_else(|| {
+        panic!("{catalog_id} is not a castle layout")
+    });
     let reach = (half_x * half_x + half_z * half_z).sqrt();
 
     let mut min_r = 0.0_f32;
@@ -258,18 +263,16 @@ fn place_castle(
             if signed_distance_to_markets(center, &plan.markets) < half_z {
                 continue;
             }
-            let Some(score) = scored_plot(
+            let Some(score) = scored_castle(
                 config,
                 &plan.markets,
                 gate,
                 center,
-                half_x,
-                half_z,
                 yaw,
+                layout,
                 spec.foundation_m,
                 plot,
                 rng,
-                0.0,
             ) else {
                 continue;
             };
@@ -964,6 +967,28 @@ fn scored_plot(
     let mut score = fitness(config, markets, door, rng) + extra;
     if let Some(plot) = plot {
         let sample = seat::sample_footprint(plot, center, half_x, half_z, yaw);
+        if !seat::accept(&sample, foundation_m) {
+            return None;
+        }
+        score += config.weight_ground * seat::ground_score(&sample);
+    }
+    Some(score)
+}
+
+fn scored_castle(
+    config: &HamletLabConfig,
+    markets: &[Vec<Vec2>],
+    gate: Vec2,
+    center: Vec2,
+    yaw: f32,
+    layout: castle::CastleLayout,
+    foundation_m: f32,
+    plot: Option<&dyn Plot>,
+    rng: &mut ChaCha8Rng,
+) -> Option<f32> {
+    let mut score = fitness(config, markets, gate, rng);
+    if let Some(plot) = plot {
+        let sample = seat::sample_castle_footprint(plot, center, yaw, layout);
         if !seat::accept(&sample, foundation_m) {
             return None;
         }

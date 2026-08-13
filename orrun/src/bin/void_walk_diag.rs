@@ -11,8 +11,8 @@ use engine::world::World;
 use glam::Vec2;
 use orrun::atlas::ContinentAtlas;
 use orrun::world::{
-    resolve_spawn, AtlasBounds, ContinentalSurface, MapPoint, PondWindow, ScatterCatalog,
-    ScatterLayer, WorldEntryRequest, WorldStream,
+    resolve_spawn, AtlasBounds, BuildingIndex, ContinentalSurface, MapPoint, PondWindow,
+    ScatterCatalog, ScatterLayer, WorldEntryRequest, WorldStream,
 };
 
 fn entry_point(atlas: &ContinentAtlas, bounds: AtlasBounds) -> MapPoint {
@@ -67,6 +67,7 @@ fn main() {
         seed,
     )
     .expect("prop meshes");
+    let empty_plots = Arc::new(BuildingIndex::new(Vec::new()));
     let mut p = pose.ground();
 
     let t0 = Instant::now();
@@ -105,7 +106,7 @@ fn main() {
                 &surface,
                 &ponds.field(),
                 p,
-                &[],
+                &empty_plots,
                 rebased,
             )
             .expect("cover");

@@ -7,6 +7,7 @@
 mod castle;
 mod catalog;
 mod config;
+pub(crate) mod castle_kit;
 pub(crate) mod kit;
 mod occupancy;
 mod planner;
@@ -20,8 +21,9 @@ pub use catalog::{ids_with_role, spec_for, BuildingRole, BuildingSpec};
 pub use config::{tier_market_radius, tier_market_sides, HamletLabConfig, CIVIC_BY_TIER};
 pub use planner::{plan, plan_on};
 pub use seat::{
-    accept, door_point, ground_score, sample_footprint, seat_building, FootprintSample, Plot, Seat,
-    BANK_EXTRA_M, DOOR_SINK_M, MAX_SKIRT_M, MIN_UPNESS, SEAT_INSET, SKIRT_BITE_M, WATERLINE_MARGIN,
+    accept, door_point, ground_score, sample_castle_footprint, sample_footprint, seat_building,
+    FootprintSample, Plot, Seat, BANK_EXTRA_M, DOOR_SINK_M, MAX_SKIRT_M, MIN_UPNESS, SEAT_INSET,
+    SKIRT_BITE_M, WATERLINE_MARGIN,
 };
 
 use glam::Vec2;

@@ -3,7 +3,7 @@
 //! Fauna is not stored. A 48 m lattice around the player is rolled from the
 //! world seed; a cell either hosts a flock or it does not. Agents live only
 //! while the player is close, stand on the same contact grid the player walks,
-//! and stay out of water and house plots.
+//! and stay out of water, house plots, and hamlets.
 //!
 //! Predator/prey is for show: grazers flee the player and any hunter, wolves
 //! and foxes chase, and a catch despawns the prey. No metabolism, no packs.
@@ -25,9 +25,10 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::coords::Heading;
-use super::footprint::HousePlot;
+use super::footprint::BuildingIndex;
 use super::ponds::PondField;
 use super::rng::CellRng;
+use super::settlement::HamletStand;
 use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 use crate::atlas::Biome;
@@ -50,6 +51,8 @@ const ANIM_EAT: f32 = 0.55;
 const ANIM_WALK: f32 = 0.48;
 const ANIM_RUN: f32 = 0.62;
 const FAUNA_SALT: u64 = 0xF4A1_A001;
+/// Wildlife stays this far past the packed-house disk.
+const HAMLET_CLEAR_M: f32 = 24.0;
 
 const BIOME_COUNT: usize = 9;
 
@@ -378,7 +381,8 @@ impl FaunaLayer {
         stream: &WorldStream,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         focus: GlobalXZ,
         player: GlobalXZ,
         dt: f32,
@@ -391,10 +395,10 @@ impl FaunaLayer {
         if self.spawn_backlog || self.refresh >= REFRESH_S || self.agents.is_empty() {
             self.refresh = 0.0;
             self.spawn_backlog = self
-                .refresh_population(world, surface, ponds, plots, &ground, focus)?
+                .refresh_population(world, surface, ponds, plots, hamlets, &ground, focus)?
                 || self.busy();
         }
-        self.tick(world, surface, ponds, plots, &ground, player, dt)?;
+        self.tick(world, surface, ponds, plots, hamlets, &ground, player, dt)?;
         Ok(())
     }
 
@@ -403,15 +407,16 @@ impl FaunaLayer {
         world: &mut World,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         focus: GlobalXZ,
     ) -> Result<bool, FaunaError> {
         let drop_r = DESPAWN_M;
         let mut i = 0;
         while i < self.agents.len() {
-            let d = xz_dist(self.agents[i].pos.horizontal(), focus);
-            if d > drop_r {
+            let at = self.agents[i].pos.horizontal();
+            if xz_dist(at, focus) > drop_r || in_hamlet(hamlets, at) {
                 self.despawn_at(world, i);
             } else {
                 i += 1;
@@ -447,6 +452,9 @@ impl FaunaLayer {
                 if xz_dist(center, focus) > sim_r {
                     continue;
                 }
+                if in_hamlet(hamlets, center) {
+                    continue;
+                }
                 if ground.height_at(center).is_none() {
                     continue;
                 }
@@ -455,6 +463,7 @@ impl FaunaLayer {
                     surface,
                     ponds,
                     plots,
+                    hamlets,
                     ground,
                     (cx, cz),
                     center,
@@ -470,7 +479,8 @@ impl FaunaLayer {
         world: &mut World,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         cell: (i32, i32),
         center: GlobalXZ,
@@ -480,7 +490,7 @@ impl FaunaLayer {
         let mut pick: Option<(usize, f32)> = None;
         let mut total = 0.0f32;
         for (i, spec) in self.catalog.wilderness() {
-            let score = suitability(spec, surface, ponds, plots, ground, center);
+            let score = suitability(spec, surface, ponds, plots, hamlets, ground, center);
             if score <= 0.0 {
                 continue;
             }
@@ -516,6 +526,7 @@ impl FaunaLayer {
                 surface,
                 ponds,
                 plots,
+                hamlets,
                 ground,
                 at,
             ) {
@@ -525,6 +536,7 @@ impl FaunaLayer {
                 surface,
                 ponds,
                 plots,
+                hamlets,
                 ground,
                 center,
             ) {
@@ -635,7 +647,8 @@ impl FaunaLayer {
         world: &mut World,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         player: GlobalXZ,
         dt: f32,
@@ -650,7 +663,7 @@ impl FaunaLayer {
         let mut caught: Vec<u32> = Vec::new();
         let n = self.agents.len();
         for i in 0..n {
-            let catch = self.step_agent(i, surface, ponds, plots, ground, player, dt);
+            let catch = self.step_agent(i, surface, ponds, plots, hamlets, ground, player, dt);
             if let Some(id) = catch {
                 caught.push(id);
             }
@@ -671,7 +684,8 @@ impl FaunaLayer {
         i: usize,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         player: GlobalXZ,
         dt: f32,
@@ -685,7 +699,7 @@ impl FaunaLayer {
             self.tick_prey(i, player, dt);
             None
         };
-        self.integrate(i, surface, ponds, plots, ground, dt);
+        self.integrate(i, surface, ponds, plots, hamlets, ground, dt);
         catch
     }
 
@@ -810,7 +824,8 @@ impl FaunaLayer {
         i: usize,
         surface: &ContinentalSurface,
         ponds: &PondField,
-        plots: &[HousePlot],
+        plots: &BuildingIndex,
+        hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         dt: f32,
     ) {
@@ -859,6 +874,7 @@ impl FaunaLayer {
             surface,
             ponds,
             plots,
+            hamlets,
             ground,
             next,
         ) {
@@ -1039,16 +1055,17 @@ impl FaunaLayer {
     }
 }
 
-/// Hard reject: water, houses, missing walked ground, or a slope the species will not climb.
+/// Hard reject: water, houses, hamlets, missing walked ground, or a slope the species will not climb.
 pub fn may_stand(
     spec: &FaunaSpec,
     surface: &ContinentalSurface,
     ponds: &PondField,
-    plots: &[HousePlot],
+    plots: &BuildingIndex,
+    hamlets: &[HamletStand],
     ground: &ContactSnapshot,
     at: GlobalXZ,
 ) -> bool {
-    if plots.iter().any(|plot| plot.blocks_prop(at)) {
+    if plots.blocks_prop(at) || in_hamlet(hamlets, at) {
         return false;
     }
     let mut column = surface.column(at);
@@ -1070,11 +1087,12 @@ pub fn suitability(
     spec: &FaunaSpec,
     surface: &ContinentalSurface,
     ponds: &PondField,
-    plots: &[HousePlot],
+    plots: &BuildingIndex,
+    hamlets: &[HamletStand],
     ground: &ContactSnapshot,
     at: GlobalXZ,
 ) -> f32 {
-    if !may_stand(spec, surface, ponds, plots, ground, at) {
+    if !may_stand(spec, surface, ponds, plots, hamlets, ground, at) {
         return 0.0;
     }
     let biome = surface.fields().biome_at(at.x as f32, at.z as f32);
@@ -1098,6 +1116,10 @@ pub fn suitability(
         score *= (0.55 + (1.0 - humidity) * 0.35 + relief * 0.25).clamp(0.25, 1.2);
     }
     (score * spec.density).clamp(0.0, 1.0)
+}
+
+fn in_hamlet(hamlets: &[HamletStand], p: GlobalXZ) -> bool {
+    hamlets.iter().any(|h| h.covers(p, HAMLET_CLEAR_M))
 }
 
 fn slope_ok(ground: &ContactSnapshot, at: GlobalXZ, max_deg: f32) -> bool {
@@ -1345,7 +1367,9 @@ fn spec_from_entry(entry: CatalogEntry) -> Result<FaunaSpec, FaunaError> {
 mod tests {
     use super::*;
     use crate::atlas::ContinentAtlas;
+    use crate::world::footprint::{BuildingPlot, HousePlot};
     use crate::world::ponds::PondField;
+    use crate::world::settlement::HamletStand;
     use crate::world::surface::ContinentalSurface;
     use engine::space::GlobalXZ;
 
@@ -1426,10 +1450,29 @@ mod tests {
                 );
                 if surface.column(at).is_wet() {
                     assert!(
-                        !may_stand(deer, &surface, &ponds, &[], &ground, at),
+                        !may_stand(
+                            deer,
+                            &surface,
+                            &ponds,
+                            &BuildingIndex::new(Vec::new()),
+                            &[],
+                            &ground,
+                            at
+                        ),
                         "deer stood on water at {at:?}"
                     );
-                    assert_eq!(suitability(deer, &surface, &ponds, &[], &ground, at), 0.0);
+                    assert_eq!(
+                        suitability(
+                            deer,
+                            &surface,
+                            &ponds,
+                            &BuildingIndex::new(Vec::new()),
+                            &[],
+                            &ground,
+                            at
+                        ),
+                        0.0
+                    );
                     return;
                 }
             }
@@ -1469,8 +1512,58 @@ mod tests {
             floor_y: 10.0,
         };
         assert!(
-            !may_stand(deer, &surface, &ponds, &[plot], &ground, at),
+            !may_stand(
+                deer,
+                &surface,
+                &ponds,
+                &BuildingIndex::new(vec![BuildingPlot::House(plot)]),
+                &[],
+                &ground,
+                at
+            ),
             "deer stood inside a house"
+        );
+    }
+
+    #[test]
+    fn habitat_rejects_a_hamlet_yard() {
+        let catalog = catalog();
+        let deer = catalog.spec("deer");
+        let (surface, ponds) = surface();
+        let ground = ContactSnapshot::default();
+        let mut dry = None;
+        let span = surface.bounds().metres();
+        for iz in 0..40 {
+            for ix in 0..40 {
+                let at = GlobalXZ::at(
+                    span * (ix as f64 + 0.5) / 40.0,
+                    span * (iz as f64 + 0.5) / 40.0,
+                );
+                if !surface.column(at).is_wet() {
+                    dry = Some(at);
+                    break;
+                }
+            }
+            if dry.is_some() {
+                break;
+            }
+        }
+        let at = dry.expect("dry ground");
+        let hamlet = HamletStand {
+            at,
+            radius: 20.0,
+            houses: vec![at],
+        };
+        let hamlets = [hamlet];
+        let empty = BuildingIndex::new(Vec::new());
+        assert!(
+            !may_stand(deer, &surface, &ponds, &empty, &hamlets, &ground, at),
+            "deer stood in the hamlet"
+        );
+        let near = GlobalXZ::at(at.x + 30.0, at.z);
+        assert!(
+            !may_stand(deer, &surface, &ponds, &empty, &hamlets, &ground, near),
+            "deer stood next to the hamlet"
         );
     }
 }

@@ -72,6 +72,26 @@ fn vendored_kit_pieces_keep_their_baked_albedo() {
 }
 
 #[test]
+fn vendored_castle_pieces_keep_their_baked_albedo() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/kit/castle/castle_curtain.glb");
+    let blob = std::fs::read(&path).expect("castle_curtain.glb");
+    assert!(
+        blob.windows(b"baseColorTexture".len())
+            .any(|w| w == b"baseColorTexture"),
+        "{} lost its albedo map",
+        path.display()
+    );
+    let mesh = engine::model::Model::load(&path)
+        .expect("castle curtain loads")
+        .build();
+    assert!(
+        mesh.uvs.iter().any(|uv| uv[0] > 0.01 || uv[1] > 0.01),
+        "curtain UVs are missing; albedo would sample a single texel"
+    );
+}
+
+#[test]
 fn vendored_rocks_keep_their_baked_albedo() {
     // Rocks bake veins into a baseColor map. The old sync dropped that map and
     // the game painted a flat grey, which is the untextured stone in the world.
@@ -164,6 +184,32 @@ fn largest_settlement_is_the_highest_tier_then_pop() {
             pin.tier,
             pin.population
         );
+    }
+}
+
+#[test]
+fn a_continent_has_a_handful_of_ports() {
+    for seed in [20260809, 7, 99] {
+        let (_, surface) = world_of(seed, 128);
+        let n = surface.settlements().len();
+        assert!(n >= 2, "seed {seed} has no settlements");
+        let mut counts = [0usize; 4];
+        for pin in surface.settlements() {
+            counts[pin.tier as usize] += 1;
+        }
+        let ports = counts[3];
+        assert!(
+            (2..=4).contains(&ports),
+            "seed {seed}: {n} settlements, {ports} ports (want 2..=4); counts={counts:?}"
+        );
+        let best = surface.largest_settlement().expect("settlement");
+        assert_eq!(best.tier, 3, "seed {seed}: largest is tier {}", best.tier);
+        if n >= 4 {
+            assert!(
+                counts[2] >= 1,
+                "seed {seed}: expected at least one town under the ports"
+            );
+        }
     }
 }
 

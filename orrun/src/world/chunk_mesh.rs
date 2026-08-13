@@ -20,7 +20,7 @@ use engine::SurfaceMeshStyle;
 use glam::{Vec3, Vec4};
 
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
-use super::footprint::{self, HousePlot};
+use super::footprint::BuildingIndex;
 use super::ponds::SharedPonds;
 use super::scatter::{canopy_noise, soil_drift, soil_patch, Fall, GroundCover};
 use super::surface::{
@@ -124,7 +124,7 @@ pub struct TerrainChunkBuilder {
     /// Sub-atlas water, for the tiers close enough to resolve any of it.
     ponds: Option<SharedPonds>,
     /// Seated dwellings. Empty on distance tiers.
-    plots: Arc<RwLock<Vec<HousePlot>>>,
+    plots: Arc<RwLock<BuildingIndex>>,
 }
 
 impl TerrainChunkBuilder {
@@ -142,12 +142,12 @@ impl TerrainChunkBuilder {
             sink_m: 0.0,
             contact: true,
             ponds: None,
-            plots: Arc::new(RwLock::new(Vec::new())),
+            plots: Arc::new(RwLock::new(BuildingIndex::new(Vec::new()))),
         }
     }
 
-    /// Interior ground caps for seated houses. Shared with [`super::WorldStream`].
-    pub fn with_plots(mut self, plots: Arc<RwLock<Vec<HousePlot>>>) -> Self {
+    /// Interior ground caps for seated houses and keep floors. Shared with [`super::WorldStream`].
+    pub fn with_plots(mut self, plots: Arc<RwLock<BuildingIndex>>) -> Self {
         self.plots = plots;
         self
     }
@@ -225,7 +225,7 @@ impl TerrainChunkBuilder {
                 if let Some(field) = &ponds {
                     field.carve(p, &mut column);
                 }
-                if let Some(cap) = footprint::terrain_cap(&plots, p) {
+                if let Some(cap) = plots.terrain_cap(p) {
                     column.cap_ground(cap);
                 }
                 columns.push(column);
@@ -464,14 +464,14 @@ fn lerp_xz(a: GlobalXZ, b: GlobalXZ, t: f32) -> GlobalXZ {
     GlobalXZ::at(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t)
 }
 
-fn wall_t(plots: &[HousePlot], a: GlobalXZ, b: GlobalXZ) -> f32 {
-    let a_in = footprint::terrain_cap(plots, a).is_some();
+fn wall_t(plots: &BuildingIndex, a: GlobalXZ, b: GlobalXZ) -> f32 {
+    let a_in = plots.terrain_cap(a).is_some();
     let mut lo = 0.0f32;
     let mut hi = 1.0f32;
     for _ in 0..20 {
         let mid = 0.5 * (lo + hi);
         let p = lerp_xz(a, b, mid);
-        if footprint::terrain_cap(plots, p).is_some() == a_in {
+        if plots.terrain_cap(p).is_some() == a_in {
             lo = mid;
         } else {
             hi = mid;
@@ -481,7 +481,7 @@ fn wall_t(plots: &[HousePlot], a: GlobalXZ, b: GlobalXZ) -> f32 {
 }
 
 fn push_wall_vert(
-    plots: &[HousePlot],
+    plots: &BuildingIndex,
     s: &ChunkSamples,
     sink_m: f32,
     a: GlobalXZ,
@@ -495,9 +495,10 @@ fn push_wall_vert(
 ) -> u32 {
     let t = wall_t(plots, a, b);
     let p = lerp_xz(a, b, t);
-    let cap = footprint::terrain_cap(plots, p)
-        .or_else(|| footprint::terrain_cap(plots, a))
-        .or_else(|| footprint::terrain_cap(plots, b))
+    let cap = plots
+        .terrain_cap(p)
+        .or_else(|| plots.terrain_cap(a))
+        .or_else(|| plots.terrain_cap(b))
         .expect("a split edge belongs to a house wall");
     let (lx, lz) = ((p.x - s.origin.x) as f32, (p.z - s.origin.z) as f32);
     positions.push(Vec3::new(lx, cap - sink_m, lz));
@@ -512,7 +513,7 @@ fn push_wall_vert(
 }
 
 fn emit_land_quad(
-    plots: &[HousePlot],
+    plots: &BuildingIndex,
     s: &ChunkSamples,
     sink_m: f32,
     [ix, iz]: [i32; 2],
@@ -536,7 +537,7 @@ fn emit_land_quad(
 }
 
 fn emit_land_tri(
-    plots: &[HousePlot],
+    plots: &BuildingIndex,
     s: &ChunkSamples,
     sink_m: f32,
     ia: u32,
@@ -553,16 +554,16 @@ fn emit_land_tri(
     depth: u8,
 ) {
     let ins = [
-        footprint::terrain_cap(plots, pa).is_some(),
-        footprint::terrain_cap(plots, pb).is_some(),
-        footprint::terrain_cap(plots, pc).is_some(),
+        plots.terrain_cap(pa).is_some(),
+        plots.terrain_cap(pb).is_some(),
+        plots.terrain_cap(pc).is_some(),
     ];
     let n_in = ins.iter().filter(|v| **v).count();
     if n_in == 0 || n_in == 3 {
         if n_in == 0 && depth < 2 {
             let mid = lerp_xz(pa, lerp_xz(pb, pc, 0.5), 0.5);
-            if footprint::terrain_cap(plots, mid).is_some() {
-                let cap = footprint::terrain_cap(plots, mid).expect("just tested");
+            if plots.terrain_cap(mid).is_some() {
+                let cap = plots.terrain_cap(mid).expect("just tested");
                 let (lx, lz) = ((mid.x - s.origin.x) as f32, (mid.z - s.origin.z) as f32);
                 let im = positions.len() as u32;
                 positions.push(Vec3::new(lx, cap - sink_m, lz));

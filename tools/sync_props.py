@@ -9,7 +9,7 @@ regenerating an asset there.
 
 Only the ids listed below are copied: everything under `assets/props` is loaded
 at startup, so an unused mesh would cost upload time for nothing. Kit pieces
-land under `assets/kit/medieval` and are loaded by name.
+land under `assets/kit/medieval` and `assets/kit/castle` and are loaded by name.
 
 Most scatter props shade from vertex colour / material factor, so their maps
 are dropped on the way in. Rocks bake veins and grit into albedo — the engine
@@ -77,6 +77,15 @@ KIT: dict[str, tuple[str, ...]] = {
         "med_roof",
         "med_chimney",
         "med_plinth",
+    ),
+    "castle": (
+        "castle_curtain",
+        "castle_loop",
+        "castle_gate",
+        "castle_tower",
+        "castle_turret",
+        "castle_battlement",
+        "castle_plinth",
     ),
 }
 

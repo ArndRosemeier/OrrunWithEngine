@@ -35,7 +35,7 @@ pub use coords::{
 };
 pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaRole, FaunaSpec};
-pub use footprint::HousePlot;
+pub use footprint::{BuildingIndex, BuildingPlot, CastlePlot, HousePlot};
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;
 pub use ponds::{Pond, PondField, PondWindow, SharedPonds, COVERS_M, REBUILD_M, SEED_RADIUS_M};

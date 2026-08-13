@@ -52,8 +52,8 @@ pub struct HamletLabConfig {
     /// Small random noise on fitness.
     pub fitness_noise: f32,
     pub show_occupancy: bool,
-    /// Place a tier-scaled castle on the rim, gate toward the plaza. Off in the
-    /// 3D world until kit seating exists; the hamlet lab turns it on.
+    /// Place a tier-scaled castle on the rim, gate toward the plaza.
+    /// Hamlets (tier 0) still have none. The 2D lab and the 3D world both turn this on.
     pub place_castle: bool,
 }
 

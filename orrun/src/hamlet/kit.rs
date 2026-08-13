@@ -185,7 +185,7 @@ pub fn world_place(local: Place, house_at: Vec3, house_yaw_deg: f32) -> Place {
     .with_yaw_deg(house_yaw_deg + local.yaw_degrees)
 }
 
-fn centre_footprint(catalog: &Catalog, assembly: &Assembly<'_>) -> ModularResult<Vec<PlacedMesh>> {
+pub(crate) fn centre_footprint(catalog: &Catalog, assembly: &Assembly<'_>) -> ModularResult<Vec<PlacedMesh>> {
     let cells = assembly.occupied_cells();
     let origin = catalog
         .pitch()

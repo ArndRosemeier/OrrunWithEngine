@@ -623,6 +623,11 @@ pub struct SettlementPin {
 }
 
 /// Godot `VillageTier.classify`: inland low-pop is a hamlet; a river mouth is a port.
+///
+/// Atlas population is only 0..=15, and `mouth_dist == 0` is the mouth cell
+/// itself. Settlement nodes sit on population peaks, which are usually one cell
+/// inland, so this rule alone yields a continent of villages. [`pins_from_atlas`]
+/// then promotes a handful of cities so the map has 2–4 ports.
 pub fn classify_settlement(population: i32, mouth_dist: i32) -> u8 {
     if mouth_dist == 0 && population >= 10 {
         3
@@ -635,8 +640,61 @@ pub fn classify_settlement(population: i32, mouth_dist: i32) -> u8 {
     }
 }
 
+fn port_quota(settlements: usize) -> usize {
+    match settlements {
+        0 => 0,
+        1 => 1,
+        2..=6 => 2.min(settlements),
+        7..=14 => 3.min(settlements),
+        _ => 4.min(settlements),
+    }
+}
+
+fn town_quota(settlements: usize) -> usize {
+    let ports = port_quota(settlements);
+    let rest = settlements.saturating_sub(ports);
+    let want = match settlements {
+        0..=2 => 0,
+        3..=6 => 1,
+        7..=14 => 2,
+        _ => 3,
+    };
+    want.min(rest)
+}
+
+fn city_rank(mouth: i32, pin: &SettlementPin) -> (i32, i8, i32) {
+    let mouth_rank = if mouth == 0 {
+        2
+    } else if mouth > 0 {
+        1
+    } else {
+        0
+    };
+    (pin.population, mouth_rank, pin.id)
+}
+
+/// Promote the densest sites to ports and towns. The rest stay village/hamlet.
+fn ensure_settlement_ladder(ranked: &mut [(i32, SettlementPin)]) {
+    let n = ranked.len();
+    let want_ports = port_quota(n);
+    let want_towns = town_quota(n);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        city_rank(ranked[b].0, &ranked[b].1).cmp(&city_rank(ranked[a].0, &ranked[a].1))
+    });
+    for (rank, &i) in order.iter().enumerate() {
+        if rank < want_ports {
+            ranked[i].1.tier = 3;
+        } else if rank < want_ports + want_towns {
+            ranked[i].1.tier = 2;
+        } else {
+            ranked[i].1.tier = ranked[i].1.tier.min(1);
+        }
+    }
+}
+
 fn pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[SettlementPin]> {
-    atlas
+    let mut ranked: Vec<(i32, SettlementPin)> = atlas
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Settlement)
@@ -647,14 +705,19 @@ fn pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[SettlementPin]> {
             );
             let pop = cell_population(atlas.cell_at(n.ax, n.az));
             let mouth = atlas.mouth_distance[atlas.index_of(n.ax, n.az)];
-            SettlementPin {
-                id: n.id,
-                at,
-                tier: classify_settlement(pop, mouth),
-                population: pop,
-            }
+            (
+                mouth,
+                SettlementPin {
+                    id: n.id,
+                    at,
+                    tier: classify_settlement(pop, mouth),
+                    population: pop,
+                },
+            )
         })
-        .collect()
+        .collect();
+    ensure_settlement_ladder(&mut ranked);
+    ranked.into_iter().map(|(_, pin)| pin).collect()
 }
 
 /// Single authority for terrain and hydrology in world metres.
@@ -1046,4 +1109,44 @@ pub(super) fn lerp(a: f32, b: f32, t: f32) -> f32 {
 pub(super) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0 + 1e-6)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    fn pin(id: i32, pop: i32, tier: u8) -> SettlementPin {
+        SettlementPin {
+            id,
+            at: GlobalXZ::at(0.0, 0.0),
+            tier,
+            population: pop,
+        }
+    }
+
+    #[test]
+    fn twelve_villages_become_three_ports_and_two_towns() {
+        let mut ranked: Vec<_> = (0..12).map(|i| (-1, pin(i, 8 + (i % 4), 1))).collect();
+        ensure_settlement_ladder(&mut ranked);
+        let mut counts = [0usize; 4];
+        for (_, p) in &ranked {
+            counts[p.tier as usize] += 1;
+        }
+        assert_eq!(counts[3], 3);
+        assert_eq!(counts[2], 2);
+        assert_eq!(counts[3] + counts[2] + counts[1] + counts[0], 12);
+        let max_pop = ranked
+            .iter()
+            .filter(|(_, p)| p.tier == 3)
+            .map(|(_, p)| p.population)
+            .max()
+            .unwrap();
+        let min_other = ranked
+            .iter()
+            .filter(|(_, p)| p.tier < 3)
+            .map(|(_, p)| p.population)
+            .min()
+            .unwrap();
+        assert!(max_pop >= min_other);
+    }
 }

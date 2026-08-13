@@ -161,7 +161,7 @@ fn castle_cfg(tier: u8, seed: u64) -> HamletLabConfig {
 }
 
 #[test]
-fn game_layouts_do_not_place_a_castle() {
+fn castle_placement_is_opt_in() {
     let mut cfg = HamletLabConfig::default();
     cfg.apply_tier_defaults(2);
     cfg.seed = 3;
@@ -173,42 +173,51 @@ fn game_layouts_do_not_place_a_castle() {
 }
 
 #[test]
-fn hamlet_lab_places_a_tower_house() {
+fn hamlet_lab_skips_castle_on_tier_0() {
     let mut cfg = castle_cfg(0, 1);
     cfg.dwelling_min = 6;
     cfg.dwelling_max = 6;
     let plan = plan(&cfg).expect("plan");
-    assert_eq!(plan.castle_count, 1);
-    let castle = plan
-        .shapes
+    assert_eq!(plan.castle_count, 0);
+    assert!(plan.shapes.iter().all(|s| s.kind != ShapeKind::Castle));
+}
+
+fn castle_of(plan: &super::Plan2D) -> &super::Shape {
+    plan.shapes
         .iter()
         .find(|s| s.kind == ShapeKind::Castle)
-        .expect("castle");
-    assert_eq!(castle.catalog_id, "castle_tower_house");
-    assert!((castle.half_size.x * 2.0 - 16.0).abs() < 1e-4);
-    assert!((castle.half_size.y * 2.0 - 16.0).abs() < 1e-4);
+        .expect("castle")
 }
 
 #[test]
-fn town_lab_places_keep_and_curtain() {
-    let mut cfg = castle_cfg(2, 3);
-    cfg.dwelling_min = 30;
-    cfg.dwelling_max = 30;
-    let plan = plan(&cfg).expect("plan");
-    assert_eq!(plan.castle_count, 1);
-    let castle = plan
-        .shapes
-        .iter()
-        .find(|s| s.kind == ShapeKind::Castle)
-        .expect("castle");
-    assert_eq!(castle.catalog_id, "castle_keep_and_curtain");
-    assert_eq!(plan.house_count, 30, "{}", plan.underfill_message);
-    assert!(plan.civic_count >= 4);
+fn castle_grows_with_settlement_tier() {
+    let village = plan(&castle_cfg(1, 7)).expect("village");
+    let town = {
+        let mut cfg = castle_cfg(2, 7);
+        cfg.dwelling_min = 30;
+        cfg.dwelling_max = 30;
+        plan(&cfg).expect("town")
+    };
+    let port = {
+        let mut cfg = castle_cfg(3, 7);
+        cfg.dwelling_min = 40;
+        cfg.dwelling_max = 40;
+        plan(&cfg).expect("port")
+    };
+    let v = castle_of(&village);
+    let t = castle_of(&town);
+    let p = castle_of(&port);
+    assert_eq!(v.catalog_id, "castle_keep_8x6");
+    assert_eq!(t.catalog_id, "castle_keep_12x10");
+    assert_eq!(p.catalog_id, "castle_keep_16x14");
+    assert!(t.half_size.x > v.half_size.x && t.half_size.y > v.half_size.y);
+    assert!(p.half_size.x > t.half_size.x && p.half_size.y > t.half_size.y);
+    assert_eq!(town.house_count, 30, "{}", town.underfill_message);
 }
 
 #[test]
 fn castle_gate_faces_the_plaza() {
-    let plan = plan(&castle_cfg(0, 11)).expect("plan");
+    let plan = plan(&castle_cfg(1, 11)).expect("plan");
     let castle = plan
         .shapes
         .iter()
@@ -336,6 +345,40 @@ fn wet_and_cliff_plots_are_refused() {
 
     let cliff = super::sample_footprint(&UphillDoor { grade: 0.8 }, Vec2::ZERO, 2.1, 2.5, 0.0);
     assert!(super::seat_building(&cliff, 0.7).is_none());
+}
+
+#[test]
+fn castle_seat_ignores_a_pit_in_the_bailey() {
+    struct BaileyPit;
+    impl Plot for BaileyPit {
+        fn height(&self, p: Vec2) -> f32 {
+            if p.length() < 1.5 {
+                -8.0
+            } else {
+                0.0
+            }
+        }
+        fn wetness(&self, _: Vec2) -> f32 {
+            -5.0
+        }
+    }
+    let layout = super::castle_layout("castle_keep_8x6").expect("village");
+    let castle = super::sample_castle_footprint(&BaileyPit, Vec2::ZERO, 0.0, layout);
+    assert!(
+        super::seat_building(&castle, 2.7).is_some(),
+        "the bailey is not the castle floor"
+    );
+    let filled = super::sample_footprint(
+        &BaileyPit,
+        Vec2::ZERO,
+        layout.size_x() * 0.5,
+        layout.size_z() * 0.5,
+        0.0,
+    );
+    assert!(
+        super::seat_building(&filled, 2.7).is_none(),
+        "a house plot would treat the yard as the room"
+    );
 }
 
 #[test]

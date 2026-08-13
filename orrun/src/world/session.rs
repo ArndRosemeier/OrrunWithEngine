@@ -24,6 +24,7 @@ use thiserror::Error;
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::fauna::{FaunaError, FaunaLayer};
+use super::footprint::BuildingIndex;
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
@@ -292,6 +293,13 @@ impl WorldSession {
         self.ponds.field()
     }
 
+    fn plot_index(&self) -> Arc<BuildingIndex> {
+        self.settlements
+            .as_ref()
+            .map(SettlementLayer::plot_index)
+            .unwrap_or_else(|| Arc::new(BuildingIndex::new(Vec::new())))
+    }
+
     /// Global position of the player, once they exist.
     pub fn player_position(&self) -> Option<GlobalPosition> {
         self.player.map(|p| p.position)
@@ -487,22 +495,17 @@ impl WorldSession {
             return Ok(());
         }
         if rebuilt {
-            let plots = self
-                .settlements
-                .as_ref()
-                .map(|s| s.plots().to_vec())
-                .unwrap_or_default();
-            self.stream.set_house_plots(world, plots)?;
+            let plots = self.plot_index();
+            self.stream.set_house_plots(world, (*plots).clone())?;
             self.stream.sync(world, focus, None)?;
-            if !self.stream.required_ready(focus) || self.stream.walked_pending_count() > 0 {
+            if !self.stream.required_ready(focus) {
                 return Ok(());
             }
         }
-        let plots = self
-            .settlements
-            .as_ref()
-            .map(|s| s.plots().to_vec())
-            .unwrap_or_default();
+        if self.settlements.as_ref().is_some_and(|s| s.staging(focus)) {
+            return Ok(());
+        }
+        let plots = self.plot_index();
         if let Some(scatter) = self.scatter.as_mut() {
             let t = Instant::now();
             scatter.follow(
@@ -526,18 +529,21 @@ impl WorldSession {
                     scatter.busy(),
                 ),
             );
-            if scatter.busy() {
-                return Ok(());
-            }
         }
         if let Some(fauna) = self.fauna.as_mut() {
             let t = Instant::now();
+            let hamlets = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::hamlets)
+                .unwrap_or(&[]);
             fauna.follow(
                 world,
                 &self.stream,
                 &self.surface,
                 &self.ponds.field(),
-                &plots,
+                plots.as_ref(),
+                hamlets,
                 focus,
                 focus,
                 0.0,
@@ -554,7 +560,7 @@ impl WorldSession {
                     fauna.busy(),
                 ),
             );
-            if fauna.filling() {
+            if fauna.busy() {
                 return Ok(());
             }
         }
@@ -626,30 +632,24 @@ impl WorldSession {
             false
         };
         if rebuilt {
-            let plots = self
-                .settlements
-                .as_ref()
-                .map(|s| s.plots().to_vec())
-                .unwrap_or_default();
-            self.stream.set_house_plots(world, plots)?;
+            let plots = self.plot_index();
+            self.stream.set_house_plots(world, (*plots).clone())?;
         }
         self.stream.sync(world, foot, Some(player.heading))?;
         world.hitch_span(
             "stream",
             hitch_ms(t),
             format!(
-                "resident={} pending={} walked_pending={} rebase={rebased} hamlet_rebuild={rebuilt} houses={}",
+                "resident={} pending={} walked_pending={} rebase={rebased} hamlet_rebuild={rebuilt} houses={} tiles={}/{}",
                 self.stream.resident_count(),
                 self.stream.pending_count(),
                 self.stream.walked_pending_count(),
                 self.settlements.as_ref().map_or(0, SettlementLayer::placed_count),
+                self.settlements.as_ref().map_or(0, SettlementLayer::tile_gpu_count),
+                self.settlements.as_ref().map_or(0, SettlementLayer::tile_backlog),
             ),
         );
-        let plots = self
-            .settlements
-            .as_ref()
-            .map(|s| s.plots().to_vec())
-            .unwrap_or_default();
+        let plots = self.plot_index();
         if let Some(scatter) = self.scatter.as_mut() {
             let t = Instant::now();
             scatter.follow(
@@ -701,6 +701,7 @@ impl WorldSession {
                 &self.surface,
                 &self.ponds.field(),
                 &plots,
+                &hamlets,
                 foot,
                 foot,
                 input.dt,

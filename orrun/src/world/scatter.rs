@@ -36,7 +36,7 @@ use thiserror::Error;
 use glam::{Vec2, Vec3};
 
 use super::coords::CHUNK_SPAN_M;
-use super::footprint::{self, HousePlot};
+use super::footprint::BuildingIndex;
 use super::look::{SNOW_FULL_M, SNOW_LINE_M, SNOW_SLOPE_END, SNOW_SLOPE_START, SUN_DIR};
 use super::ponds::PondField;
 use super::rng::{value_noise, CellRng};
@@ -218,6 +218,11 @@ impl PropClass {
             // range is what makes a hillside of them, not a cloned hedge.
             Self::Bush => (0.75, 1.75),
         }
+    }
+
+    /// Towns keep wilderness grass, trees, and scrub off streets and roofs.
+    fn skips_urban(self) -> bool {
+        matches!(self, Self::Grass | Self::Tree | Self::Bush)
     }
 
     /// Whether being near water changes how much of this class belongs here,
@@ -724,7 +729,7 @@ struct Sowing {
     surface: Arc<ContinentalSurface>,
     ponds: Arc<PondField>,
     ground: ContactSnapshot,
-    plots: Vec<HousePlot>,
+    plots: Arc<BuildingIndex>,
 }
 
 /// Far-band pine stand-ins: same cover field as the tint, medium-tier height.
@@ -774,7 +779,7 @@ pub struct ScatterLayer {
     /// budget that decides how far behind the cover can fall while moving.
     sow_ms: f32,
     /// Last footprints a sow was started against.
-    house_plots: Vec<HousePlot>,
+    house_plots: Arc<BuildingIndex>,
     /// Sprigs of the standing near window, grouped for budgeted upload.
     near_buckets: HashMap<(usize, i32, i32), Vec<Sprig>>,
     /// Tree cells waiting to go full-res, nearest first, then FIFO.
@@ -860,7 +865,7 @@ impl ScatterLayer {
             pending: None,
             far_pending: None,
             sow_ms: 0.0,
-            house_plots: Vec::new(),
+            house_plots: Arc::new(BuildingIndex::new(Vec::new())),
             near_buckets: HashMap::new(),
             tree_queue: VecDeque::new(),
             other_queue: VecDeque::new(),
@@ -922,7 +927,7 @@ impl ScatterLayer {
         self.resident_chunks = 0;
         self.near_placed = 0;
         self.far_placed = 0;
-        self.house_plots.clear();
+        self.house_plots = Arc::new(BuildingIndex::new(Vec::new()));
         self.near_buckets.clear();
         self.tree_queue.clear();
         self.other_queue.clear();
@@ -946,7 +951,7 @@ impl ScatterLayer {
         surface: &Arc<ContinentalSurface>,
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
-        house_plots: &[HousePlot],
+        house_plots: &Arc<BuildingIndex>,
         rebased: bool,
     ) -> EngineResult<bool> {
         let resident = stream.resident_count();
@@ -1003,7 +1008,7 @@ impl ScatterLayer {
         surface: &Arc<ContinentalSurface>,
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
-        house_plots: &[HousePlot],
+        house_plots: &Arc<BuildingIndex>,
         resident: usize,
     ) -> EngineResult<bool> {
         let moved = self
@@ -1014,7 +1019,8 @@ impl ScatterLayer {
         // again, so residency counts as movement — but only once the streamer has
         // stopped, or a spawn would chase every chunk of the ring in turn and sow
         // the whole window a hundred and sixty-nine times.
-        let plots_changed = self.house_plots.as_slice() != house_plots;
+        let plots_changed =
+            !Arc::ptr_eq(&self.house_plots, house_plots) && *self.house_plots != **house_plots;
         let wanted = moved >= RESEED_M
             || (resident != self.resident_chunks && stream.walked_pending_count() == 0)
             || plots_changed;
@@ -1022,7 +1028,7 @@ impl ScatterLayer {
             return Ok(false);
         }
 
-        self.house_plots = house_plots.to_vec();
+        self.house_plots = Arc::clone(house_plots);
         let sowing = Sowing {
             seed: self.seed,
             variants: self
@@ -1033,7 +1039,7 @@ impl ScatterLayer {
             surface: Arc::clone(surface),
             ponds: Arc::clone(ponds),
             ground: stream.contact_snapshot(),
-            plots: self.house_plots.clone(),
+            plots: Arc::clone(&self.house_plots),
         };
         self.pending = Some(Pending {
             focus,
@@ -1498,7 +1504,10 @@ impl Sowing {
                     }
                 }
                 let p = GlobalXZ::at(jx, jz);
-                if footprint::blocks_prop(&self.plots, p) {
+                if self.plots.blocks_prop(p) {
+                    continue;
+                }
+                if class.skips_urban() && self.plots.urban_cover(p) {
                     continue;
                 }
 

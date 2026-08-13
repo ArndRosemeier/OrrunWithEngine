@@ -11,6 +11,8 @@
 
 use glam::{Vec2, Vec3};
 
+use super::castle::CastleLayout;
+
 /// Sample inset vs catalog size so eaves do not veto a plot the walls would sit on.
 pub const SEAT_INSET: f32 = 0.82;
 /// Dry margin a door keeps from standing water, in metres of the signed field.
@@ -113,6 +115,59 @@ pub fn sample_footprint(
         upness: upness_at(plot, door),
         wettest,
     }
+}
+
+/// Wall-ring and keep samples. The bailey courtyard is not a house floor.
+pub fn sample_castle_footprint(
+    plot: &dyn Plot,
+    center: Vec2,
+    yaw: f32,
+    layout: CastleLayout,
+) -> FootprintSample {
+    let half_x = layout.size_x() * 0.5;
+    let half_z = layout.size_z() * 0.5;
+    let door = door_point(center, half_z, yaw);
+    let mut points = vec![door];
+    let wall_mid_x = (half_x - layout.wall_m * 0.5).max(0.0);
+    let wall_mid_z = (half_z - layout.wall_m * 0.5).max(0.0);
+    points.extend(rect_samples(center, wall_mid_x, wall_mid_z, yaw));
+    let keep_c = layout.keep_center(center, yaw);
+    let keep_mid_x = (layout.keep_half_x - layout.wall_m * 0.5).max(0.0);
+    let keep_mid_z = (layout.keep_half_z - layout.wall_m * 0.5).max(0.0);
+    points.extend(rect_samples(keep_c, keep_mid_x, keep_mid_z, yaw));
+
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    let mut wettest = f32::NEG_INFINITY;
+    for p in &points {
+        let z = plot.height(*p);
+        min_z = min_z.min(z);
+        max_z = max_z.max(z);
+        wettest = wettest.max(plot.wetness(*p));
+    }
+    FootprintSample {
+        door,
+        door_z: plot.height(door),
+        min_z,
+        max_z,
+        upness: upness_at(plot, door),
+        wettest,
+    }
+}
+
+fn rect_samples(center: Vec2, half_x: f32, half_z: f32, yaw: f32) -> [Vec2; 8] {
+    let axis_x = Vec2::new(yaw.cos(), -yaw.sin());
+    let axis_z = Vec2::new(yaw.sin(), yaw.cos());
+    [
+        center + axis_x * half_x + axis_z * half_z,
+        center + axis_x * half_x - axis_z * half_z,
+        center - axis_x * half_x + axis_z * half_z,
+        center - axis_x * half_x - axis_z * half_z,
+        center + axis_x * half_x,
+        center - axis_x * half_x,
+        center + axis_z * half_z,
+        center - axis_z * half_z,
+    ]
 }
 
 /// Whether this footprint can take a door-sill seat on `foundation_m` of plinth.

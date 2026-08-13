@@ -33,7 +33,7 @@ use engine::world::World;
 
 use super::chunk_mesh::TerrainChunkBuilder;
 use super::coords::{chunk_span, CHUNK_SAMPLE_M, CHUNK_SPAN_M};
-use super::footprint::{self, HousePlot};
+use super::footprint::BuildingIndex;
 use super::ponds::SharedPonds;
 use super::surface::ContinentalSurface;
 
@@ -145,7 +145,7 @@ pub struct WorldStream {
     near: ChunkStream,
     /// Coarse tiers, finest first.
     distant: Vec<ChunkStream>,
-    plots: Arc<RwLock<Vec<HousePlot>>>,
+    plots: Arc<RwLock<BuildingIndex>>,
 }
 
 impl WorldStream {
@@ -155,7 +155,7 @@ impl WorldStream {
     /// tier samples every hundred and twenty-five metres, where a pond is one
     /// sample wide.
     pub fn new(surface: Arc<ContinentalSurface>, ponds: SharedPonds) -> Self {
-        let plots = Arc::new(RwLock::new(Vec::new()));
+        let plots = Arc::new(RwLock::new(BuildingIndex::new(Vec::new())));
         let builder = Arc::new(
             TerrainChunkBuilder::new(Arc::clone(&surface))
                 .with_ponds(Arc::clone(&ponds))
@@ -207,20 +207,19 @@ impl WorldStream {
     }
 
     /// Cap interior ground under seated houses and rebuild the overlapping chunks.
-    pub fn set_house_plots(
-        &mut self,
-        world: &mut World,
-        plots: Vec<HousePlot>,
-    ) -> EngineResult<()> {
+    pub fn set_house_plots(&mut self, world: &mut World, plots: BuildingIndex) -> EngineResult<()> {
         {
             let prev = self.plots.read().expect("house plots");
-            if prev.as_slice() == plots.as_slice() {
+            if *prev == plots {
                 return Ok(());
             }
         }
-        let mut coords = footprint::overlapping_chunks(&plots, chunk_span());
-        for coord in
-            footprint::overlapping_chunks(&self.plots.read().expect("house plots"), chunk_span())
+        let mut coords = plots.overlapping_chunks(chunk_span());
+        for coord in self
+            .plots
+            .read()
+            .expect("house plots")
+            .overlapping_chunks(chunk_span())
         {
             if !coords.contains(&coord) {
                 coords.push(coord);
@@ -270,7 +269,7 @@ impl WorldStream {
     /// on purpose and standing on one would drop the player through the world.
     /// Inside a house the interpolated grid still ramps; the floor cap wins.
     pub fn contact_height(&self, p: GlobalXZ) -> Option<f32> {
-        if let Some(y) = footprint::terrain_cap(&self.plots.read().expect("house plots"), p) {
+        if let Some(y) = self.plots.read().expect("house plots").terrain_cap(p) {
             return Some(y);
         }
         self.near.contact_height(p)
