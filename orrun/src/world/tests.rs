@@ -1210,6 +1210,21 @@ fn adjacent_chunks_share_their_edge_exactly() {
             a_land.normals[ai], b_land.normals[bi],
             "edge normal differs at row {iz} (halo not shared?)"
         );
+        assert_eq!(
+            a_land.uvs[ai], b_land.uvs[bi],
+            "edge soil splat differs at row {iz}"
+        );
+    }
+    assert_eq!(a_land.uvs.len(), a_land.positions.len());
+    for uv in &a_land.uvs {
+        assert!(
+            (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]),
+            "soil splat {uv:?} is not a weight"
+        );
+        assert!(
+            uv[0] + uv[1] <= 1.0 + 1e-5,
+            "soil splat {uv:?} sums past lush"
+        );
     }
 
     // Water vertices that land on the shared plane must coincide too.
@@ -1227,6 +1242,44 @@ fn adjacent_chunks_share_their_edge_exactly() {
             "water contour tore at the seam: {pa:?} vs {pb:?}"
         );
     }
+}
+
+#[test]
+fn inland_grass_is_not_one_soil() {
+    // Dry sward and peat have to actually win somewhere, or the extra albedos
+    // are dead bindings and the continent is one green tile with a tint. The
+    // geographic centre is often alpine, so this walks a diagonal that crosses
+    // low woods and sunny flanks.
+    let (atlas, surface) = world_of(1, 48);
+    let builder = TerrainChunkBuilder::new(Arc::clone(&surface));
+    let span = atlas.size as f64 * CELL_METRES as f64 / CHUNK_SPAN_M;
+    let mut dry = 0u32;
+    let mut moor = 0u32;
+    for t in [0.28, 0.38, 0.48, 0.58] {
+        let c = (span * t) as i32;
+        let Some(payload) = builder.build(ChunkCoord::new(c, c)).expect("build") else {
+            continue;
+        };
+        let land = payload
+            .layer(engine::space::ChunkLayer::Land)
+            .expect("land");
+        for uv in &land.uvs {
+            if uv[0] > 0.35 {
+                dry += 1;
+            }
+            if uv[1] > 0.35 {
+                moor += 1;
+            }
+        }
+    }
+    assert!(
+        dry > 80,
+        "sunny/arid ground never took the straw albedo ({dry} verts)"
+    );
+    assert!(
+        moor > 80,
+        "banks and woods never took the peat albedo ({moor} verts)"
+    );
 }
 
 fn split_layers(
@@ -1422,10 +1475,7 @@ fn wait_until_world_for(session: &mut WorldSession, world: &mut World, budget: D
 #[test]
 fn the_saved_stand_enters_the_world() {
     // The live save is where Continue stalls at "streaming ground 0%".
-    let Some(stand) = crate::save::SavedStand::read(20260809, 256)
-        .ok()
-        .flatten()
-    else {
+    let Some(stand) = crate::save::SavedStand::read(20260809, 256).ok().flatten() else {
         return;
     };
     eprintln!(

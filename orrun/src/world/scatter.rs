@@ -96,6 +96,12 @@ const BANK_REACH_M: f32 = 22.0;
 /// Stand size, and its own stream out of the world seed.
 const CANOPY_NOISE_SCALE_M: f64 = 260.0;
 const CANOPY_NOISE_SALT: u64 = 0x0F0_1E5;
+/// Mottling inside a meadow: patches of dry sward vs lush, tens of metres.
+const SOIL_PATCH_SCALE_M: f64 = 48.0;
+const SOIL_PATCH_SALT: u64 = 0x5011_7A7C;
+/// Which way a whole hillside leans, so a dry flank is a place, not speckles.
+const SOIL_DRIFT_SCALE_M: f64 = 170.0;
+const SOIL_DRIFT_SALT: u64 = 0xD81F_700D;
 
 /// Where a stand is thicker or thinner than its atlas cell says.
 ///
@@ -109,6 +115,27 @@ pub(super) fn canopy_noise(seed: u64, p: GlobalXZ) -> f32 {
         p.x / CANOPY_NOISE_SCALE_M,
         p.z / CANOPY_NOISE_SCALE_M,
     )
+}
+
+/// `[0, 1]` mottling inside a meadow. Shared with the terrain splat so a dry
+/// patch of grass tufts sits on dry ground, not on a lush tile.
+pub(super) fn soil_patch(seed: u64, p: GlobalXZ) -> f32 {
+    value_noise(
+        seed ^ SOIL_PATCH_SALT,
+        p.x / SOIL_PATCH_SCALE_M,
+        p.z / SOIL_PATCH_SCALE_M,
+    ) * 0.5
+        + 0.5
+}
+
+/// `[0, 1]` hillside lean: which soil a slope prefers, tens to hundreds of metres.
+pub(super) fn soil_drift(seed: u64, p: GlobalXZ) -> f32 {
+    value_noise(
+        seed ^ SOIL_DRIFT_SALT,
+        p.x / SOIL_DRIFT_SCALE_M,
+        p.z / SOIL_DRIFT_SCALE_M,
+    ) * 0.5
+        + 0.5
 }
 
 #[derive(Debug, Error)]

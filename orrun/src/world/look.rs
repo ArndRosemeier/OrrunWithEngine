@@ -53,6 +53,12 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
     let grass = world
         .create_terrain_albedo(TerrainAlbedo::Grass, ALBEDO_SIZE, tex_seed)
         .expect("grass albedo");
+    let grass_dry = world
+        .create_terrain_albedo(TerrainAlbedo::GrassDry, ALBEDO_SIZE, tex_seed ^ 0xD8A11)
+        .expect("dry grass albedo");
+    let grass_moor = world
+        .create_terrain_albedo(TerrainAlbedo::GrassMoor, ALBEDO_SIZE, tex_seed ^ 0x3EA7)
+        .expect("moor albedo");
     let sand = world
         .create_terrain_albedo(TerrainAlbedo::Sand, ALBEDO_SIZE, tex_seed ^ 0x51)
         .expect("sand albedo");
@@ -62,6 +68,8 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
     let ground = world
         .create_terrain_material(TerrainMaterialDesc {
             grass,
+            grass_dry,
+            grass_moor,
             sand,
             rock,
             metres_per_tile: 7.0,
@@ -69,7 +77,9 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
             rock_slope_end: 0.70,
             sand_height_band: 10.0,
             sea_surface_z,
-            tint_strength: 0.30,
+            // Textures carry the soil now; tint is only the last shade under a
+            // stand, not the whole meadow going one green.
+            tint_strength: 0.18,
             // Shaded faces hold snow lower; sunny ones stay rock longer. Full
             // cover is a band, not a contour, and steep faces shed it.
             snow_line_m: 1_050.0,

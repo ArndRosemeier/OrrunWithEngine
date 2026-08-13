@@ -22,8 +22,10 @@ use glam::{Vec3, Vec4};
 use super::coords::{chunk_span, CHUNK_SAMPLE_M};
 use super::footprint::{self, HousePlot};
 use super::ponds::SharedPonds;
-use super::scatter::{canopy_noise, Fall, GroundCover};
-use super::surface::{lerp, ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody};
+use super::scatter::{canopy_noise, soil_drift, soil_patch, Fall, GroundCover};
+use super::surface::{
+    lerp, smoothstep, ContinentalSurface, SurfaceColumn, SurfaceMaterial, WaterBody,
+};
 
 /// Depth that a fully opaque water vertex stands for.
 ///
@@ -243,6 +245,7 @@ impl TerrainChunkBuilder {
         let mut positions = Vec::with_capacity(count);
         let mut normals = Vec::with_capacity(count);
         let mut colors = Vec::with_capacity(count);
+        let mut uvs = Vec::with_capacity(count);
         let mut indices = Vec::with_capacity((s.verts - 1) * (s.verts - 1) * 6);
 
         let step = s.step as f32;
@@ -267,9 +270,11 @@ impl TerrainChunkBuilder {
                     s.origin.x + ix as f64 * s.step,
                     s.origin.z + iz as f64 * s.step,
                 );
+                let look = self.vertex_look(column, normal, sea, p);
                 positions.push(Vec3::new(lx, column.ground() - self.sink_m, lz));
                 normals.push(normal);
-                colors.push(self.vertex_color(column, normal, sea, p));
+                colors.push(look.0);
+                uvs.push(look.1);
             }
         }
 
@@ -297,6 +302,7 @@ impl TerrainChunkBuilder {
                     &mut positions,
                     &mut normals,
                     &mut colors,
+                    &mut uvs,
                     &mut indices,
                 );
             }
@@ -307,21 +313,32 @@ impl TerrainChunkBuilder {
             positions,
             normals,
             colors,
-            uvs: Vec::new(),
+            uvs,
             indices,
             opaque_index_count,
         }
     }
 
-    /// The colour of one land vertex: material, relief, and what grows on it.
+    /// Colour and soil splat for one land vertex.
     ///
-    /// The cover terms matter far past the range anything is scattered at. Props
-    /// stop at a few hundred metres, and without this a forest that fills the
-    /// valley is grass-green ground from the far side of it — the landform reads
-    /// at ten kilometres but the land does not. Cover comes from the same
-    /// [`GroundCover`] the props are placed from, so the tint and the trees are
-    /// never in different places.
-    fn vertex_color(&self, column: SurfaceColumn, normal: Vec3, sea: f32, p: GlobalXZ) -> Vec4 {
+    /// Cover terms matter far past the range anything is scattered at. Props
+    /// stop at a few hundred metres; without this a forest that fills the
+    /// valley is one green from the far side of it. Cover comes from the same
+    /// [`GroundCover`] the props are placed from, so the dark floor and the
+    /// trees are never in different places.
+    ///
+    /// Mesh UVs are splat weights (`dry`, `moor`); lush is the remainder. They
+    /// follow climate, water, aspect, and two low-frequency fields — meadow
+    /// patches and hillside lean — so the ground mottles as a place, not as
+    /// noise. Gentle ground above the rock-height band still shows grass in
+    /// the shader, so splat is not gated on the CPU material class.
+    fn vertex_look(
+        &self,
+        column: SurfaceColumn,
+        normal: Vec3,
+        sea: f32,
+        p: GlobalXZ,
+    ) -> (Vec4, [f32; 2]) {
         let base = match column.material(sea) {
             SurfaceMaterial::Bed => self.style.bed,
             SurfaceMaterial::Sand => self.style.sand,
@@ -334,7 +351,7 @@ impl TerrainChunkBuilder {
         color.w = 1.0;
         if column.is_wet() {
             color.w = 0.0;
-            return color;
+            return (color, [0.0, 0.0]);
         }
         let slope = (1.0 - normal.y).clamp(0.0, 1.0);
         let lift = ((column.ground() * 0.015).sin() * 0.04) + slope * 0.06;
@@ -342,23 +359,45 @@ impl TerrainChunkBuilder {
         color.y = (color.y * (1.0 - slope * 0.05) + lift * 0.15).clamp(0.0, 1.0);
         color.z = (color.z * (1.0 - lift * 0.2)).clamp(0.0, 1.0);
 
+        let fall = Fall::of(normal);
         let cover = GroundCover::sample(
             &self.surface,
             p,
             column.ground(),
-            Fall::of(normal),
+            fall,
             canopy_noise(self.seed, p),
         )
         .with_water(column.wetness());
-        // Bare rock and sand keep their own colour: a stand thins out to nothing
-        // on a scree slope, and tinting one green would be inventing a forest
-        // the props then fail to put there.
+        // Bare rock and sand keep their own vertex colour: a stand thins out
+        // to nothing on a scree slope, and tinting one green would invent a
+        // forest the props then fail to put there. Tint is light because the
+        // splat textures now carry dry sward, peat, and duff.
         let soil = matches!(column.material(sea), SurfaceMaterial::Grass) as u8 as f32;
-        color = color.lerp(tint(CANOPY_TINT), soil * cover.tree * 0.72);
-        color = color.lerp(tint(RIPARIAN_TINT), soil * cover.bank * 0.55);
-        // Poor drainage: wet ground with nowhere to run to.
+        color = color.lerp(tint(CANOPY_TINT), soil * cover.tree * 0.40);
+        color = color.lerp(tint(RIPARIAN_TINT), soil * cover.bank * 0.28);
         let boggy = cover.bank * cover.moisture * (1.0 - slope / 0.08).clamp(0.0, 1.0);
-        color.lerp(tint(BOG_TINT), soil * boggy * 0.5)
+        color = color.lerp(tint(BOG_TINT), soil * boggy * 0.22);
+
+        // The shader still draws grass on gentle ground above the rock-height
+        // band, so splat follows climate, not the CPU material class. Wet
+        // columns already returned: the bed texture is the water shader's.
+        let patch = soil_patch(self.seed, p);
+        let drift = soil_drift(self.seed, p);
+        // Climate chooses the place; the 48 m patch only shifts the boundary.
+        let dry_signal = (1.0 - cover.moisture)
+            * (1.0 - cover.bank * 0.85)
+            * (0.32 + 0.68 * cover.aspect)
+            * (0.70 + 0.45 * cover.alpine)
+            * (0.55 + 0.60 * drift);
+        let moor_signal = (cover.bank * 0.55 + cover.moisture * 0.42 + cover.tree * 0.32)
+            * (1.0 - cover.alpine * 0.85)
+            * (1.0 - (fall.steep / 0.22).clamp(0.0, 1.0) * 0.55)
+            * (0.65 + 0.45 * (1.0 - drift));
+        let dry = smoothstep(0.22, 0.58, dry_signal * 0.82 + (patch - 0.5) * 0.36);
+        let moor =
+            smoothstep(0.20, 0.54, moor_signal * 0.88 + (0.5 - patch) * 0.22) * (1.0 - dry * 0.62);
+        let splat = [dry.clamp(0.0, 1.0), moor.clamp(0.0, 1.0)];
+        (color, splat)
     }
 
     /// Water is the `wetness >= 0` region of the surface, contoured with
@@ -450,6 +489,7 @@ fn push_wall_vert(
     positions: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     colors: &mut Vec<Vec4>,
+    uvs: &mut Vec<[f32; 2]>,
 ) -> u32 {
     let t = wall_t(plots, a, b);
     let p = lerp_xz(a, b, t);
@@ -463,6 +503,9 @@ fn push_wall_vert(
     let ca = colors[ia as usize];
     let cb = colors[ib as usize];
     colors.push(ca.lerp(cb, t));
+    let ua = uvs[ia as usize];
+    let ub = uvs[ib as usize];
+    uvs.push([ua[0] + (ub[0] - ua[0]) * t, ua[1] + (ub[1] - ua[1]) * t]);
     (positions.len() - 1) as u32
 }
 
@@ -475,6 +518,7 @@ fn emit_land_quad(
     positions: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     colors: &mut Vec<Vec4>,
+    uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
 ) {
     let p00 = world_of(s, ix, iz);
@@ -482,10 +526,10 @@ fn emit_land_quad(
     let p01 = world_of(s, ix, iz + 1);
     let p11 = world_of(s, ix + 1, iz + 1);
     emit_land_tri(
-        plots, s, sink_m, i00, i01, i11, p00, p01, p11, positions, normals, colors, indices, 0,
+        plots, s, sink_m, i00, i01, i11, p00, p01, p11, positions, normals, colors, uvs, indices, 0,
     );
     emit_land_tri(
-        plots, s, sink_m, i00, i11, i10, p00, p11, p10, positions, normals, colors, indices, 0,
+        plots, s, sink_m, i00, i11, i10, p00, p11, p10, positions, normals, colors, uvs, indices, 0,
     );
 }
 
@@ -502,6 +546,7 @@ fn emit_land_tri(
     positions: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     colors: &mut Vec<Vec4>,
+    uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
     depth: u8,
 ) {
@@ -521,6 +566,7 @@ fn emit_land_tri(
                 positions.push(Vec3::new(lx, cap - sink_m, lz));
                 normals.push(Vec3::Y);
                 colors.push(colors[ia as usize]);
+                uvs.push(uvs[ia as usize]);
                 emit_land_tri(
                     plots,
                     s,
@@ -534,6 +580,7 @@ fn emit_land_tri(
                     positions,
                     normals,
                     colors,
+                    uvs,
                     indices,
                     depth + 1,
                 );
@@ -550,6 +597,7 @@ fn emit_land_tri(
                     positions,
                     normals,
                     colors,
+                    uvs,
                     indices,
                     depth + 1,
                 );
@@ -566,6 +614,7 @@ fn emit_land_tri(
                     positions,
                     normals,
                     colors,
+                    uvs,
                     indices,
                     depth + 1,
                 );
@@ -580,7 +629,9 @@ fn emit_land_tri(
         return;
     }
     let mut split = |a: GlobalXZ, b: GlobalXZ, ia: u32, ib: u32| {
-        push_wall_vert(plots, s, sink_m, a, b, ia, ib, positions, normals, colors)
+        push_wall_vert(
+            plots, s, sink_m, a, b, ia, ib, positions, normals, colors, uvs,
+        )
     };
     if n_in == 1 {
         let (i_in, p_in, i0, p0, i1, p1) = if ins[0] {
