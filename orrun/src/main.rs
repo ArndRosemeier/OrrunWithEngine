@@ -34,8 +34,9 @@ use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
 use orrun::save::SavedStand;
 use orrun::settings::{self, Settings};
 use orrun::world::{
-    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Heading,
-    Locomotion, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession,
+    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentProxySpec,
+    ContinentalSurface, Heading, Locomotion, MapPoint, SessionState, WorldEntryRequest,
+    WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -585,14 +586,22 @@ fn main() {
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
     eprintln!("generating atlas seed={seed} size={size}…");
-    let mut generating: Option<JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>)>> = Some(
+    let mut generating: Option<
+        JoinHandle<(
+            Arc<ContinentAtlas>,
+            Arc<ContinentalSurface>,
+            ContinentProxySpec,
+        )>,
+    > = Some(
         std::thread::Builder::new()
             .name("atlas".into())
             .spawn(move || {
                 let atlas = ContinentAtlas::generate(seed, size);
                 *status_job.lock().expect("title status") = "Building continental terrain…".into();
                 let surface = ContinentalSurface::new(&atlas).expect("canonical surface");
-                (Arc::new(atlas), Arc::new(surface))
+                *status_job.lock().expect("title status") = "Building travel proxy…".into();
+                let proxy = ContinentProxySpec::build(&surface);
+                (Arc::new(atlas), Arc::new(surface), proxy)
             })
             .expect("atlas thread"),
     );
@@ -624,7 +633,7 @@ fn main() {
 
         if let Some(job) = generating.take() {
             if job.is_finished() {
-                let (atlas, surface) = job.join().expect("atlas thread");
+                let (atlas, surface, proxy) = job.join().expect("atlas thread");
                 eprintln!(
                     "ready: lakes={} rivers={} coasts={} nodes={} alpine_massifs={} hash={:#x}",
                     atlas.hydro.lakes.len(),
@@ -636,7 +645,9 @@ fn main() {
                 );
                 *status.lock().expect("title status") = String::new();
                 viewer = Some(AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface)));
-                session = Some(WorldSession::new(surface));
+                let mut world_session = WorldSession::new(surface);
+                world_session.attach_proxy(proxy);
+                session = Some(world_session);
             } else {
                 generating = Some(job);
             }
@@ -669,9 +680,9 @@ fn main() {
                         .begin_entry(world, request)
                         .unwrap_or_else(|err| panic!("cannot open the starting stand: {err}"));
                 }
-                if session.state() == SessionState::Loading {
+                if session.state() == SessionState::Travel {
                     session
-                        .step(world, WalkInput::IDLE)
+                        .update(world, frame)
                         .unwrap_or_else(|err| panic!("world session failed: {err}"));
                 }
             }
@@ -679,7 +690,7 @@ fn main() {
                 status.lock().expect("title status").clone()
             } else if session
                 .as_ref()
-                .is_some_and(|s| s.state() == SessionState::Loading)
+                .is_some_and(|s| s.state() == SessionState::Travel)
             {
                 session.as_ref().expect("atlas ready").loading_status()
             } else {
@@ -720,17 +731,7 @@ fn main() {
 
         match session.state() {
             SessionState::Atlas => draw_atlas(viewer, session, world, frame),
-            SessionState::Loading => {
-                if title_art.is_none() {
-                    title_art = Some(load_title_vista(frame.ui.ctx()));
-                }
-                draw_loading(
-                    viewer,
-                    session,
-                    frame,
-                    title_art.as_ref().expect("title art"),
-                );
-            }
+            SessionState::Travel => draw_travel(viewer, session, frame),
             SessionState::World => draw_world_hud(session, world, frame),
         }
         draw_settings(&mut settings_ui, world, frame);
@@ -1152,7 +1153,7 @@ fn settlement_tier_name(tier: u8) -> &'static str {
     }
 }
 
-fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame, art: &TextureHandle) {
+fn draw_travel(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     let cream = Color32::from_rgb(235, 230, 210);
     let mute = Color32::from_rgb(168, 186, 204);
@@ -1166,13 +1167,18 @@ fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame, art
         .filter(|note| !note.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("Travelling to {where_to}"));
-    let status = session.loading_status();
+    let phase = session.travel_phase().map(|p| p.name()).unwrap_or("travel");
+    let status = format!("{phase}  ·  {}", session.loading_status());
+    let veil = session.travel_veil();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(&ctx, |ui| {
             let rect = ui.max_rect();
-            paint_vista_backdrop(ui, rect, art);
+            let painter = ui.painter_at(rect);
+            if veil > 0.02 {
+                paint_travel_veil(&painter, rect, veil);
+            }
 
             egui::Area::new(egui::Id::new("travel_status"))
                 .anchor(Align2::CENTER_BOTTOM, [0.0, -36.0])
@@ -1180,12 +1186,28 @@ fn draw_loading(viewer: &AtlasViewer, session: &WorldSession, frame: &Frame, art
                 .interactable(false)
                 .show(ui.ctx(), |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new(heading).size(22.0).color(cream));
-                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new(heading).size(20.0).color(cream));
+                        ui.add_space(6.0);
                         ui.label(egui::RichText::new(status).size(14.0).color(mute));
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Space skips the camera, not the landing")
+                                .size(12.0)
+                                .color(Color32::from_rgb(140, 156, 168)),
+                        );
                     });
                 });
         });
+}
+
+fn paint_travel_veil(painter: &egui::Painter, rect: Rect, veil: f32) {
+    let veil = veil.clamp(0.0, 1.0);
+    paint_edge_fade(painter, rect, true);
+    paint_edge_fade(painter, rect, false);
+    let wash = (veil * 70.0) as u8;
+    if wash > 0 {
+        painter.rect_filled(rect, 0.0, Color32::from_white_alpha(wash));
+    }
 }
 
 struct SettingsUi {
@@ -1313,8 +1335,9 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         InstanceSubmit::GpuIndirect => "GPU",
         InstanceSubmit::CpuIndexed => "CPU",
     };
+    let door = session.door_hint().unwrap_or("");
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}",
+        "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}{door}",
         p.x,
         p.z,
         p.y,
@@ -1324,6 +1347,11 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         session.stream().resident_count(),
         session.fauna_count(),
         frame.fps,
+        door = if door.is_empty() {
+            String::new()
+        } else {
+            format!("  |  {door}")
+        },
     );
     // Non-interactive: the pointer belongs to mouse-look, not to the HUD.
     egui::Area::new(egui::Id::new("world_hud"))

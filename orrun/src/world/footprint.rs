@@ -20,8 +20,11 @@ pub const PROP_CLEAR_M: f32 = 0.85;
 pub const URBAN_PAD_M: f32 = 8.0;
 /// Spatial hash cell for plot queries. Small enough that a sample hits a handful of houses.
 const INDEX_CELL_M: f64 = 32.0;
-/// Half-width of the door opening that stays at grade.
-pub const DOOR_HALF_M: f32 = 1.1;
+/// Half-width of the narrowest authored dwelling door (`door_b` is 1.05 m).
+///
+/// This must not exceed the portal half-width: otherwise collision permits a
+/// path beside the portal quad into the empty exterior shell.
+pub const DOOR_HALF_M: f32 = 1.05 * 0.5;
 /// How far into the room from the door wall the sill strip reaches.
 pub const DOOR_DEPTH_M: f32 = 0.9;
 /// Metres the interior ground sits below the kit floor, so the two do not z-fight.
@@ -395,11 +398,11 @@ fn push_box(
     if half_x < 0.05 || half_z < 0.05 {
         return;
     }
-    out.push(StaticCollider {
-        at: local_to_world(at, yaw, lx, lz),
+    out.push(StaticCollider::new(
+        local_to_world(at, yaw, lx, lz),
         yaw,
-        shape: ColliderShape::Box { half_x, half_z },
-    });
+        ColliderShape::Box { half_x, half_z },
+    ));
 }
 
 /// Hollow rectangle: four walls, optional opening on local −Z.
@@ -627,6 +630,18 @@ mod tests {
         assert!(
             to.z < 196.5,
             "the south wall beside the door should stop the player, got z={}",
+            to.z
+        );
+    }
+
+    #[test]
+    fn a_walker_cannot_bypass_the_portal_beside_the_door() {
+        let house = BuildingPlot::House(plot());
+        let from = GlobalXZ::at(100.7, 200.0 - 5.0);
+        let to = collide(house, from, 0.0, 4.0);
+        assert!(
+            to.z < 196.5,
+            "collision gap was wider than the portal, got z={}",
             to.z
         );
     }

@@ -17,8 +17,8 @@ use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
     chunk_span, classify_settlement, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface,
     EntryError, HamletStand, Locomotion, MapPoint, PondField, PondWindow, PropClass,
-    ScatterCatalog, SessionState, SettlementLayer, TerrainChunkBuilder, WalkInput,
-    WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MEDIUM,
+    ScatterCatalog, SessionState, SettlementLayer, TerrainChunkBuilder, TravelPhase, TravelTimings,
+    WalkInput, WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MEDIUM,
     MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
@@ -702,12 +702,7 @@ fn lowland_has_a_quiet_floor_and_occasional_hills() {
                 continue;
             }
             slopes.push(local_slope(&surface, x, z, step));
-            grain.push(
-                surface
-                    .terrain_layers(GlobalXZ::at(x, z))
-                    .grain_m
-                    .abs(),
-            );
+            grain.push(surface.terrain_layers(GlobalXZ::at(x, z)).grain_m.abs());
         }
     }
     assert!(
@@ -2046,7 +2041,7 @@ fn standing_session(seed: i32, size: usize) -> Option<(World, WorldSession)> {
         .expect("river point");
 
     let mut world = World::new();
-    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
     session.begin_entry(&mut world, request).expect("entry");
     wait_until_world(&mut session, &mut world);
     Some((world, session))
@@ -2092,7 +2087,7 @@ fn the_saved_stand_enters_the_world() {
     let bounds = AtlasBounds::of(&atlas);
     let request = WorldEntryRequest::at_global(bounds, stand.at()).expect("saved point");
     let mut world = World::new();
-    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
     session.begin_entry(&mut world, request).expect("entry");
     wait_until_world_for(&mut session, &mut world, Duration::from_secs(180));
     assert_eq!(session.state(), SessionState::World);
@@ -2140,10 +2135,10 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
         .expect("river point");
 
     let mut world = World::new();
-    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
     assert_eq!(session.state(), SessionState::Atlas);
     session.begin_entry(&mut world, request).expect("entry");
-    assert_eq!(session.state(), SessionState::Loading);
+    assert_eq!(session.state(), SessionState::Travel);
     // The spawn is not known at the moment of the request: the water under it has
     // to be traced first, and that happens behind the loading screen.
     assert!(session.spawn().is_none());
@@ -2172,6 +2167,195 @@ fn a_session_loads_its_entry_ring_before_handing_over_control() {
     assert_eq!(session.state(), SessionState::World);
 }
 
+fn land_request(seed: i32, size: usize) -> Option<(Arc<ContinentalSurface>, WorldEntryRequest)> {
+    let (atlas, surface) = world_of(seed, size);
+    let bounds = AtlasBounds::of(&atlas);
+    let mid = river_reach(&atlas)?;
+    let request = WorldEntryRequest::at_global(bounds, GlobalXZ::at(mid.x as f64, mid.y as f64))
+        .expect("river point");
+    Some((surface, request))
+}
+
+fn ocean_request(seed: i32, size: usize) -> Option<(Arc<ContinentalSurface>, WorldEntryRequest)> {
+    let (atlas, surface) = world_of(seed, size);
+    let bounds = AtlasBounds::of(&atlas);
+    let hydro = surface.hydro();
+    for az in 0..atlas.size {
+        for ax in 0..atlas.size {
+            let idx = az * atlas.size + ax;
+            if hydro.cell_coasts[idx].is_empty() && hydro.cell_lakes[idx].is_empty() {
+                let p = GlobalXZ::at(
+                    (ax as f64 + 0.5) * CELL_METRES as f64,
+                    (az as f64 + 0.5) * CELL_METRES as f64,
+                );
+                let request = WorldEntryRequest::at_global(bounds, p).expect("in bounds");
+                return Some((surface, request));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_bad_travel_target_leaves_the_source_world_alone() {
+    let Some((surface, land)) = land_request(1, 48) else {
+        return;
+    };
+    let Some((_, ocean)) = ocean_request(1, 48) else {
+        return;
+    };
+    let mut world = World::new();
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
+    session.begin_entry(&mut world, land).expect("land");
+    wait_until_world(&mut session, &mut world);
+    let origin = world.render_origin();
+    let chunks = session.stream().resident_count();
+    let feet = session.player_position().expect("player");
+
+    let err = session.begin_entry(&mut world, ocean).expect_err("ocean");
+    assert!(matches!(err, super::SessionError::Entry(_)));
+    assert_eq!(session.state(), SessionState::World);
+    assert_eq!(session.stream().resident_count(), chunks);
+    assert_eq!(world.render_origin(), origin);
+    let still = session.player_position().expect("player");
+    assert_eq!(still.x, feet.x);
+    assert_eq!(still.z, feet.z);
+}
+
+#[test]
+fn travel_resets_the_destination_stream_once() {
+    let Some((surface, request)) = land_request(1, 48) else {
+        return;
+    };
+    let mut world = World::new();
+    let mut session = WorldSession::new(surface).with_instant_travel();
+    session.begin_entry(&mut world, request).expect("entry");
+    assert_eq!(session.state(), SessionState::Travel);
+    assert_eq!(session.travel_handoffs(), 1);
+    wait_until_world(&mut session, &mut world);
+    assert_eq!(session.state(), SessionState::World);
+    assert_eq!(session.travel_handoffs(), 0);
+}
+
+#[test]
+fn travel_keeps_the_pointer_unlocked() {
+    let Some((surface, request)) = land_request(1, 48) else {
+        return;
+    };
+    let mut world = World::new();
+    let mut session = WorldSession::new(surface).with_instant_travel();
+    session.begin_entry(&mut world, request).expect("entry");
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                capture_look: true,
+                skip_travel: true,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("travel");
+    if session.state() == SessionState::Travel {
+        assert!(!world.pointer_lock(), "travel must not capture the mouse");
+    }
+}
+
+#[test]
+fn skip_cannot_land_before_the_destination_is_ready() {
+    let Some((surface, request)) = land_request(1, 48) else {
+        return;
+    };
+    let mut world = World::new();
+    let mut session = WorldSession::new(surface);
+    session.set_travel_timings(TravelTimings::cinematic());
+    session.begin_entry(&mut world, request).expect("entry");
+    assert_eq!(session.travel_phase(), Some(TravelPhase::Transfer));
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                skip_travel: true,
+                dt: 1.0 / 60.0,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("skip");
+    assert_eq!(session.state(), SessionState::Travel);
+    assert!(!session.destination_ready());
+    assert_ne!(session.travel_phase(), Some(TravelPhase::Descent));
+}
+
+#[test]
+fn travel_holds_until_the_ring_is_ready_then_lands_on_contact() {
+    let Some((surface, request)) = land_request(1, 48) else {
+        return;
+    };
+    let mut world = World::new();
+    let mut session = WorldSession::new(surface).with_instant_travel();
+    session.begin_entry(&mut world, request).expect("entry");
+    let mut saw_hold = false;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        session.step(&mut world, WalkInput::IDLE).expect("update");
+        if session.travel_phase() == Some(TravelPhase::Hold) {
+            saw_hold = true;
+        }
+        if session.state() == SessionState::World {
+            break;
+        }
+    }
+    assert_eq!(session.state(), SessionState::World);
+    assert!(
+        saw_hold
+            || session
+                .stream()
+                .required_ready(session.spawn().expect("spawn").ground()),
+        "a slow ring must hold; an instant ring may skip the visible hold"
+    );
+    let feet = session.player_position().expect("player");
+    let contact = session.contact_height(feet.horizontal()).expect("contact");
+    assert!(
+        (feet.y as f32 - contact).abs() < 0.2,
+        "travel must land on the drawn ground"
+    );
+}
+
+#[test]
+fn mid_walk_travel_ascends_before_it_resets() {
+    let Some((mut world, mut session)) = standing_session(1, 48) else {
+        return;
+    };
+    let Some((surface, next)) = land_request(3, 48) else {
+        return;
+    };
+    // Same continent: reuse the standing session's surface by picking another
+    // point on this atlas, not a different seed.
+    let _ = surface;
+    let Some(pin) = session.surface().largest_settlement() else {
+        return;
+    };
+    let bounds = session.surface().bounds();
+    let next = WorldEntryRequest::at_global(bounds, pin.at).unwrap_or(next);
+    session.set_travel_timings(TravelTimings::cinematic());
+    let chunks_before = session.stream().resident_count();
+    session.begin_entry(&mut world, next).expect("re-entry");
+    assert_eq!(session.travel_phase(), Some(TravelPhase::Ascent));
+    assert_eq!(session.travel_handoffs(), 0);
+    assert_eq!(session.stream().resident_count(), chunks_before);
+    session
+        .step(
+            &mut world,
+            WalkInput {
+                skip_travel: true,
+                dt: 1.0 / 60.0,
+                ..WalkInput::IDLE
+            },
+        )
+        .expect("skip ascent");
+    assert_eq!(session.travel_handoffs(), 1);
+    assert_eq!(session.state(), SessionState::Travel);
+}
+
 #[test]
 fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
     let (atlas, surface) = world_of(1, 48);
@@ -2183,7 +2367,7 @@ fn flying_leaves_the_ground_and_walking_lands_back_on_it() {
         .expect("river point");
 
     let mut world = World::new();
-    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
     session.begin_entry(&mut world, request).expect("entry");
     wait_until_world(&mut session, &mut world);
     assert_eq!(session.locomotion(), Some(Locomotion::Walk));
@@ -2332,7 +2516,7 @@ fn turning_wraps_instead_of_drifting_off_the_compass() {
         .expect("river point");
 
     let mut world = World::new();
-    let mut session = WorldSession::new(Arc::clone(&surface));
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
     session.begin_entry(&mut world, request).expect("entry");
     wait_until_world(&mut session, &mut world);
 

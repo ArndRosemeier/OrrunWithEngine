@@ -1,4 +1,4 @@
-//! One in-process life cycle: atlas → loading → walking the world.
+//! One in-process life cycle: atlas → travel → walking the world.
 //!
 //! The session owns the player, the stream, and the transition between looking
 //! at the map and standing on it. Control is withheld until the ground under
@@ -17,22 +17,28 @@ use std::time::Instant;
 use engine::camera::{Camera, MAX_PITCH_DEGREES};
 use engine::collision::ActorBody;
 use engine::error::EngineError;
+use engine::place::GlobalPlace;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
-use engine::world::{Frame, World};
-use engine::{Key, MouseButton};
+use engine::world::{EntityId, Frame, Haze, Sky, World};
+use engine::{Key, MouseButton, SpaceId};
 use glam::{Vec2, Vec3};
 use thiserror::Error;
 
 use super::coords::{Heading, CHUNK_SPAN_M};
+use super::doors::DoorLayer;
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::fauna::{FaunaError, FaunaLayer};
 use super::footprint::BuildingIndex;
+use super::look::install_daylight;
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
 use super::settlement::{SettlementError, SettlementLayer};
 use super::surface::ContinentalSurface;
-use super::world_stream::WorldStream;
+use super::travel::{
+    travel_view, ContinentProxySpec, TravelPhase, TravelSource, TravelTimings, TravelView,
+};
+use super::world_stream::{WorldStream, FAR_VIEW_M};
 
 /// Gap between the contact height and the soles, so rounding never buries them.
 const FOOT_CLEARANCE_M: f32 = 0.05;
@@ -69,6 +75,14 @@ pub enum SessionError {
     #[error("no world has been entered yet")]
     NoWorld,
 
+    #[error("travel {phase} toward ({x:.0} m, {z:.0} m): {detail}")]
+    Travel {
+        phase: TravelPhase,
+        x: f64,
+        z: f64,
+        detail: String,
+    },
+
     #[error("spawn chunk at ({x:.0} m, {z:.0} m) is resident but carries no contact grid")]
     MissingContact { x: f64, z: f64 },
 }
@@ -77,8 +91,8 @@ pub enum SessionError {
 pub enum SessionState {
     /// Looking at the map.
     Atlas,
-    /// Entry accepted; streaming the ground the player will land on.
-    Loading,
+    /// Flying the atlas trip: ascent, proxy, hold, descent.
+    Travel,
     /// Walking.
     World,
 }
@@ -118,6 +132,11 @@ pub struct WalkInput {
     /// The player clicked in the world, which is how they ask for the mouse to
     /// be captured for looking.
     pub capture_look: bool,
+    /// E went down this frame: toggle the door in reach. That frame E is not a strafe.
+    pub interact: bool,
+    /// Space went down during travel: skip the current cinematic beat.
+    /// Never skips destination readiness.
+    pub skip_travel: bool,
 }
 
 impl WalkInput {
@@ -130,13 +149,16 @@ impl WalkInput {
         pitch_delta_degrees: 0.0,
         toggle_fly: false,
         capture_look: false,
+        interact: false,
+        skip_travel: false,
     };
 
     /// Read one frame of first-person controls.
     ///
     /// W/S and Up/Down walk (or fly along the look), Q/E sidestep, A/D and
-    /// Left/Right turn, the mouse looks, Shift sprints, F toggles flying, and
-    /// Space jumps while walking.
+    /// Left/Right turn, the mouse looks, Shift sprints, F toggles flying,
+    /// Space jumps while walking, and E toggles a door in reach (that frame
+    /// E is not a strafe).
     ///
     /// `mouse_look` says whether the pointer belongs to the game this frame.
     /// Raw motion arrives whether or not it does, and turning the view with a
@@ -150,8 +172,17 @@ impl WalkInput {
         mouse_look: bool,
     ) -> Self {
         let keys = &frame.input;
+        let interact = keys.pressed(Key::E);
         let forward = (keys.axis(Key::S, Key::W) + keys.axis(Key::Down, Key::Up)).clamp(-1.0, 1.0);
-        let strafe = keys.axis(Key::Q, Key::E).clamp(-1.0, 1.0);
+        let strafe = if interact {
+            if keys.down(Key::Q) {
+                -1.0
+            } else {
+                0.0
+            }
+        } else {
+            keys.axis(Key::Q, Key::E).clamp(-1.0, 1.0)
+        };
         let right = Camera::right_xz(yaw_degrees);
         let dir = match mode {
             Locomotion::Fly => {
@@ -189,6 +220,8 @@ impl WalkInput {
             pitch_delta_degrees: -look.y * MOUSE_DEGREES_PER_COUNT,
             toggle_fly: keys.pressed(Key::F),
             capture_look: keys.mouse_clicked(MouseButton::Left),
+            interact,
+            skip_travel: keys.pressed(Key::Space),
         }
     }
 }
@@ -228,6 +261,24 @@ impl Player {
     }
 }
 
+struct InstalledProxy {
+    land: EntityId,
+    sea: EntityId,
+    marker: EntityId,
+}
+
+struct TravelState {
+    phase: TravelPhase,
+    elapsed: f32,
+    request: WorldEntryRequest,
+    source: Option<TravelSource>,
+    approach: SpawnPose,
+    handed_off: bool,
+    destination_ready: bool,
+    revealed_destination: bool,
+    handoffs: u32,
+}
+
 pub struct WorldSession {
     surface: Arc<ContinentalSurface>,
     /// Sub-atlas water around the player, scanned off the main thread.
@@ -241,12 +292,19 @@ pub struct WorldSession {
     paths: Option<PathLayer>,
     /// Near-player wildlife, once the animal meshes have been loaded.
     fauna: Option<FaunaLayer>,
+    /// Swinging house leaves and the one live portal interior.
+    doors: DoorLayer,
     state: SessionState,
     /// The request being loaded, until the water under it has been scanned and
     /// the spawn it resolves to is known.
     entering: Option<WorldEntryRequest>,
     spawn: Option<SpawnPose>,
     player: Option<Player>,
+    timings: TravelTimings,
+    travel: Option<TravelState>,
+    travel_space: Option<SpaceId>,
+    proxy_spec: Option<ContinentProxySpec>,
+    proxy: Option<InstalledProxy>,
 }
 
 impl WorldSession {
@@ -261,11 +319,32 @@ impl WorldSession {
             settlements: None,
             paths: None,
             fauna: None,
+            doors: DoorLayer::new(),
             state: SessionState::Atlas,
             entering: None,
             spawn: None,
             player: None,
+            timings: TravelTimings::cinematic(),
+            travel: None,
+            travel_space: None,
+            proxy_spec: None,
+            proxy: None,
         }
+    }
+
+    /// Headless and unit tests wait on streaming, not on the camera script.
+    pub fn with_instant_travel(mut self) -> Self {
+        self.timings = TravelTimings::instant();
+        self
+    }
+
+    pub fn set_travel_timings(&mut self, timings: TravelTimings) {
+        self.timings = timings;
+    }
+
+    /// Attach a proxy built off the render thread. Travel will upload it once.
+    pub fn attach_proxy(&mut self, spec: ContinentProxySpec) {
+        self.proxy_spec = Some(spec);
     }
 
     pub fn surface(&self) -> &ContinentalSurface {
@@ -283,9 +362,34 @@ impl WorldSession {
     /// Where the session is taking the player: the resolved spawn once it is
     /// known, and until then the point that was asked for.
     pub fn destination(&self) -> Option<GlobalXZ> {
+        if let Some(travel) = &self.travel {
+            return Some(
+                self.spawn
+                    .map(|pose| pose.ground())
+                    .unwrap_or_else(|| travel.request.requested()),
+            );
+        }
         self.spawn
             .map(|pose| pose.ground())
             .or_else(|| self.entering.map(|request| request.requested()))
+    }
+
+    pub fn travel_phase(&self) -> Option<TravelPhase> {
+        self.travel.as_ref().map(|t| t.phase)
+    }
+
+    /// How many times this trip reset the destination stream. A legal trip is 1.
+    pub fn travel_handoffs(&self) -> u32 {
+        self.travel.as_ref().map(|t| t.handoffs).unwrap_or(0)
+    }
+
+    pub fn destination_ready(&self) -> bool {
+        self.travel.as_ref().is_some_and(|t| t.destination_ready)
+    }
+
+    /// 0 is a clear frame, 1 is a full speed/cloud veil.
+    pub fn travel_veil(&self) -> f32 {
+        self.travel_view_now().map(|v| v.veil).unwrap_or(0.0)
     }
 
     pub fn stream(&self) -> &WorldStream {
@@ -309,10 +413,12 @@ impl WorldSession {
         self.player.map(|p| p.position)
     }
 
-    /// Resolve the entry point and start loading its ground.
+    /// Resolve the entry point and start the atlas trip.
     ///
     /// Fails before anything is torn down when the selection has no valid
-    /// spawn, so a bad click leaves the atlas exactly as it was.
+    /// spawn, so a bad click leaves the atlas exactly as it was. Source
+    /// terrain stays up through the ascent; the destination stream is reset
+    /// once, at the haze handoff.
     pub fn begin_entry(
         &mut self,
         world: &mut World,
@@ -325,26 +431,37 @@ impl WorldSession {
         // has any walkable ground at all — and to say where the render origin
         // goes, which the true spawn will be a few metres from.
         let approach = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
+        let source = self.player.map(|p| TravelSource {
+            eye: p.eye(),
+            yaw_degrees: p.yaw_degrees,
+            pitch_degrees: p.pitch_degrees,
+        });
+        self.ensure_travel_space(world)?;
+        self.ensure_proxy(world)?;
 
-        if let Some(scatter) = self.scatter.as_mut() {
-            scatter.clear(world)?;
-        }
-        if let Some(settlements) = self.settlements.as_mut() {
-            settlements.clear(world)?;
-        }
-        if let Some(paths) = self.paths.as_mut() {
-            paths.clear(world)?;
-        }
-        if let Some(fauna) = self.fauna.as_mut() {
-            fauna.clear(world)?;
-        }
-
-        self.stream.reset(world);
-        world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
-        self.spawn = None;
-        self.player = None;
+        let first_entry = source.is_none();
+        self.travel = Some(TravelState {
+            phase: if first_entry {
+                TravelPhase::Transfer
+            } else {
+                TravelPhase::Ascent
+            },
+            elapsed: 0.0,
+            request,
+            source,
+            approach,
+            handed_off: false,
+            destination_ready: false,
+            revealed_destination: false,
+            handoffs: 0,
+        });
         self.entering = Some(request);
-        self.state = SessionState::Loading;
+        self.spawn = None;
+        self.state = SessionState::Travel;
+        if first_entry {
+            self.enter_proxy_space(world)?;
+            self.handoff_destination(world)?;
+        }
         Ok(())
     }
 
@@ -380,6 +497,18 @@ impl WorldSession {
     /// What the loading screen should say. Progress stays at 0 until spawn is
     /// known, which used to read as a stuck ground streamer while water scanned.
     pub fn loading_status(&self) -> String {
+        if let Some(travel) = &self.travel {
+            if !travel.handed_off {
+                return "rising…".into();
+            }
+            if travel.destination_ready {
+                return match travel.phase {
+                    TravelPhase::Hold => "holding above the stand…".into(),
+                    TravelPhase::Descent => "descending…".into(),
+                    other => format!("{other}…"),
+                };
+            }
+        }
         if self.spawn.is_none() {
             if self.scatter.is_none() {
                 return "loading props…".into();
@@ -436,12 +565,277 @@ impl WorldSession {
         }
         match self.state {
             SessionState::Atlas => Ok(()),
-            SessionState::Loading => self.update_loading(world),
+            SessionState::Travel => self.update_travel(world, input),
             SessionState::World => self.update_world(world, input),
         }
     }
 
-    fn update_loading(&mut self, world: &mut World) -> Result<(), SessionError> {
+    fn update_travel(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
+        match self.update_travel_inner(world, input) {
+            Ok(()) => Ok(()),
+            Err(err @ SessionError::Travel { .. }) => Err(err),
+            Err(err) => Err(self.wrap_travel_error(err)),
+        }
+    }
+
+    fn wrap_travel_error(&self, err: SessionError) -> SessionError {
+        let dest = self.destination().unwrap_or(GlobalXZ::at(0.0, 0.0));
+        SessionError::Travel {
+            phase: self
+                .travel
+                .as_ref()
+                .map(|t| t.phase)
+                .unwrap_or(TravelPhase::Hold),
+            x: dest.x,
+            z: dest.z,
+            detail: err.to_string(),
+        }
+    }
+
+    fn update_travel_inner(
+        &mut self,
+        world: &mut World,
+        input: WalkInput,
+    ) -> Result<(), SessionError> {
+        if self.travel.is_none() {
+            panic!("SessionState::Travel without a travel record");
+        }
+        self.assert_proxy_resident(world);
+        if self.travel.as_ref().expect("travel").handed_off {
+            if self.update_loading(world)? {
+                self.travel.as_mut().expect("travel").destination_ready = true;
+            }
+        }
+        self.place_travel_marker(world)?;
+
+        loop {
+            let phase = self.travel.as_ref().expect("travel").phase;
+            let elapsed = self.travel.as_ref().expect("travel").elapsed;
+            let duration = self.timings.duration_of(phase);
+            let skip = input.skip_travel;
+            let ready = self.travel.as_ref().expect("travel").destination_ready;
+            let beat_done = match phase {
+                TravelPhase::Hold => ready,
+                TravelPhase::Descent => ready && (skip || elapsed >= duration),
+                _ => skip || elapsed >= duration,
+            };
+            if !beat_done {
+                break;
+            }
+            match phase {
+                TravelPhase::Ascent => {
+                    self.enter_proxy_space(world)?;
+                    self.handoff_destination(world)?;
+                    self.advance_phase(TravelPhase::Transfer);
+                }
+                TravelPhase::Transfer => self.advance_phase(TravelPhase::Hold),
+                TravelPhase::Hold => {
+                    if !ready {
+                        panic!("travel hold ended before the destination ring was ready");
+                    }
+                    self.reveal_destination(world)?;
+                    self.advance_phase(TravelPhase::Descent);
+                }
+                TravelPhase::Descent => {
+                    if !ready {
+                        panic!("travel descent cannot land before the destination is ready");
+                    }
+                    self.land_from_travel(world)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        if let Some(travel) = self.travel.as_mut() {
+            travel.elapsed += input.dt;
+        }
+        if let Some(view) = self.travel_view_now() {
+            self.apply_travel_view(world, view)?;
+        }
+        Ok(())
+    }
+
+    fn advance_phase(&mut self, next: TravelPhase) {
+        let travel = self.travel.as_mut().expect("travel");
+        travel.phase = next;
+        travel.elapsed = 0.0;
+    }
+
+    fn handoff_destination(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let travel = self.travel.as_ref().expect("travel");
+        if travel.handed_off {
+            panic!(
+                "destination stream was reset twice during travel toward ({:.0}, {:.0})",
+                travel.request.requested().x,
+                travel.request.requested().z
+            );
+        }
+        let request = travel.request;
+        let approach = travel.approach;
+
+        self.doors.evict(world)?;
+        if let Some(scatter) = self.scatter.as_mut() {
+            scatter.clear(world)?;
+        }
+        if let Some(settlements) = self.settlements.as_mut() {
+            settlements.clear(world)?;
+        }
+        if let Some(paths) = self.paths.as_mut() {
+            paths.clear(world)?;
+        }
+        if let Some(fauna) = self.fauna.as_mut() {
+            fauna.clear(world)?;
+        }
+
+        self.stream.reset(world);
+        world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
+        self.spawn = None;
+        self.player = None;
+        self.entering = Some(request);
+        let travel = self.travel.as_mut().expect("travel");
+        travel.handed_off = true;
+        travel.handoffs += 1;
+        Ok(())
+    }
+
+    fn enter_proxy_space(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let space = self.travel_space.expect("travel space");
+        world.live_in(space)?;
+        world.set_shadows(None);
+        Ok(())
+    }
+
+    fn reveal_destination(&mut self, world: &mut World) -> Result<(), SessionError> {
+        world.live_in(SpaceId::DEFAULT)?;
+        world.set_view_distance(FAR_VIEW_M)?;
+        if let Some(travel) = self.travel.as_mut() {
+            travel.revealed_destination = true;
+        }
+        Ok(())
+    }
+
+    fn land_from_travel(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let player = self.player.ok_or(SessionError::NoWorld)?;
+        install_daylight(world);
+        world.live_in(SpaceId::DEFAULT)?;
+        world.look_first_person_global(player.eye(), player.yaw_degrees, player.pitch_degrees)?;
+        self.travel = None;
+        self.state = SessionState::World;
+        Ok(())
+    }
+
+    fn ensure_travel_space(&mut self, world: &mut World) -> Result<(), SessionError> {
+        if self.travel_space.is_some() {
+            return Ok(());
+        }
+        let space = world.space("travel")?;
+        world.set_space_draws_environment(space, true)?;
+        self.travel_space = Some(space);
+        Ok(())
+    }
+
+    fn ensure_proxy(&mut self, world: &mut World) -> Result<(), SessionError> {
+        if self.proxy.is_some() {
+            return Ok(());
+        }
+        if self.proxy_spec.is_none() {
+            self.proxy_spec = Some(ContinentProxySpec::build(&self.surface));
+        }
+        let spec = self.proxy_spec.as_ref().expect("proxy spec");
+        let space = self.travel_space.expect("travel space");
+        let prev = world.spawning_in();
+        world.in_space(space)?;
+        let land =
+            world.spawn_anchored(spec.land_mesh()?, GlobalPlace::at(GlobalPosition::ORIGIN))?;
+        let sea =
+            world.spawn_anchored(spec.sea_mesh()?, GlobalPlace::at(GlobalPosition::ORIGIN))?;
+        let marker = world.spawn_anchored(
+            spec.marker_mesh()?,
+            GlobalPlace::at(GlobalPosition::at(0.0, 1_200.0, 0.0)),
+        )?;
+        world.in_space(prev)?;
+        self.proxy = Some(InstalledProxy { land, sea, marker });
+        Ok(())
+    }
+
+    fn assert_proxy_resident(&self, world: &World) {
+        let Some(proxy) = &self.proxy else {
+            panic!("travel started without an uploaded continent proxy");
+        };
+        world.entity(proxy.land).expect("continent proxy land mesh");
+        world.entity(proxy.sea).expect("continent proxy sea mesh");
+        world
+            .entity(proxy.marker)
+            .expect("continent proxy destination marker");
+    }
+
+    fn place_travel_marker(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let Some(dest) = self.destination() else {
+            return Ok(());
+        };
+        let Some(spec) = self.proxy_spec.as_ref() else {
+            return Ok(());
+        };
+        let Some(proxy) = self.proxy.as_ref() else {
+            return Ok(());
+        };
+        let y = f64::from(spec.height_at(dest) + 1_200.0);
+        world.set_anchored_place(
+            proxy.marker,
+            GlobalPlace::at(GlobalPosition::at(dest.x, y, dest.z)),
+        )?;
+        Ok(())
+    }
+
+    fn travel_view_now(&self) -> Option<TravelView> {
+        let travel = self.travel.as_ref()?;
+        let spec = self.proxy_spec.as_ref()?;
+        let from = travel
+            .source
+            .map(|s| s.eye.horizontal())
+            .unwrap_or_else(|| travel.request.requested());
+        let to = self
+            .spawn
+            .map(|p| p.ground())
+            .unwrap_or_else(|| travel.request.requested());
+        let landing = self.player.map(|p| p.eye());
+        let heading = self
+            .player
+            .map(|p| p.yaw_degrees)
+            .or_else(|| self.spawn.map(|p| p.heading().degrees()))
+            .unwrap_or(0.0);
+        let duration = self.timings.duration_of(travel.phase);
+        let t = if duration.is_finite() && duration > 0.0 {
+            (travel.elapsed / duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Some(travel_view(
+            travel.phase,
+            t,
+            travel.elapsed,
+            travel.source,
+            from,
+            to,
+            landing,
+            heading,
+            spec.extent_m(),
+        ))
+    }
+
+    fn apply_travel_view(&self, world: &mut World, view: TravelView) -> Result<(), SessionError> {
+        world.set_view_distance(view.view_distance_m)?;
+        world.look_at_global(view.look.eye, view.look.target)?;
+        world.camera.fov_y_degrees = view.fov_y_degrees;
+        world.camera.near = view.near_m;
+        let sky = world.sky().unwrap_or_else(Sky::daylight);
+        world.set_haze(Some(
+            Haze::new(sky.horizon, view.haze_visibility_m).thinning_above(0.0, 4_000.0),
+        ));
+        Ok(())
+    }
+
+    fn update_loading(&mut self, world: &mut World) -> Result<bool, SessionError> {
         // Water first, and off this thread. Ground baked before the ponds were
         // known would have to be thrown away, so nothing else starts until the
         // window covers the spawn. The window reaches kilometres and the resolver
@@ -462,7 +856,7 @@ impl WorldSession {
                 self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
             }
             if !self.ponds.traced(request.requested()) {
-                return Ok(());
+                return Ok(false);
             }
             let pose = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
             self.spawn = Some(pose);
@@ -482,7 +876,7 @@ impl WorldSession {
         let focus = spawn.ground();
         self.stream.sync(world, focus, None)?;
         if !self.stream.required_ready(focus) {
-            return Ok(());
+            return Ok(false);
         }
         let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
             settlements.follow(
@@ -497,18 +891,18 @@ impl WorldSession {
             false
         };
         if self.settlements.as_ref().is_some_and(SettlementLayer::busy) {
-            return Ok(());
+            return Ok(false);
         }
         if rebuilt {
             let plots = self.plot_index();
             self.stream.set_house_plots(world, (*plots).clone())?;
             self.stream.sync(world, focus, None)?;
             if !self.stream.required_ready(focus) {
-                return Ok(());
+                return Ok(false);
             }
         }
         if self.settlements.as_ref().is_some_and(|s| s.staging(focus)) {
-            return Ok(());
+            return Ok(false);
         }
         let plots = self.plot_index();
         if let Some(scatter) = self.scatter.as_mut() {
@@ -566,7 +960,7 @@ impl WorldSession {
                 ),
             );
             if fauna.busy() {
-                return Ok(());
+                return Ok(false);
             }
         }
         let Some(ground) = self.stream.contact_height(focus) else {
@@ -587,8 +981,7 @@ impl WorldSession {
             airborne: false,
             body: ActorBody::player(),
         });
-        self.state = SessionState::World;
-        Ok(())
+        Ok(true)
     }
 
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
@@ -738,18 +1131,71 @@ impl WorldSession {
             );
         }
 
+        self.doors.evict_if_missing(
+            world,
+            self.settlements
+                .as_ref()
+                .map(SettlementLayer::doors)
+                .unwrap_or(&[]),
+        )?;
+        self.doors.frame(
+            world,
+            self.settlements
+                .as_ref()
+                .map(SettlementLayer::doors)
+                .unwrap_or(&[]),
+            player.position,
+            player.yaw_degrees,
+            input.interact,
+            input.dt,
+        )?;
+        let hidden_leaf = self.doors.hidden_leaf();
+        if let Some(settlements) = self.settlements.as_mut() {
+            settlements.hide_leaf(world, hidden_leaf)?;
+        }
+
+        // Probe with the actor's centre, not the soles. The latter sit only a
+        // few centimetres above the opening's lower edge and can miss the
+        // rectangle on uneven door terrain.
+        let portal_probe_y = f64::from(player.body.height * 0.5);
+        let portal_probe = GlobalPosition::at(
+            player.position.x,
+            player.position.y + portal_probe_y,
+            player.position.z,
+        );
+        let mut local = world.to_render(portal_probe)?;
+        let mut yaw = player.yaw_degrees;
+        if let Some(entered) = world.travel(&mut local, &mut yaw) {
+            let landed_probe = world.to_global(local)?;
+            player.position = GlobalPosition::at(
+                landed_probe.x,
+                landed_probe.y - portal_probe_y,
+                landed_probe.z,
+            );
+            player.yaw_degrees = yaw;
+            self.doors
+                .settle_after_travel(world, &player.body, entered, &mut player.position);
+        }
+
         match player.mode {
             // Only the resident bake may move the player vertically: falling
             // back to a fresh surface query here would put the feet on a
-            // different surface than the one being drawn.
+            // different surface than the one being drawn. Indoors the house
+            // floor is the contact, not the outdoor plot cap.
             Locomotion::Walk => {
-                let terrain = self.stream.contact_height(foot);
-                let deck = self.paths.as_ref().and_then(|p| p.deck_height(foot));
-                let ground = match (terrain, deck) {
-                    (Some(t), Some(d)) => Some(t.max(d)),
-                    (Some(t), None) => Some(t),
-                    (None, Some(d)) => Some(d),
-                    (None, None) => None,
+                let indoor = self.doors.indoor_floor_y(world, player.position);
+                let ground = if indoor.is_some() {
+                    indoor
+                } else {
+                    let stand = player.position.horizontal();
+                    let terrain = self.stream.contact_height(stand);
+                    let deck = self.paths.as_ref().and_then(|p| p.deck_height(stand));
+                    match (terrain, deck) {
+                        (Some(t), Some(d)) => Some(t.max(d)),
+                        (Some(t), None) => Some(t),
+                        (None, Some(d)) => Some(d),
+                        (None, None) => None,
+                    }
                 };
                 apply_walk_height(&mut player, ground, input.jump, input.dt);
             }
@@ -776,6 +1222,11 @@ impl WorldSession {
     /// How the player is currently getting around.
     pub fn locomotion(&self) -> Option<Locomotion> {
         self.player.map(|p| p.mode)
+    }
+
+    /// HUD line when a house door is in reach.
+    pub fn door_hint(&self) -> Option<&str> {
+        self.doors.hint()
     }
 
     /// Where the camera sits, once the player exists.

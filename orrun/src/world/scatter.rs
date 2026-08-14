@@ -1342,13 +1342,13 @@ impl ScatterLayer {
                     .unwrap_or(0)
                     .min(sprigs.len());
                 for sprig in &sprigs[..shown] {
-                    out.push(StaticCollider {
-                        at: sprig.at.horizontal(),
-                        yaw: 0.0,
-                        shape: ColliderShape::Cylinder {
+                    out.push(StaticCollider::new(
+                        sprig.at.horizontal(),
+                        0.0,
+                        ColliderShape::Cylinder {
                             radius: TREE_TRUNK_RADIUS_M * sprig.scale,
                         },
-                    });
+                    ));
                 }
             }
         }

@@ -8,6 +8,7 @@ mod castle;
 pub(crate) mod castle_kit;
 mod catalog;
 mod config;
+pub(crate) mod interior;
 pub(crate) mod kit;
 mod occupancy;
 mod planner;

@@ -15,7 +15,7 @@ use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
-use engine::place::Place;
+use engine::place::{GlobalPlace, Place};
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, World};
 use glam::{Vec2, Vec3};
@@ -87,12 +87,53 @@ struct Standing {
     kind: Kind,
     at: GlobalPosition,
     yaw_deg: f32,
+    door_id: Option<u64>,
 }
 
 struct SeatedCity {
     hamlet: HamletStand,
     plots: Vec<BuildingPlot>,
     standing: Vec<Standing>,
+    doors: Vec<HouseDoor>,
+}
+
+/// A seated dwelling door the player can open.
+#[derive(Clone, Debug)]
+pub struct HouseDoor {
+    pub id: u64,
+    pub catalog_id: String,
+    pub seed: u64,
+    pub leaf_piece: String,
+    pub at: GlobalPosition,
+    pub closed_yaw_deg: f32,
+    pub opening_width: f32,
+    pub house_at: GlobalXZ,
+    pub house_yaw_deg: f32,
+    pub floor_y: f32,
+    pub half_z: f32,
+}
+
+impl HouseDoor {
+    pub fn closed_place(&self) -> GlobalPlace {
+        GlobalPlace::at(self.at).with_yaw_deg(self.closed_yaw_deg)
+    }
+
+    pub fn leaf_place(&self, yaw_deg: f32) -> GlobalPlace {
+        GlobalPlace::at(self.at).with_yaw_deg(yaw_deg)
+    }
+
+    pub fn opening_out(&self) -> GlobalPlace {
+        GlobalPlace::at(self.opening_at()).with_yaw_deg(self.house_yaw_deg + 180.0)
+    }
+
+    fn opening_at(&self) -> GlobalPosition {
+        let (dx, dz) = kit::yaw_xz(0.0, -self.half_z, self.house_yaw_deg);
+        GlobalPosition::at(
+            self.house_at.x + f64::from(dx),
+            f64::from(self.floor_y + 1.1),
+            self.house_at.z + f64::from(dz),
+        )
+    }
 }
 
 /// One seated hamlet, in world metres.
@@ -203,6 +244,8 @@ pub struct SettlementLayer {
     tile_queue: VecDeque<TileKey>,
     queued: HashSet<TileKey>,
     pending: Option<Pending>,
+    doors: Vec<HouseDoor>,
+    hidden_door: Option<u64>,
 }
 
 impl SettlementLayer {
@@ -234,6 +277,8 @@ impl SettlementLayer {
             tile_queue: VecDeque::new(),
             queued: HashSet::new(),
             pending: None,
+            doors: Vec::new(),
+            hidden_door: None,
         })
     }
 
@@ -244,6 +289,21 @@ impl SettlementLayer {
     /// Seated hamlets in the current window, for footbridges across a split river.
     pub fn hamlets(&self) -> &[HamletStand] {
         &self.hamlets
+    }
+
+    /// Doors on seated dwellings.
+    pub fn doors(&self) -> &[HouseDoor] {
+        &self.doors
+    }
+
+    /// Hide the instanced leaf that a unique swinging entity now owns.
+    pub fn hide_leaf(&mut self, world: &mut World, door_id: Option<u64>) -> EngineResult<()> {
+        if self.hidden_door == door_id {
+            return Ok(());
+        }
+        self.hidden_door = door_id;
+        self.rebuild_tile_items();
+        self.rewrite_tiles(world)
     }
 
     /// House and castle footprints, for interior ground caps and scatter.
@@ -290,6 +350,8 @@ impl SettlementLayer {
         self.seated.clear();
         self.plans.clear();
         self.hamlets.clear();
+        self.doors.clear();
+        self.hidden_door = None;
         self.plot_index = Arc::new(BuildingIndex::new(Vec::new()));
         self.sync_building_colliders(world);
         Ok(())
@@ -410,10 +472,12 @@ impl SettlementLayer {
     fn rebuild_live(&mut self) {
         self.standing.clear();
         self.hamlets.clear();
+        self.doors.clear();
         let mut plots = Vec::new();
         for city in self.seated.values() {
             self.standing.extend_from_slice(&city.standing);
             self.hamlets.push(city.hamlet.clone());
+            self.doors.extend_from_slice(&city.doors);
             plots.extend_from_slice(&city.plots);
         }
         self.plot_index = Arc::new(BuildingIndex::new(plots));
@@ -430,6 +494,9 @@ impl SettlementLayer {
     fn rebuild_tile_items(&mut self) {
         self.tile_items.clear();
         for item in &self.standing {
+            if item.door_id.is_some() && item.door_id == self.hidden_door {
+                continue;
+            }
             let Some(key) = tile_key(item) else {
                 continue;
             };
@@ -561,6 +628,7 @@ impl Packing {
             let mut standing = Vec::new();
             let mut houses = Vec::new();
             let mut plots = Vec::new();
+            let mut doors = Vec::new();
             seat_plan(
                 plan,
                 pin,
@@ -575,6 +643,7 @@ impl Packing {
                 &mut standing,
                 &mut houses,
                 &mut plots,
+                &mut doors,
             );
             let radius = hamlet_radius(pin.at, &houses);
             cities.push((
@@ -587,6 +656,7 @@ impl Packing {
                     },
                     plots,
                     standing,
+                    doors,
                 },
             ));
         }
@@ -640,6 +710,7 @@ fn seat_plan(
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
     plots: &mut Vec<BuildingPlot>,
+    doors: &mut Vec<HouseDoor>,
 ) {
     let plot = GroundPlot {
         surface,
@@ -671,6 +742,7 @@ fn seat_plan(
                 out,
                 houses,
                 plots,
+                doors,
             ),
         }
     }
@@ -686,6 +758,7 @@ fn seat_house(
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
     plots: &mut Vec<BuildingPlot>,
+    doors: &mut Vec<HouseDoor>,
 ) {
     let Some(spec) = spec_for(&shape.catalog_id) else {
         panic!(
@@ -713,6 +786,7 @@ fn seat_house(
             kind: Kind::Well,
             at: GlobalPosition::at(x, f64::from(seat.floor_z), z),
             yaw_deg,
+            door_id: None,
         });
         return;
     }
@@ -730,21 +804,44 @@ fn seat_house(
         yaw: shape.yaw,
         floor_y,
     }));
+    let id = door_key(pin.id, x, z);
     for item in recipe {
         let p = item.place.position;
         let (dx, dz) = kit::yaw_xz(p.x, p.z, yaw_deg);
         let index = piece_ids
             .iter()
-            .position(|id| *id == item.piece)
+            .position(|pid| *pid == item.piece)
             .unwrap_or_else(|| panic!("kit piece {} was not uploaded", item.piece));
+        let leaf = item.piece.as_str() == "door_plank" || item.piece.as_str() == "door_sturdy";
+        let at = GlobalPosition::at(
+            x + f64::from(dx),
+            f64::from(floor_y + p.y),
+            z + f64::from(dz),
+        );
+        if leaf {
+            doors.push(HouseDoor {
+                id,
+                catalog_id: spec.id.to_string(),
+                seed,
+                leaf_piece: item.piece.to_string(),
+                at,
+                closed_yaw_deg: yaw_deg + item.place.yaw_degrees,
+                opening_width: if item.piece.as_str() == "door_sturdy" {
+                    1.05
+                } else {
+                    1.1
+                },
+                house_at: GlobalXZ::at(x, z),
+                house_yaw_deg: yaw_deg,
+                floor_y,
+                half_z: shape.half_size.y,
+            });
+        }
         out.push(Standing {
             kind: Kind::HousePiece(index),
-            at: GlobalPosition::at(
-                x + f64::from(dx),
-                f64::from(floor_y + p.y),
-                z + f64::from(dz),
-            ),
+            at,
             yaw_deg: yaw_deg + item.place.yaw_degrees,
+            door_id: leaf.then_some(id),
         });
     }
 }
@@ -811,6 +908,7 @@ fn seat_castle(
                 z + f64::from(dz),
             ),
             yaw_deg: yaw_deg + item.place.yaw_degrees,
+            door_id: None,
         });
     }
 }
@@ -825,6 +923,10 @@ fn layout_config(pin: SettlementPin) -> HamletLabConfig {
 fn plan_seed(world_seed: i32, node_id: i32) -> u64 {
     (world_seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (node_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+}
+
+fn door_key(pin_id: i32, x: f64, z: f64) -> u64 {
+    (pin_id as u64).wrapping_mul(0x9E37_79B9) ^ x.to_bits() ^ z.to_bits().rotate_left(17)
 }
 
 fn house_seed(world_seed: i32, node_id: i32, cx: f32, cz: f32) -> u64 {
@@ -1020,12 +1122,14 @@ mod tests {
             kind: Kind::HousePiece(0),
             at,
             yaw_deg: 0.0,
+            door_id: None,
         })
         .expect("house piece");
         let castle = tile_key(&Standing {
             kind: Kind::CastlePiece(0),
             at,
             yaw_deg: 0.0,
+            door_id: None,
         })
         .expect("castle piece");
         assert_ne!(house, castle);

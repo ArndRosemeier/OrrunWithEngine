@@ -4,12 +4,13 @@
 //! * [`TerrainChunkBuilder`] turns it into seam-safe land/water/contact chunks.
 //! * [`WorldStream`] keeps those chunks around the player and rebases render
 //!   space so `f32` precision stays local.
-//! * [`WorldSession`] runs atlas → loading → walking in one process.
+//! * [`WorldSession`] runs atlas → travel → walking in one process.
 
 mod alpine;
 mod atlas_fields;
 mod chunk_mesh;
 mod coords;
+mod doors;
 mod entry;
 mod fauna;
 mod footprint;
@@ -23,6 +24,7 @@ mod scatter;
 mod session;
 mod settlement;
 mod surface;
+mod travel;
 mod world_stream;
 
 #[cfg(test)]
@@ -48,6 +50,9 @@ pub use settlement::{HamletStand, SettlementError, SettlementLayer};
 pub use surface::{
     classify_settlement, ContinentalSurface, SettlementPin, SurfaceColumn, SurfaceError,
     SurfaceMaterial, TerrainLayers, WaterBody, MIN_WATER_DEPTH,
+};
+pub use travel::{
+    ContinentProxySpec, TravelPhase, TravelTimings, TravelView, MAX_PROXY_AXIS, PROXY_EXAGGERATION,
 };
 pub use world_stream::{
     TerrainTier, WorldStream, DISTANT, ENTRY_RING, FAR, FAR_VIEW_M, MEDIUM, NEAR,
