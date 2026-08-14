@@ -696,15 +696,14 @@ impl WorldSession {
         let hamlets = self
             .settlements
             .as_ref()
-            .map(|s| s.hamlets().to_vec())
-            .unwrap_or_default();
+            .map_or(&[][..], SettlementLayer::hamlets);
         if let Some(paths) = self.paths.as_mut() {
             let t = Instant::now();
             paths.follow(
                 world,
                 &self.surface,
                 &self.ponds.field(),
-                &hamlets,
+                hamlets,
                 foot,
                 self.stream.resident_count(),
                 self.stream.walked_pending_count(),
@@ -720,7 +719,7 @@ impl WorldSession {
                 &self.surface,
                 &self.ponds.field(),
                 &plots,
-                &hamlets,
+                hamlets,
                 foot,
                 foot,
                 input.dt,

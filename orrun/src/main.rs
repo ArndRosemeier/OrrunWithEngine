@@ -708,11 +708,6 @@ fn main() {
             .as_mut()
             .expect("left the title before the atlas was ready");
 
-        match session.state() {
-            SessionState::World | SessionState::Loading => install_daylight(world),
-            SessionState::Atlas => {}
-        }
-
         if let Err(err) = session.update(world, frame) {
             panic!("world session failed: {err}");
         }
