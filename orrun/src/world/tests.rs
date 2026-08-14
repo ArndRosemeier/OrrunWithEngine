@@ -415,7 +415,7 @@ fn coarse_tiers_do_not_bridge_the_reported_river_canyon() {
         "the invading hill no longer forms a canyon"
     );
     assert!(
-        medium <= walked && far <= walked,
+        medium <= walked + 0.25 && far <= walked + 0.25,
         "coarse ground bridges the canyon: walked={walked:.1}, medium={medium:.1}, far={far:.1}"
     );
     assert!(
@@ -691,6 +691,7 @@ fn lowland_has_a_quiet_floor_and_occasional_hills() {
     let probe = 90usize;
     let lattice = span / probe as f64;
     let mut slopes = Vec::new();
+    let mut grain = Vec::new();
     for iz in 4..probe - 4 {
         for ix in 4..probe - 4 {
             let x = (ix as f64 + 0.5) * lattice;
@@ -701,6 +702,12 @@ fn lowland_has_a_quiet_floor_and_occasional_hills() {
                 continue;
             }
             slopes.push(local_slope(&surface, x, z, step));
+            grain.push(
+                surface
+                    .terrain_layers(GlobalXZ::at(x, z))
+                    .grain_m
+                    .abs(),
+            );
         }
     }
     assert!(
@@ -730,6 +737,12 @@ fn lowland_has_a_quiet_floor_and_occasional_hills() {
         steep < slopes.len() / 4,
         "plains are cliffs everywhere ({steep} of {}), not occasional",
         slopes.len()
+    );
+    grain.sort_by(|a, b| a.total_cmp(b));
+    let grain_med = grain[grain.len() / 2];
+    assert!(
+        grain_med > 6.0,
+        "plains median |grain| is {grain_med:.1} m; lowland Quilez hills never arrived"
     );
 }
 

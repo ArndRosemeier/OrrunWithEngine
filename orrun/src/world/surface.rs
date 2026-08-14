@@ -59,7 +59,8 @@ pub const ROCK_HEIGHT: f32 = 600.0;
 pub const SAND_BAND: f32 = 4.0;
 
 const SWELL_HEIGHT: f32 = 12.0;
-const HILL_HEIGHT: f32 = 38.0;
+/// Quilez hill amplitude. First-octave wavelength is set in `grain`.
+const HILL_HEIGHT: f32 = 36.0;
 const RIPPLE_HEIGHT: f32 = 8.0;
 const GRIT_HEIGHT: f32 = 2.2;
 /// Quilez gradient-scaled fbm amplitude. This authors alpine shape; 90 m of
@@ -379,18 +380,24 @@ impl TerrainDetail {
         }
     }
 
-    /// Quiet floor: swell at a kilometre, a little FBM, grit underfoot.
-    /// Plains used to wear 20 m of hill noise everywhere; that was the sine.
+    /// Quiet floor: swell at a kilometre, Quilez hills, grit underfoot.
+    /// Plains used to wear 20 m of ordinary FBM everywhere; that was the sine.
     fn grain(&self, px: f32, pz: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
         let swell = self.swell.sample2(px * 0.0008, pz * 0.0008)
             * SWELL_HEIGHT
             * lerp(1.0, 0.4, relief)
             * lerp(1.0, 0.12, alpine);
-        let hills = self.hills.fbm2(px * 0.0024, pz * 0.0024, 3, 2.05, 0.5)
-            * HILL_HEIGHT
-            * lerp(0.14, 1.0, relief)
-            * lerp(1.0, 0.22, alpine)
-            * lerp(0.35, 1.0, detail_amt);
+        // Same Elevated formula as the ranges, at hill scale (~625 m).
+        // Strongest on the plains; alpine already has the kilometre IQ.
+        let lowland = (1.0 - alpine) * lerp(0.82, 0.22, relief);
+        let hills = if lowland > 0.04 {
+            self.hills.iq_fbm2(px * 0.0016, pz * 0.0016, 3)
+                * HILL_HEIGHT
+                * lowland
+                * lerp(0.35, 1.0, detail_amt)
+        } else {
+            0.0
+        };
         let ripples = self.ripples.fbm2(px * 0.006, pz * 0.006, 3, 2.1, 0.5)
             * RIPPLE_HEIGHT
             * lerp(0.32, 1.0, relief)
