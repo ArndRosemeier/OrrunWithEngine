@@ -110,6 +110,12 @@ pub struct PathLayer {
     hamlets: Vec<HamletStand>,
 }
 
+impl Default for PathLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PathLayer {
     pub fn new() -> Self {
         Self {

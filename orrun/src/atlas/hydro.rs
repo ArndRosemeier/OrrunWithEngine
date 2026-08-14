@@ -167,6 +167,17 @@ impl HydroVectors {
         let z = az.clamp(0, s - 1) as usize;
         z * size + x
     }
+
+    /// Canonical land side of the same warped coast rings used by the 3D
+    /// surface. Packed atlas cells are only the source raster; after smoothing
+    /// and meandering, a point near a coast must ask the final vector geometry.
+    pub(crate) fn contains_land(&self, size: usize, p: Vec2) -> bool {
+        let q = p + shore_domain_warp(p);
+        let idx = self.cell_index(size, q.x, q.y);
+        self.cell_coasts[idx]
+            .iter()
+            .any(|&coast_id| point_in_ring(q, &self.coasts[coast_id as usize].ring))
+    }
 }
 
 fn half_width_for_class(class: i32) -> f32 {
@@ -933,7 +944,7 @@ fn despike_closed(ring: &mut [Vec2], max_turn_deg: f32) {
     }
 }
 
-fn ensure_ring_contains_centroid(ring: &mut Vec<Vec2>) {
+fn ensure_ring_contains_centroid(ring: &mut [Vec2]) {
     if ring.len() < 3 {
         return;
     }
@@ -964,12 +975,14 @@ fn point_in_ring(p: Vec2, ring: &[Vec2]) -> bool {
     inside
 }
 
+type CellIdLists = Vec<Vec<u32>>;
+
 fn build_cell_index(
     size: usize,
     rivers: &[RiverPolyline],
     lakes: &[LakeOutline],
     coasts: &[CoastRing],
-) -> (Vec<Vec<u32>>, Vec<Vec<u32>>, Vec<Vec<u32>>) {
+) -> (CellIdLists, CellIdLists, CellIdLists) {
     let mut cell_rivers = vec![Vec::new(); size * size];
     let mut cell_lakes = vec![Vec::new(); size * size];
     let mut cell_coasts = vec![Vec::new(); size * size];

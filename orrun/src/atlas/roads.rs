@@ -125,11 +125,11 @@ pub fn build_roads(
         for i in 0..n {
             let ni = group[i];
             let mut best: Vec<(f32, usize)> = Vec::new();
-            for j in 0..n {
+            for (j, nj) in group.iter().enumerate() {
                 if i == j {
                     continue;
                 }
-                best.push((road_pair_weight(ni, group[j], cells), j));
+                best.push((road_pair_weight(ni, nj, cells), j));
             }
             best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
             let spur_budget = if ni.kind == NodeKind::Settlement {

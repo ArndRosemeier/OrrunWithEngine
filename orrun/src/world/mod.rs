@@ -6,6 +6,7 @@
 //!   space so `f32` precision stays local.
 //! * [`WorldSession`] runs atlas → loading → walking in one process.
 
+mod alpine;
 mod atlas_fields;
 mod chunk_mesh;
 mod coords;
@@ -46,7 +47,7 @@ pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSessio
 pub use settlement::{HamletStand, SettlementError, SettlementLayer};
 pub use surface::{
     classify_settlement, ContinentalSurface, SettlementPin, SurfaceColumn, SurfaceError,
-    SurfaceMaterial, WaterBody, MIN_WATER_DEPTH,
+    SurfaceMaterial, TerrainLayers, WaterBody, MIN_WATER_DEPTH,
 };
 pub use world_stream::{
     TerrainTier, WorldStream, DISTANT, ENTRY_RING, FAR, FAR_VIEW_M, MEDIUM, NEAR,

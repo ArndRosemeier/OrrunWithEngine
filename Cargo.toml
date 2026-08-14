@@ -10,6 +10,11 @@ version = "0.1.0"
 [workspace.lints.rust]
 warnings = "deny"
 
+[workspace.lints.clippy]
+# Atlas, mesh, and layer functions take many typed inputs on purpose.
+# Packing them into bag structs would hide the data flow this project wants loud.
+too_many_arguments = "allow"
+
 [workspace.dependencies]
 engine = { path = "../Engine/engine" }
 modular = { path = "../Modular/modular" }

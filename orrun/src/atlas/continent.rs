@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use glam::Vec2;
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
@@ -12,6 +13,7 @@ use super::features::{Dir, EndpointKind, Kind};
 use super::hydro::HydroVectors;
 use super::lakes::{self, LakeScratch};
 use super::landmask::{self, collar_cells};
+use super::massifs::{self, AlpineMassifSeed};
 use super::nodes;
 use super::orogen;
 use super::pack;
@@ -22,7 +24,7 @@ use super::types::{Crossing, GraphNode, Lake, Link, Port};
 
 pub const SIZE: usize = 1000;
 pub const CELL_METRES: f32 = 1000.0;
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 7;
 pub const SEA_SURFACE_Z: i32 = 0;
 
 #[derive(Debug, Error)]
@@ -52,6 +54,8 @@ pub struct ContinentAtlas {
     pub road_links: FxHashMap<i32, Vec<Link>>,
     pub river_receiver: Vec<i32>,
     pub mouth_distance: Vec<i32>,
+    /// Sparse, crest-authored sites for kilometre-scale alpine landforms.
+    pub alpine_massifs: Vec<AlpineMassifSeed>,
     /// Deterministic vector hydrology (rivers / lakes / coasts as curves).
     pub hydro: Arc<HydroVectors>,
 }
@@ -70,7 +74,7 @@ impl ContinentAtlas {
         let mut humidity = planes.humidity;
         let mut relief = planes.relief;
 
-        orogen::apply_orogens(
+        let orogen_guide = orogen::apply_orogens(
             world_seed,
             size,
             &land,
@@ -154,6 +158,7 @@ impl ContinentAtlas {
             road_links: road_graph.links,
             river_receiver: river_graph.receiver,
             mouth_distance,
+            alpine_massifs: Vec::new(),
             hydro: Arc::new(HydroVectors {
                 sea_surface_z: SEA_SURFACE_Z as f32,
                 rivers: Vec::new(),
@@ -165,6 +170,19 @@ impl ContinentAtlas {
             }),
         };
         atlas.hydro = Arc::new(HydroVectors::bake(&atlas));
+        let alpine_massifs = massifs::seed_massifs(
+            world_seed,
+            massifs::MassifSource {
+                size,
+                land: &land,
+                lake_id: &atlas.lake_id,
+                elev_code: &elev_code,
+                relief: &relief,
+                hydro: &atlas.hydro,
+            },
+            &orogen_guide,
+        );
+        atlas.alpine_massifs = alpine_massifs;
         atlas.content_hash = atlas.compute_hash();
         atlas
     }
@@ -282,6 +300,57 @@ impl ContinentAtlas {
                     lake.id
                 ));
             }
+        }
+        let world_extent_m = self.size as f32 * CELL_METRES;
+        for (i, massif) in self.alpine_massifs.iter().enumerate() {
+            if !massif.is_valid(world_extent_m) {
+                errors.push(format!("alpine massif {i} has invalid geometry"));
+                continue;
+            }
+            let ax = (massif.centre_x_m / CELL_METRES).floor() as i32;
+            let az = (massif.centre_z_m / CELL_METRES).floor() as i32;
+            if matches!(
+                pack::biome(self.cell_at(ax, az)),
+                Biome::Ocean | Biome::Lake
+            ) {
+                errors.push(format!(
+                    "alpine massif {i} is centred on water at ({ax},{az})"
+                ));
+            }
+            if !self
+                .hydro
+                .contains_land(self.size, Vec2::new(massif.centre_x_m, massif.centre_z_m))
+            {
+                errors.push(format!(
+                    "alpine massif {i} centre is outside the final coast"
+                ));
+            }
+            let summit_x_m = massif.centre_x_m + massif.crest_axis_x * massif.summit_along_offset_m
+                - massif.crest_axis_z * massif.summit_across_offset_m;
+            let summit_z_m = massif.centre_z_m
+                + massif.crest_axis_z * massif.summit_along_offset_m
+                + massif.crest_axis_x * massif.summit_across_offset_m;
+            let summit_ax = (summit_x_m / CELL_METRES).floor() as i32;
+            let summit_az = (summit_z_m / CELL_METRES).floor() as i32;
+            if matches!(
+                pack::biome(self.cell_at(summit_ax, summit_az)),
+                Biome::Ocean | Biome::Lake
+            ) {
+                errors.push(format!(
+                    "alpine massif {i} summit is on water at ({summit_ax},{summit_az})"
+                ));
+            }
+            if !self
+                .hydro
+                .contains_land(self.size, Vec2::new(summit_x_m, summit_z_m))
+            {
+                errors.push(format!(
+                    "alpine massif {i} summit is outside the final coast"
+                ));
+            }
+        }
+        if self.size >= 96 && self.alpine_massifs.is_empty() {
+            errors.push("orogen produced no alpine massif sites".into());
         }
         if let Some(cell) = self.first_inland_ocean_cell() {
             let ax = (cell % self.size) as i32;
@@ -703,6 +772,40 @@ impl ContinentAtlas {
         h = h
             .wrapping_mul(31)
             .wrapping_add(self.hydro.coasts.len() as i64);
+        h = h
+            .wrapping_mul(31)
+            .wrapping_add(self.alpine_massifs.len() as i64);
+        for massif in &self.alpine_massifs {
+            for value in [
+                massif.centre_x_m,
+                massif.centre_z_m,
+                massif.crest_axis_x,
+                massif.crest_axis_z,
+                massif.prominence_m,
+                massif.summit_along_offset_m,
+                massif.summit_across_offset_m,
+            ] {
+                h = h.wrapping_mul(31).wrapping_add(i64::from(value.to_bits()));
+            }
+            h = h
+                .wrapping_mul(31)
+                .wrapping_add(i64::from(massif.ridge_count));
+            for ridge in massif.ridges.iter().take(massif.ridge_count as usize) {
+                for value in [
+                    ridge.ax_m,
+                    ridge.az_m,
+                    ridge.bx_m,
+                    ridge.bz_m,
+                    ridge.height_a_m,
+                    ridge.height_b_m,
+                    ridge.left_half_m,
+                    ridge.right_half_m,
+                    ridge.break01,
+                ] {
+                    h = h.wrapping_mul(31).wrapping_add(i64::from(value.to_bits()));
+                }
+            }
+        }
         let step = (self.size / 32).max(1);
         for az in (0..self.size).step_by(step) {
             for ax in (0..self.size).step_by(step) {

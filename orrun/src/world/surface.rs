@@ -25,6 +25,7 @@ use engine::surface::{SurfaceSample, SurfaceSource, WATER_CLEARANCE};
 use glam::Vec2;
 use thiserror::Error;
 
+use super::alpine::AlpineMassifField;
 use super::atlas_fields::AtlasFields;
 use super::coords::AtlasBounds;
 use super::hydro_geom::{HydroIndex, OCEAN_SHELF_DEPTH, SHORE_BAND_M};
@@ -61,7 +62,9 @@ const SWELL_HEIGHT: f32 = 12.0;
 const HILL_HEIGHT: f32 = 38.0;
 const RIPPLE_HEIGHT: f32 = 8.0;
 const GRIT_HEIGHT: f32 = 2.2;
-const MOUNTAIN_DETAIL: f32 = 90.0;
+/// Quilez gradient-scaled fbm amplitude. This authors alpine shape; 90 m of
+/// ordinary FBM cannot. First-octave wavelength is set in `orogeny`.
+const IQ_HEIGHT_M: f32 = 820.0;
 const WARP_STRENGTH: f32 = 70.0;
 /// Extra domain warp of the loft in high relief. Without it the kilometre
 /// interpolant, the neighbourhood contrast, and the swell all share one
@@ -70,7 +73,7 @@ const ALPINE_WARP_M: f32 = 340.0;
 const MACRO_NEAR_M: f32 = 880.0;
 const MACRO_FAR_M: f32 = 2_150.0;
 /// How hard high-relief loft is pulled away from that neighbourhood.
-const MACRO_CONTRAST: f32 = 2.45;
+const MACRO_CONTRAST: f32 = 1.55;
 /// Height where the land starts to read alpine, and where that is complete.
 const ALPINE_M: f32 = 450.0;
 const ALPINE_FULL_M: f32 = 1_500.0;
@@ -121,6 +124,20 @@ pub enum SurfaceError {
 
     #[error("surface probe at ({x} m, {z} m) produced a non-finite ground height")]
     NonFiniteProbe { x: f64, z: f64 },
+}
+
+/// Unmixed height terms at one column. The HUD uses this so a snowy loft is
+/// not mistaken for a ridge massif or for Quilez IQ.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainLayers {
+    pub relief: f32,
+    pub atlas_m: f32,
+    pub loft_m: f32,
+    pub grain_m: f32,
+    pub iq_m: f32,
+    pub knolls_m: f32,
+    pub ravines_m: f32,
+    pub massif_m: f32,
 }
 
 /// Which body a wet column belongs to.
@@ -294,10 +311,11 @@ struct TerrainDetail {
     ravine_dir: Noise,
     ravine_seed: u64,
     erode: Noise,
+    massifs: Arc<AlpineMassifField>,
 }
 
 impl TerrainDetail {
-    fn new(world_seed: i32) -> Self {
+    fn new(world_seed: i32, massifs: Arc<AlpineMassifField>) -> Self {
         let seed = world_seed as u32;
         Self {
             swell: Noise::new(seed ^ 0xA11CE),
@@ -312,6 +330,7 @@ impl TerrainDetail {
             ravine_dir: Noise::new(seed ^ 0x5CA9_9001),
             ravine_seed: u64::from(seed) ^ 0xFA01_7C11_5CA9_9001,
             erode: Noise::new(seed ^ 0xE80D_E001),
+            massifs,
         }
     }
 
@@ -325,7 +344,7 @@ impl TerrainDetail {
         let px = x + warp_x;
         let pz = z + warp_z;
 
-        let base = self.steepen_base(fields, px, pz, relief);
+        let base = self.steepen_base(fields, px, pz, relief) + self.massifs.height(x, z);
         let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, base);
         let (ex, ez) = self.eroded_point(px, pz, alpine * relief);
         let mut h = base + self.grain(ex, ez, relief, alpine, detail_amt);
@@ -335,33 +354,29 @@ impl TerrainDetail {
         h
     }
 
-    #[cfg(test)]
-    fn debug_layers(
-        &self,
-        fields: &AtlasFields,
-        x: f32,
-        z: f32,
-    ) -> (f32, f32, f32, f32, f32, f32, f32) {
+    fn layers(&self, fields: &AtlasFields, x: f32, z: f32) -> TerrainLayers {
         let relief = fields.sample_smooth(&fields.relief01, x, z).clamp(0.0, 1.0);
-        let e_atlas = fields.sample_smooth(&fields.elevation_m, x, z);
-        let alpine_hint = smoothstep(ALPINE_M, ALPINE_FULL_M, e_atlas) * relief;
+        let atlas_m = fields.sample_smooth(&fields.elevation_m, x, z);
+        let alpine_hint = smoothstep(ALPINE_M, ALPINE_FULL_M, atlas_m) * relief;
         let warp_m = WARP_STRENGTH + ALPINE_WARP_M * alpine_hint;
         let warp_x = self.warp_a.sample2(x * 0.00032, z * 0.00032) * warp_m;
         let warp_z = self.warp_b.sample2(x * 0.00032 + 40.0, z * 0.00032) * warp_m;
         let px = x + warp_x;
         let pz = z + warp_z;
-        let base = self.steepen_base(fields, px, pz, relief);
-        let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, base);
+        let massif_m = self.massifs.height(x, z);
+        let loft_m = self.steepen_base(fields, px, pz, relief) + massif_m;
+        let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, loft_m);
         let (ex, ez) = self.eroded_point(px, pz, alpine * relief);
-        (
+        TerrainLayers {
             relief,
-            e_atlas,
-            base,
-            self.grain(ex, ez, relief, alpine, 1.0),
-            self.orogeny(ex, ez, relief, alpine, 1.0),
-            self.knolls(px, pz, relief, alpine, 1.0),
-            self.ravines(px, pz, relief, alpine, 1.0),
-        )
+            atlas_m,
+            loft_m,
+            grain_m: self.grain(ex, ez, relief, alpine, 1.0),
+            iq_m: self.orogeny(ex, ez, relief, alpine, 1.0),
+            knolls_m: self.knolls(px, pz, relief, alpine, 1.0),
+            ravines_m: self.ravines(px, pz, relief, alpine, 1.0),
+            massif_m,
+        }
     }
 
     /// Quiet floor: swell at a kilometre, a little FBM, grit underfoot.
@@ -407,18 +422,18 @@ impl TerrainDetail {
         (x1 + (mx - m) / e2 * k2, z1 + (mz - m) / e2 * k2)
     }
 
-    /// Rounded mountain grain. Ridged noise puts a wall on every isoline of
-    /// the field — a comb of fins — so it is not used here. Cliffs come from
-    /// knolls, which are peaks, not contours.
-    fn orogeny(&self, px: f32, pz: f32, relief: f32, alpine: f32, detail_amt: f32) -> f32 {
-        if relief < 0.08 && alpine < 0.05 {
+    /// Quilez `terrain()`: later octaves fade where the running gradient is steep.
+    ///
+    /// This is the alpine silhouette, not a 90 m garnish. Ridged isolines are
+    /// still unused — those stack as a comb of fins.
+    fn orogeny(&self, px: f32, pz: f32, relief: f32, alpine: f32, _detail_amt: f32) -> f32 {
+        if alpine < 0.08 || relief < 0.10 {
             return 0.0;
         }
-        let n = self.mountain.fbm2(px * 0.0009, pz * 0.0009, 3, 2.05, 0.5);
-        n * MOUNTAIN_DETAIL
-            * lerp(0.06, 0.80, relief)
-            * lerp(0.18, 1.20, alpine)
-            * lerp(0.25, 1.0, detail_amt)
+        // Value-noise IQ from https://iquilezles.org/articles/morenoise/
+        // First octave ~2.4 km, so the FAR 125 m grid still sees the silhouette.
+        let n = self.mountain.iq_fbm2(px * 0.00042, pz * 0.00042, 8);
+        n * IQ_HEIGHT_M * lerp(0.20, 1.0, relief) * lerp(0.15, 1.0, alpine)
     }
 
     /// Occasional bulky knolls, independently jittered across large cells.
@@ -594,7 +609,8 @@ impl TerrainDetail {
         );
         let e_avg = 0.58 * near + 0.42 * far;
         let alpine = smoothstep(ALPINE_M, ALPINE_FULL_M, e0.max(e_avg));
-        let contrast = lerp(1.0, MACRO_CONTRAST, relief) * lerp(1.0, 1.22, alpine);
+        // Loft contrast is a 1 km sine. Alpine shape is Quilez IQ, not this.
+        let contrast = lerp(1.0, MACRO_CONTRAST, relief * (1.0 - alpine * 0.90));
         let delta = e0 - e_avg;
         let amount = if delta >= 0.0 {
             contrast
@@ -745,6 +761,10 @@ impl ContinentalSurface {
         fields: Arc<AtlasFields>,
     ) -> Result<Self, SurfaceError> {
         let bounds = AtlasBounds::of(atlas);
+        let massifs = Arc::new(AlpineMassifField::build(
+            &atlas.alpine_massifs,
+            bounds.metres() as f32,
+        ));
         let surface = Self {
             fields,
             index: Arc::new(HydroIndex::build(&atlas.hydro, bounds.size())),
@@ -752,7 +772,7 @@ impl ContinentalSurface {
             bounds,
             sea_surface_z: atlas.hydro.sea_surface_z,
             world_seed: atlas.world_seed,
-            detail: TerrainDetail::new(atlas.world_seed),
+            detail: TerrainDetail::new(atlas.world_seed, massifs),
             settlements: pins_from_atlas(atlas),
             roads: bake_road_paths(atlas).into(),
         };
@@ -855,6 +875,11 @@ impl ContinentalSurface {
         &self.roads
     }
 
+    /// Unmixed loft / IQ / massif terms at `p`.
+    pub fn terrain_layers(&self, p: GlobalXZ) -> TerrainLayers {
+        self.detail.layers(&self.fields, p.x as f32, p.z as f32)
+    }
+
     /// Dry structural height with no hydro carving (used for bank references).
     pub fn base_ground(&self, p: GlobalXZ) -> f32 {
         self.detail
@@ -862,8 +887,18 @@ impl ContinentalSurface {
     }
 
     #[cfg(test)]
-    pub(super) fn debug_layers(&self, x: f32, z: f32) -> (f32, f32, f32, f32, f32, f32, f32) {
-        self.detail.debug_layers(&self.fields, x, z)
+    pub(super) fn debug_layers(&self, x: f32, z: f32) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+        let l = self.detail.layers(&self.fields, x, z);
+        (
+            l.relief,
+            l.atlas_m,
+            l.loft_m,
+            l.grain_m,
+            l.iq_m,
+            l.knolls_m,
+            l.ravines_m,
+            l.massif_m,
+        )
     }
 
     /// Fully resolved column at `p`.

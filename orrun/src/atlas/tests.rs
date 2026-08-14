@@ -109,7 +109,30 @@ fn determinism_same_seed() {
     assert_eq!(a.lakes.len(), b.lakes.len());
     assert_eq!(a.nodes.len(), b.nodes.len());
     assert_eq!(a.cells, b.cells);
+    assert_eq!(a.alpine_massifs, b.alpine_massifs);
     assert_ne!(a.content_hash, c.content_hash);
+}
+
+#[test]
+fn alpine_massifs_are_sparse_valid_crest_landmarks() {
+    let atlas = ContinentAtlas::generate(20260809, 128);
+    assert!(
+        atlas.alpine_massifs.len() >= 2,
+        "orogen placed only {} alpine massifs",
+        atlas.alpine_massifs.len()
+    );
+    let extent_m = atlas.size as f32 * super::CELL_METRES;
+    for (i, site) in atlas.alpine_massifs.iter().enumerate() {
+        assert!(site.is_valid(extent_m), "massif {i} is invalid: {site:?}");
+        for other in atlas.alpine_massifs.iter().skip(i + 1) {
+            let spacing_m =
+                (site.centre_x_m - other.centre_x_m).hypot(site.centre_z_m - other.centre_z_m);
+            assert!(
+                spacing_m >= 5_000.0,
+                "massifs are a repeated ridge comb only {spacing_m:.0} m apart"
+            );
+        }
+    }
 }
 
 #[test]

@@ -589,6 +589,97 @@ fn alpine_crests_are_not_a_regular_wave() {
 }
 
 #[test]
+fn dominant_massif_summits_survive_the_far_grid() {
+    let (atlas, surface) = world_of(20260809, 128);
+    assert!(
+        !atlas.alpine_massifs.is_empty(),
+        "fixed alpine seed has no massif sites"
+    );
+    let sample_m = super::FAR.sample_m as f32;
+    for (i, site) in atlas.alpine_massifs.iter().take(16).enumerate() {
+        let across_x = -site.crest_axis_z;
+        let across_z = site.crest_axis_x;
+        let summit_x = site.centre_x_m
+            + site.crest_axis_x * site.summit_along_offset_m
+            + across_x * site.summit_across_offset_m;
+        let summit_z = site.centre_z_m
+            + site.crest_axis_z * site.summit_along_offset_m
+            + across_z * site.summit_across_offset_m;
+        let summit = GlobalXZ::at(f64::from(summit_x), f64::from(summit_z));
+        let summit_ax = (summit_x / CELL_METRES).floor() as i32;
+        let summit_az = (summit_z / CELL_METRES).floor() as i32;
+        assert!(
+            !surface.column(summit).is_wet(),
+            "massif {i} summit ({summit_x:.0}, {summit_z:.0}) cell ({summit_ax},{summit_az}) is {:?} in atlas and {:?} on surface",
+            crate::atlas::pack::biome(atlas.cell_at(summit_ax, summit_az)),
+            surface.column(summit).body(),
+        );
+        let grid_x = (summit_x / sample_m).round() * sample_m;
+        let grid_z = (summit_z / sample_m).round() * sample_m;
+        let mut retained_m = 0.0f32;
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                retained_m = retained_m.max(
+                    surface
+                        .debug_layers(grid_x + dx as f32 * sample_m, grid_z + dz as f32 * sample_m)
+                        .7,
+                );
+            }
+        }
+        assert!(
+            retained_m >= site.prominence_m * 0.82,
+            "massif {i} loses its summit on the 125 m grid: retained {retained_m:.0} m of {:.0} m",
+            site.prominence_m
+        );
+    }
+}
+
+#[test]
+fn alpine_silhouette_is_quilez_not_a_sparse_massif() {
+    // Ridge massifs are rare landmarks. A snowy column is almost always loft
+    // plus Quilez IQ — if |iq| is tiny, the view is still the 1 km sine.
+    let surface = surface_of(20260809);
+    let fields = surface.fields();
+    let span = surface.bounds().metres();
+    let probe = 80usize;
+    let lattice = span / probe as f64;
+    let mut iq = Vec::new();
+    let mut massif_hits = 0usize;
+    for iz in 6..probe - 6 {
+        for ix in 6..probe - 6 {
+            let x = (ix as f64 + 0.5) * lattice;
+            let z = (iz as f64 + 0.5) * lattice;
+            let elev = fields.sample_smooth(&fields.elevation_m, x as f32, z as f32);
+            let relief = fields.sample_smooth(&fields.relief01, x as f32, z as f32);
+            if relief <= 0.50 || elev <= 900.0 {
+                continue;
+            }
+            let layers = surface.terrain_layers(GlobalXZ::at(x, z));
+            iq.push(layers.iq_m.abs());
+            if layers.massif_m > 50.0 {
+                massif_hits += 1;
+            }
+        }
+    }
+    assert!(
+        iq.len() > 40,
+        "expected alpine ground on seed 20260809, got {}",
+        iq.len()
+    );
+    iq.sort_by(|a, b| a.total_cmp(b));
+    let med = iq[iq.len() / 2];
+    assert!(
+        med > 80.0,
+        "alpine median |iq| is {med:.1} m; the range is still the loft sine"
+    );
+    let massif_frac = massif_hits as f32 / iq.len() as f32;
+    assert!(
+        massif_frac < 0.20,
+        "massifs cover {massif_frac:.2} of alpine probes; a random summit is not a ridge site"
+    );
+}
+
+#[test]
 fn lowland_has_a_quiet_floor_and_occasional_hills() {
     // The old look was 20 m of FBM on every plains sample: a complicated sine.
     // The floor has to stay gentle, and a minority of 16 m probes has to be a

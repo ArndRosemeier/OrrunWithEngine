@@ -1432,7 +1432,7 @@ mod tests {
         let root = fauna_dir().expect("fauna dir");
         for id in ["deer", "stag", "wolf", "fox", "horse"] {
             let spec = catalog.spec(id);
-            let path = root.join(&spec.source.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let path = root.join(spec.source.replace('/', std::path::MAIN_SEPARATOR_STR));
             let model = AnimatedModel::load_with(&path, &root, &EngineLimits::default())
                 .unwrap_or_else(|e| panic!("load {id}: {e}"));
             for clip in [

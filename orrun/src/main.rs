@@ -626,11 +626,12 @@ fn main() {
             if job.is_finished() {
                 let (atlas, surface) = job.join().expect("atlas thread");
                 eprintln!(
-                    "ready: lakes={} rivers={} coasts={} nodes={} hash={:#x}",
+                    "ready: lakes={} rivers={} coasts={} nodes={} alpine_massifs={} hash={:#x}",
                     atlas.hydro.lakes.len(),
                     atlas.hydro.rivers.len(),
                     atlas.hydro.coasts.len(),
                     atlas.nodes.len(),
+                    atlas.alpine_massifs.len(),
                     atlas.content_hash as u32,
                 );
                 *status.lock().expect("title status") = String::new();
@@ -1295,9 +1296,9 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         .player_heading()
         .map(|h| h.degrees())
         .unwrap_or_default();
-    let column = session
-        .surface()
-        .column(engine::space::GlobalXZ::at(p.x, p.z));
+    let at = engine::space::GlobalXZ::at(p.x, p.z);
+    let column = session.surface().column(at);
+    let layers = session.surface().terrain_layers(at);
     let stance = match session.locomotion() {
         Some(Locomotion::Fly) => "flying",
         _ if column.is_wet() => "in water",
@@ -1313,10 +1314,13 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         InstanceSubmit::CpuIndexed => "CPU",
     };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}",
+        "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}",
         p.x,
         p.z,
         p.y,
+        layers.loft_m,
+        layers.iq_m,
+        layers.massif_m,
         session.stream().resident_count(),
         session.fauna_count(),
         frame.fps,

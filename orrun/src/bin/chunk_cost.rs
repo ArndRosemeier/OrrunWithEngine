@@ -16,6 +16,7 @@ fn main() {
     let size = args.next().and_then(|s| s.parse().ok()).unwrap_or(64usize);
 
     let atlas = ContinentAtlas::generate(seed, size);
+    eprintln!("alpine massifs: {}", atlas.alpine_massifs.len());
     let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     let builder = TerrainChunkBuilder::new(Arc::clone(&surface));
 
@@ -25,6 +26,26 @@ fn main() {
         .iter()
         .max_by_key(|r| r.points.len())
         .map(|r| r.points[r.points.len() / 2]);
+    let alpine = atlas
+        .alpine_massifs
+        .iter()
+        .max_by(|a, b| a.prominence_m.total_cmp(&b.prominence_m))
+        .map(|site| {
+            let across_x = -site.crest_axis_z;
+            let across_z = site.crest_axis_x;
+            GlobalXZ::at(
+                f64::from(
+                    site.centre_x_m
+                        + site.crest_axis_x * site.summit_along_offset_m
+                        + across_x * site.summit_across_offset_m,
+                ),
+                f64::from(
+                    site.centre_z_m
+                        + site.crest_axis_z * site.summit_along_offset_m
+                        + across_z * site.summit_across_offset_m,
+                ),
+            )
+        });
     let mid = surface.bounds().metres() * 0.5;
     let probes = [
         (
@@ -33,6 +54,7 @@ fn main() {
                 .map(|p| GlobalXZ::at(p.x as f64, p.y as f64))
                 .unwrap_or(GlobalXZ::at(mid, mid)),
         ),
+        ("alpine", alpine.unwrap_or(GlobalXZ::at(mid, mid))),
         ("inland", GlobalXZ::at(mid, mid)),
         ("offshore", GlobalXZ::at(CHUNK_SPAN_M * 0.5, mid)),
     ];

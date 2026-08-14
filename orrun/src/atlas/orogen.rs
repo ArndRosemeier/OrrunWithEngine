@@ -8,6 +8,18 @@ use rand_chacha::ChaCha8Rng;
 use super::landmask::collar_cells;
 use super::{layer_seed, lerp, smoothstep};
 
+/// Dense construction-only record of the authored mountain belts.
+///
+/// The atlas keeps only sparse massif seeds after generation. Retaining this
+/// guide while the orogen is being built lets those sites follow actual crest
+/// segments and passes instead of rediscovering a ridge from packed heights.
+pub(crate) struct OrogenGuide {
+    pub(crate) distance_cells: Vec<f32>,
+    pub(crate) axis_x: Vec<f32>,
+    pub(crate) axis_z: Vec<f32>,
+    pub(crate) pass01: Vec<f32>,
+}
+
 pub fn apply_orogens(
     world_seed: i32,
     size: usize,
@@ -15,15 +27,19 @@ pub fn apply_orogens(
     elev_code: &mut [u8],
     humidity: &mut [u8],
     relief: &mut [u8],
-) {
+) -> OrogenGuide {
     let count = size * size;
-    let mut dist = vec![f32::INFINITY; count];
-    let mut pass_field = vec![0.0f32; count];
+    let mut guide = OrogenGuide {
+        distance_cells: vec![f32::INFINITY; count],
+        axis_x: vec![1.0f32; count],
+        axis_z: vec![0.0f32; count],
+        pass01: vec![0.0f32; count],
+    };
 
     let mut rng = ChaCha8Rng::seed_from_u64(u64::from(layer_seed(world_seed, "atlas_orogens")));
     let belt_count = if size < 500 { 1 } else { 2 };
     for belt in 0..belt_count {
-        stamp_orogen_arc(world_seed, size, &mut dist, &mut pass_field, &mut rng, belt);
+        stamp_orogen_arc(world_seed, size, &mut guide, &mut rng, belt);
     }
 
     let core_r = 6.0f32.max(size as f32 * 0.024);
@@ -37,11 +53,11 @@ pub fn apply_orogens(
         if land[i] == 0 {
             continue;
         }
-        let d = dist[i];
+        let d = guide.distance_cells[i];
         if d >= foot_r {
             continue;
         }
-        let pass_u = pass_field[i].clamp(0.0, 1.0);
+        let pass_u = guide.pass01[i].clamp(0.0, 1.0);
         let loft = if d < core_r {
             lerp(0.78, 1.0, 1.0 - d / core_r)
         } else if d < near_r {
@@ -99,13 +115,14 @@ pub fn apply_orogens(
         let dry = lerp(1.0, 0.55, loft * (1.0 - pass_u * 0.45));
         humidity[i] = ((humidity[i] as f32 * dry) as i32).clamp(0, 255) as u8;
     }
+
+    guide
 }
 
 fn stamp_orogen_arc(
     world_seed: i32,
     size: usize,
-    dist: &mut [f32],
-    pass_field: &mut [f32],
+    guide: &mut OrogenGuide,
     rng: &mut ChaCha8Rng,
     belt: i32,
 ) {
@@ -146,7 +163,7 @@ fn stamp_orogen_arc(
             pass_amt = smoothstep(0.28, 0.72, pn);
         }
         if let Some(p) = prev {
-            stamp_orogen_segment(size, dist, pass_field, p, (px, pz), foot_r, pass_amt);
+            stamp_orogen_segment(size, guide, p, (px, pz), foot_r, pass_amt);
         }
         prev = Some((px, pz));
     }
@@ -154,8 +171,7 @@ fn stamp_orogen_arc(
 
 fn stamp_orogen_segment(
     size: usize,
-    dist: &mut [f32],
-    pass_field: &mut [f32],
+    guide: &mut OrogenGuide,
     a: (f32, f32),
     b: (f32, f32),
     foot_r: f32,
@@ -168,6 +184,8 @@ fn stamp_orogen_segment(
     let max_z = ((a.1.max(b.1) + pad).ceil() as i32).clamp(0, size as i32 - 1);
     let ab = (b.0 - a.0, b.1 - a.1);
     let ab_len_sq = ab.0 * ab.0 + ab.1 * ab.1;
+    let ab_len = ab_len_sq.sqrt().max(0.0001);
+    let axis = (ab.0 / ab_len, ab.1 / ab_len);
     for az in min_z..=max_z {
         for ax in min_x..=max_x {
             let p = (ax as f32 + 0.5, az as f32 + 0.5);
@@ -182,12 +200,14 @@ fn stamp_orogen_segment(
                 continue;
             }
             let idx = az as usize * size + ax as usize;
-            if d < dist[idx] {
-                dist[idx] = d;
+            if d < guide.distance_cells[idx] {
+                guide.distance_cells[idx] = d;
+                guide.axis_x[idx] = axis.0;
+                guide.axis_z[idx] = axis.1;
             }
             if pass_amt > 0.0 {
                 let crest_w = 1.0 - (d / (foot_r * 0.45).max(1.0)).clamp(0.0, 1.0);
-                pass_field[idx] = pass_field[idx].max(pass_amt * crest_w);
+                guide.pass01[idx] = guide.pass01[idx].max(pass_amt * crest_w);
             }
         }
     }
