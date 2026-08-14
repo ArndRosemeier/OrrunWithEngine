@@ -2,17 +2,18 @@
 //!
 //! Usage: `cargo run -p orrun -- [seed] [size]`
 //!
-//! Title: the painted vista while the continent is charted, then Continue
-//! (if you have a stand) or Chart the land. Map: drag to pan · scroll to zoom · F fit · left click
-//! travels there · right click reveals a cell overlay · C clears overlays ·
-//! M returns to where you were standing · the largest-town button enters at
-//! the biggest settlement. World (first person): click to look · Esc hands
-//! the mouse back · W/S walk · Q/E sidestep · A/D turn · Shift sprint ·
-//! F fly · Space jump · M summons the map · Esc with a free cursor
-//! quits.
+//! Title: the painted vista while the continent is charted and the opening
+//! stand is streamed, then Start. Map (M in the world): drag to pan · scroll
+//! to zoom · F fit · left click travels there · right click reveals a cell
+//! overlay · C clears overlays · M returns to where you were standing · the
+//! largest-town button enters at the biggest settlement. World (first person):
+//! click to look · Esc hands the mouse back · W/S walk · Q/E sidestep · A/D
+//! turn · Shift sprint · F fly · Space jump · M summons the map · Esc with a
+//! free cursor quits.
 //!
-//! Where the player stood is written on exit, per seed and size, and offered
-//! as Continue on the next launch.
+//! Where the player stood is written on exit, per seed and size, and used as
+//! the opening stand on the next launch. A first launch starts at the largest
+//! settlement.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -34,7 +35,7 @@ use orrun::save::SavedStand;
 use orrun::settings::{self, Settings};
 use orrun::world::{
     install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentalSurface, Heading,
-    Locomotion, MapPoint, SessionState, WorldEntryRequest, WorldSession,
+    Locomotion, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -544,30 +545,35 @@ fn parse_args() -> (i32, usize) {
     (seed, size.max(32))
 }
 
-/// Ask the session to enter where the player last stood.
+/// Where the title starts streaming before Start is pressed.
 ///
 /// A remembered stand that no longer resolves is worth saying out loud: it
 /// means entry and the saved world have drifted apart, and silently dropping
-/// the player on the map would hide that.
-fn resume_saved_stand(
-    stand: SavedStand,
+/// the player on the map would hide that. A first launch uses the largest
+/// settlement — the same place the in-game map offers as a pin.
+fn opening_entry(
+    remembered: Option<SavedStand>,
     bounds: AtlasBounds,
-    session: &mut WorldSession,
-    world: &mut World,
-) {
-    let point = match MapPoint::from_global(bounds, stand.at()) {
-        Ok(point) => point,
-        Err(err) => {
-            eprintln!("saved stand is outside this atlas: {err}");
-            return;
-        }
-    };
-    let heading = Heading::from_degrees(stand.yaw_degrees).expect("a saved heading is finite");
-    let at = stand.at();
-    match session.begin_entry(world, WorldEntryRequest::at(point).facing(heading)) {
-        Ok(()) => eprintln!("resuming at ({:.0} m, {:.0} m)", at.x, at.z),
-        Err(err) => eprintln!("cannot resume the saved stand: {err}"),
+    surface: &ContinentalSurface,
+) -> WorldEntryRequest {
+    if let Some(stand) = remembered {
+        let point = MapPoint::from_global(bounds, stand.at())
+            .unwrap_or_else(|err| panic!("saved stand is outside this atlas: {err}"));
+        let heading = Heading::from_degrees(stand.yaw_degrees).expect("a saved heading is finite");
+        eprintln!("resuming at ({:.0} m, {:.0} m)", stand.x, stand.z);
+        return WorldEntryRequest::at(point).facing(heading);
     }
+    let pin = surface
+        .largest_settlement()
+        .unwrap_or_else(|| panic!("this continent has no settlements to start at"));
+    let point = MapPoint::from_global(bounds, pin.at)
+        .unwrap_or_else(|err| panic!("largest settlement is off the map: {err}"));
+    eprintln!(
+        "starting at the largest {} (pop {})",
+        settlement_tier_name(pin.tier),
+        pin.population
+    );
+    WorldEntryRequest::at(point)
 }
 
 fn main() {
@@ -611,8 +617,10 @@ fn main() {
         }
         if !settings_ui.applied {
             apply_hitch_log(world, settings_ui.prefs.hitch_log, false);
+            world.set_instance_submit(InstanceSubmit::GpuIndirect);
             settings_ui.applied = true;
         }
+        apply_instance_submit_hotkeys(world, frame);
 
         if let Some(job) = generating.take() {
             if job.is_finished() {
@@ -651,29 +659,42 @@ fn main() {
                 title_art = Some(load_title_vista(frame.ui.ctx()));
             }
             let ready = viewer.is_some();
-            let line = status.lock().expect("title status").clone();
+            if ready {
+                let bounds = viewer.as_ref().expect("atlas ready").bounds;
+                let session = session.as_mut().expect("atlas ready");
+                if session.state() == SessionState::Atlas {
+                    let request = opening_entry(remembered, bounds, session.surface());
+                    session
+                        .begin_entry(world, request)
+                        .unwrap_or_else(|err| panic!("cannot open the starting stand: {err}"));
+                }
+                if session.state() == SessionState::Loading {
+                    session
+                        .step(world, WalkInput::IDLE)
+                        .unwrap_or_else(|err| panic!("world session failed: {err}"));
+                }
+            }
+            let line = if !ready {
+                status.lock().expect("title status").clone()
+            } else if session
+                .as_ref()
+                .is_some_and(|s| s.state() == SessionState::Loading)
+            {
+                session.as_ref().expect("atlas ready").loading_status()
+            } else {
+                String::new()
+            };
             match draw_title(
                 frame,
                 title_art.as_ref().expect("title art"),
                 seed,
                 size,
                 ready,
-                remembered.is_some(),
                 &line,
             ) {
                 TitleAction::Stay => {}
-                TitleAction::Chart => {
+                TitleAction::Start => {
                     on_title = false;
-                }
-                TitleAction::Continue => {
-                    on_title = false;
-                    let bounds = viewer.as_ref().expect("atlas ready").bounds;
-                    resume_saved_stand(
-                        remembered.expect("continue needs a stand"),
-                        bounds,
-                        session.as_mut().expect("atlas ready"),
-                        world,
-                    );
                 }
             }
             draw_settings(&mut settings_ui, world, frame);
@@ -733,8 +754,7 @@ fn main() {
 
 enum TitleAction {
     Stay,
-    Chart,
-    Continue,
+    Start,
 }
 
 fn load_title_vista(ctx: &egui::Context) -> TextureHandle {
@@ -822,7 +842,6 @@ fn draw_title(
     seed: i32,
     size: usize,
     ready: bool,
-    can_continue: bool,
     status: &str,
 ) -> TitleAction {
     let ctx = frame.ui.ctx().clone();
@@ -857,14 +876,16 @@ fn draw_title(
                         .size(14.0)
                         .color(Color32::from_rgb(140, 158, 176)),
                 );
-                if !ready {
+                if !status.is_empty() {
                     ui.add_space(18.0);
-                    let line = if status.is_empty() {
-                        "Shaping the land…"
-                    } else {
-                        status
-                    };
-                    ui.label(egui::RichText::new(line).size(16.0).color(mute));
+                    ui.label(egui::RichText::new(status).size(16.0).color(mute));
+                } else if !ready {
+                    ui.add_space(18.0);
+                    ui.label(
+                        egui::RichText::new("Shaping the land…")
+                            .size(16.0)
+                            .color(mute),
+                    );
                 }
             });
 
@@ -875,16 +896,8 @@ fn draw_title(
                     .order(egui::Order::Foreground)
                     .show(ui.ctx(), |ui| {
                         ui.vertical_centered(|ui| {
-                            if can_continue {
-                                if title_button(ui, "Continue").clicked() || enter {
-                                    action = TitleAction::Continue;
-                                }
-                                ui.add_space(10.0);
-                                if title_button(ui, "Chart the land").clicked() {
-                                    action = TitleAction::Chart;
-                                }
-                            } else if title_button(ui, "Chart the land").clicked() || enter {
-                                action = TitleAction::Chart;
+                            if title_button(ui, "Start").clicked() || enter {
+                                action = TitleAction::Start;
                             }
                         });
                     });
@@ -1185,6 +1198,21 @@ struct SettingsUi {
     applied: bool,
 }
 
+fn apply_instance_submit_hotkeys(world: &mut World, frame: &Frame) {
+    let (gpu, cpu) = frame.ui.ctx().input(|input| {
+        (
+            input.key_pressed(egui::Key::F10),
+            input.key_pressed(egui::Key::F11),
+        )
+    });
+    match (gpu, cpu) {
+        (true, false) => world.set_instance_submit(InstanceSubmit::GpuIndirect),
+        (false, true) => world.set_instance_submit(InstanceSubmit::CpuIndexed),
+        (false, false) => {}
+        (true, true) => panic!("F10 and F11 selected conflicting instance-submit modes"),
+    }
+}
+
 fn apply_hitch_log(world: &mut World, on: bool, replace: bool) {
     if on {
         let path = settings::hitch_log_path().unwrap_or_else(|err| panic!("{err}"));
@@ -1285,8 +1313,12 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     } else {
         "click to look"
     };
+    let submit = match world.instance_submit() {
+        InstanceSubmit::GpuIndirect => "GPU",
+        InstanceSubmit::CpuIndexed => "CPU",
+    };
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps  |  F fly  |  Space jump  |  M map  |  {mouse}",
+        "({:.0} m, {:.0} m)  y {:.1}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}",
         p.x,
         p.z,
         p.y,

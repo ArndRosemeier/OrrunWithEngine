@@ -155,4 +155,11 @@ mod tests {
         let back: Settings = serde_json::from_str(&text).expect("read");
         assert_eq!(settings, back);
     }
+
+    #[test]
+    fn removed_instance_submit_preference_is_ignored() {
+        let text = r#"{"format":1,"hitch_log":false,"instance_submit":"cpu_indexed"}"#;
+        let settings: Settings = serde_json::from_str(text).expect("read old settings");
+        assert_eq!(settings, Settings::default());
+    }
 }

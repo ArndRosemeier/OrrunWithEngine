@@ -789,13 +789,6 @@ impl WorldSession {
         self.scatter.as_ref().map_or(0, ScatterLayer::placed_count)
     }
 
-    /// Houses and wells standing around the player.
-    pub fn settlement_count(&self) -> usize {
-        self.settlements
-            .as_ref()
-            .map_or(0, SettlementLayer::placed_count)
-    }
-
     /// Live animals around the player.
     pub fn fauna_count(&self) -> usize {
         self.fauna.as_ref().map_or(0, FaunaLayer::agent_count)
