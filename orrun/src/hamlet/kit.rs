@@ -3,7 +3,9 @@
 //! Pieces come from Asset Lab `med_*` products. Catalog JSON is the Modular
 //! medieval kit. Door wall is the south (−Z) long side, matching planner yaw 0.
 //! Footprint and storey layout stay a recipe; each slot picks a seeded member
-//! of the catalog family that shares its seams.
+//! of the catalog family that shares its seams. Door leaves (`door_plank` /
+//! `door_sturdy`) are not catalog pieces: they hang on the opening after the
+//! ring closes, matching Modular's `medieval_house` example.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,9 +13,7 @@ use std::path::{Path, PathBuf};
 use engine::error::EngineError;
 use engine::mesh::Mesh;
 use engine::model::Model;
-#[cfg(test)]
 use engine::place::Place;
-#[cfg(test)]
 use glam::Vec3;
 use modular::prelude::*;
 use rand::rngs::StdRng;
@@ -47,7 +47,19 @@ pub const PIECE_GLBS: &[(&str, &str)] = &[
     ("floor", "med_floor.glb"),
     ("plinth", "med_plinth.glb"),
     ("plinth_b", "med_plinth_b.glb"),
+    ("door_plank", "door_plank.glb"),
+    ("door_sturdy", "door_sturdy.glb"),
 ];
+
+/// `med_door` / `med_door_b` opening and `door_plank` / `door_sturdy` leaf.
+/// Jamb proud is `hard_surface.kit_cell` `_opening_trim`; threshold is the
+/// door floor slab. Leaf pivot is the +X jamb; yaw 180° so hardware (authored
+/// −Y) faces the street.
+const WALL_THICKNESS: f32 = 0.28;
+const OVERLAP: f32 = 0.02;
+const JAMB_PROUD: f32 = 0.02;
+const HINGE_INSET: f32 = 0.01;
+const THRESHOLD_TOP: f32 = OVERLAP + 0.012 + 0.015 + 0.08;
 
 const DWELLING_IDS: &[&str] = &[
     "house_hut_thatch",
@@ -181,7 +193,11 @@ pub fn assemble_dwelling(
     if !open.is_empty() {
         panic!("{catalog_id} has free seams (kit bug): {open:?}");
     }
-    Ok(centre_footprint(catalog, &assembly)?)
+    let origin = footprint_origin(catalog, &assembly);
+    let mut places = assembly.places()?;
+    places.extend(door_leaf_meshes(catalog, &assembly, catalog_id));
+    shift_xz(&mut places, origin);
+    Ok(places)
 }
 
 /// Seeded layouts kept per dwelling catalog id.
@@ -236,21 +252,102 @@ pub fn world_place(local: Place, house_at: Vec3, house_yaw_deg: f32) -> Place {
     .with_yaw_deg(house_yaw_deg + local.yaw_degrees)
 }
 
+fn footprint_origin(catalog: &Catalog, assembly: &Assembly<'_>) -> Vec3 {
+    catalog
+        .pitch()
+        .mesh_origin(&assembly.occupied_cells())
+        .unwrap_or_else(|| panic!("assembly occupancy is empty"))
+}
+
+fn shift_xz(places: &mut [PlacedMesh], origin: Vec3) {
+    for item in places {
+        item.place.position.x -= origin.x;
+        item.place.position.z -= origin.z;
+    }
+}
+
 pub(crate) fn centre_footprint(
     catalog: &Catalog,
     assembly: &Assembly<'_>,
 ) -> ModularResult<Vec<PlacedMesh>> {
-    let cells = assembly.occupied_cells();
+    let origin = footprint_origin(catalog, assembly);
+    let mut places = assembly.places()?;
+    shift_xz(&mut places, origin);
+    Ok(places)
+}
+
+fn rotate_yaw(v: Vec3, yaw: YawQuarter) -> Vec3 {
+    match yaw {
+        YawQuarter::Deg0 => v,
+        YawQuarter::Deg90 => Vec3::new(v.z, v.y, -v.x),
+        YawQuarter::Deg180 => Vec3::new(-v.x, v.y, -v.z),
+        YawQuarter::Deg270 => Vec3::new(-v.z, v.y, v.x),
+    }
+}
+
+fn door_opening_width(piece: &str) -> f32 {
+    match piece {
+        "door" => 1.1,
+        "door_b" => 1.05,
+        other => panic!("door family piece '{other}' has no opening width"),
+    }
+}
+
+fn door_leaf_id(catalog_id: &str) -> &'static str {
+    match catalog_id {
+        "house_hut_thatch" | "house_cabin_timber" => "door_plank",
+        "house_cottage_stone" | "house_hall_large" => "door_sturdy",
+        other => panic!("'{other}' is not a modular dwelling"),
+    }
+}
+
+fn door_leaf_place(catalog: &Catalog, host: &Placed) -> Place {
+    let piece = catalog
+        .piece(&host.piece)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let cells = piece.world_occupancy(host.cell, host.yaw);
     let origin = catalog
         .pitch()
         .mesh_origin(&cells)
-        .unwrap_or_else(|| panic!("assembly occupancy is empty"));
-    let mut places = assembly.places()?;
-    for item in &mut places {
-        item.place.position.x -= origin.x;
-        item.place.position.z -= origin.z;
+        .unwrap_or_else(|| panic!("{} has empty occupancy", host.piece));
+    let local = Vec3::new(
+        door_opening_width(host.piece.as_str()) * 0.5 - JAMB_PROUD - HINGE_INSET,
+        THRESHOLD_TOP,
+        -(catalog.pitch().xz * 0.5 - WALL_THICKNESS * 0.5),
+    );
+    let offset = rotate_yaw(local, host.yaw);
+    Place::new(
+        origin.x + offset.x,
+        origin.y + offset.y,
+        origin.z + offset.z,
+    )
+    .with_yaw_deg(host.yaw.degrees() + 180.0)
+}
+
+fn door_leaf_meshes(
+    catalog: &Catalog,
+    assembly: &Assembly<'_>,
+    catalog_id: &str,
+) -> Vec<PlacedMesh> {
+    let leaf = pid(door_leaf_id(catalog_id));
+    let mut out = Vec::new();
+    for placed in assembly.instances() {
+        let family = catalog
+            .piece(&placed.piece)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .family();
+        if family.as_str() != "door" {
+            continue;
+        }
+        out.push(PlacedMesh {
+            piece: leaf.clone(),
+            place: door_leaf_place(catalog, placed),
+        });
     }
-    Ok(places)
+    if out.is_empty() {
+        panic!("{catalog_id} has no door piece to hang a leaf on");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -666,6 +763,78 @@ mod tests {
         };
         assert_eq!(names(&a), names(&b));
         assert_ne!(names(&a), names(&c));
+    }
+
+    fn leaf_of(places: &[PlacedMesh]) -> &PlacedMesh {
+        places
+            .iter()
+            .find(|item| {
+                item.piece.as_str() == "door_plank" || item.piece.as_str() == "door_sturdy"
+            })
+            .expect("door leaf")
+    }
+
+    fn door_of<'a>(catalog: &Catalog, assembly: &'a Assembly<'_>) -> &'a Placed {
+        assembly
+            .instances()
+            .into_iter()
+            .find(|placed| catalog.piece(&placed.piece).unwrap().family().as_str() == "door")
+            .expect("door")
+    }
+
+    #[test]
+    fn every_dwelling_hangs_one_leaf_on_the_south_door() {
+        let catalog = catalog();
+        let expected = [
+            ("house_hut_thatch", "door_plank"),
+            ("house_cabin_timber", "door_plank"),
+            ("house_cottage_stone", "door_sturdy"),
+            ("house_hall_large", "door_sturdy"),
+        ];
+        for (id, leaf_id) in expected {
+            let places = assemble_dwelling(&catalog, id, 1).unwrap();
+            let leaves: Vec<_> = places
+                .iter()
+                .filter(|item| {
+                    item.piece.as_str() == "door_plank" || item.piece.as_str() == "door_sturdy"
+                })
+                .collect();
+            assert_eq!(leaves.len(), 1, "{id}");
+            assert_eq!(leaves[0].piece.as_str(), leaf_id, "{id}");
+        }
+    }
+
+    #[test]
+    fn door_leaf_sits_on_the_plus_x_jamb_facing_the_street() {
+        let catalog = catalog();
+        let mut rng = StdRng::seed_from_u64(1);
+        let assembly = assemble_cabin(&catalog, &mut rng).unwrap();
+        let host = door_of(&catalog, &assembly);
+        let places = assemble_dwelling(&catalog, "house_cabin_timber", 1).unwrap();
+        let leaf = leaf_of(&places);
+        let origin = footprint_origin(&catalog, &assembly);
+        let expected = door_leaf_place(&catalog, host);
+        assert!((leaf.place.position.x - (expected.position.x - origin.x)).abs() < 1e-4);
+        assert!((leaf.place.position.y - expected.position.y).abs() < 1e-4);
+        assert!((leaf.place.position.z - (expected.position.z - origin.z)).abs() < 1e-4);
+        assert!((leaf.place.yaw_degrees - (host.yaw.degrees() + 180.0)).abs() < 1e-4);
+        assert_eq!(host.cell.z, 0);
+        assert_eq!(host.yaw, YawQuarter::Deg0);
+    }
+
+    #[test]
+    fn door_b_also_gets_a_leaf() {
+        let catalog = catalog();
+        let seed = (0..u64::from(VARIATIONS_PER_DWELLING)).find(|&seed| {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let assembly = assemble_hut(&catalog, &mut rng).unwrap();
+            door_of(&catalog, &assembly).piece.as_str() == "door_b"
+        });
+        let Some(seed) = seed else {
+            panic!("no hut variation picked door_b");
+        };
+        let places = assemble_dwelling(&catalog, "house_hut_thatch", seed).unwrap();
+        assert_eq!(leaf_of(&places).piece.as_str(), "door_plank");
     }
 
     #[test]

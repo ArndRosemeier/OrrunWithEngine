@@ -85,6 +85,8 @@ KIT: dict[str, tuple[str, ...]] = {
         "med_floor",
         "med_plinth",
         "med_plinth_b",
+        "door_plank",
+        "door_sturdy",
     ),
     "castle": (
         "castle_curtain",
