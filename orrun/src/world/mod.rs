@@ -7,6 +7,7 @@
 //! * [`WorldSession`] runs atlas → travel → walking in one process.
 
 mod alpine;
+mod ambience;
 mod atlas_fields;
 mod chunk_mesh;
 mod coords;
@@ -30,6 +31,7 @@ mod world_stream;
 #[cfg(test)]
 mod tests;
 
+pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use chunk_mesh::TerrainChunkBuilder;
 pub use coords::{

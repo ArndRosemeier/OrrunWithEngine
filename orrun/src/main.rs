@@ -34,7 +34,7 @@ use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
 use orrun::save::SavedStand;
 use orrun::settings::{self, Settings};
 use orrun::world::{
-    install_daylight, install_materials, AtlasBounds, AtlasCell, ContinentProxySpec,
+    install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell, ContinentProxySpec,
     ContinentalSurface, Heading, Locomotion, MapPoint, SessionState, WorldEntryRequest,
     WorldSession,
 };
@@ -608,6 +608,7 @@ fn main() {
 
     let mut viewer: Option<AtlasViewer> = None;
     let mut session: Option<WorldSession> = None;
+    let mut ambience: Option<Ambience> = None;
     let mut title_art: Option<TextureHandle> = None;
     let mut on_title = true;
     let mut dressed = false;
@@ -623,6 +624,7 @@ fn main() {
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);
+            ambience = Some(Ambience::load().unwrap_or_else(|err| panic!("{err}")));
         }
         if !settings_ui.applied {
             apply_hitch_log(world, settings_ui.prefs.hitch_log, false);
@@ -710,6 +712,11 @@ fn main() {
                 }
             }
             draw_settings(&mut settings_ui, world, frame);
+            if let Some(ambience) = ambience.as_mut() {
+                ambience
+                    .silence(frame.dt)
+                    .unwrap_or_else(|err| panic!("{err}"));
+            }
             return;
         }
 
@@ -735,6 +742,11 @@ fn main() {
             SessionState::World => draw_world_hud(session, world, frame),
         }
         draw_settings(&mut settings_ui, world, frame);
+        ambience
+            .as_mut()
+            .expect("audio opens with the window")
+            .update(session, frame.dt)
+            .unwrap_or_else(|err| panic!("{err}"));
     });
 
     let stand = *last_stand.lock().expect("last stand");

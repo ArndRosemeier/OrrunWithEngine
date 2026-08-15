@@ -33,7 +33,7 @@ use super::look::install_daylight;
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
-use super::settlement::{SettlementError, SettlementLayer};
+use super::settlement::{HamletStand, SettlementError, SettlementLayer};
 use super::surface::ContinentalSurface;
 use super::travel::{
     travel_view, ContinentProxySpec, TravelPhase, TravelSource, TravelTimings, TravelView,
@@ -349,6 +349,14 @@ impl WorldSession {
 
     pub fn surface(&self) -> &ContinentalSurface {
         &self.surface
+    }
+
+    /// Packed hamlets currently seated around the player.
+    pub fn hamlets(&self) -> &[HamletStand] {
+        self.settlements
+            .as_ref()
+            .map(SettlementLayer::hamlets)
+            .unwrap_or(&[])
     }
 
     pub fn state(&self) -> SessionState {
