@@ -1,0 +1,474 @@
+{
+  "slots": [
+    "suit",
+    "shoes",
+    "hair",
+    "eyebrows"
+  ],
+  "bodies": [
+    {
+      "sex": "male",
+      "nude": "male_base.glb",
+      "dressed": {
+        "male_casualsuit01": "male_dressed_male_casualsuit01.glb",
+        "male_casualsuit02": "male_dressed_male_casualsuit02.glb",
+        "male_casualsuit03": "male_dressed_male_casualsuit03.glb",
+        "male_worksuit01": "male_dressed_male_worksuit01.glb",
+        "male_elegantsuit01": "male_dressed_male_elegantsuit01.glb"
+      }
+    },
+    {
+      "sex": "female",
+      "nude": "female_base.glb",
+      "dressed": {
+        "female_casualsuit01": "female_dressed_female_casualsuit01.glb",
+        "female_casualsuit02": "female_dressed_female_casualsuit02.glb",
+        "female_sportsuit01": "female_dressed_female_sportsuit01.glb",
+        "female_elegantsuit01": "female_dressed_female_elegantsuit01.glb"
+      }
+    }
+  ],
+  "items": [
+    {
+      "id": "male_casualsuit01",
+      "sex": "male",
+      "slot": "suit",
+      "label": "Casual 01",
+      "path": "pieces/male_male_casualsuit01.glb"
+    },
+    {
+      "id": "male_casualsuit02",
+      "sex": "male",
+      "slot": "suit",
+      "label": "Casual 02",
+      "path": "pieces/male_male_casualsuit02.glb"
+    },
+    {
+      "id": "male_casualsuit03",
+      "sex": "male",
+      "slot": "suit",
+      "label": "Casual 03",
+      "path": "pieces/male_male_casualsuit03.glb"
+    },
+    {
+      "id": "male_worksuit01",
+      "sex": "male",
+      "slot": "suit",
+      "label": "Work 01",
+      "path": "pieces/male_male_worksuit01.glb"
+    },
+    {
+      "id": "male_elegantsuit01",
+      "sex": "male",
+      "slot": "suit",
+      "label": "Elegant 01",
+      "path": "pieces/male_male_elegantsuit01.glb"
+    },
+    {
+      "id": "shoes01",
+      "sex": "male",
+      "slot": "shoes",
+      "label": "Shoes 01",
+      "path": "pieces/male_shoes01.glb"
+    },
+    {
+      "id": "shoes02",
+      "sex": "male",
+      "slot": "shoes",
+      "label": "Shoes 02",
+      "path": "pieces/male_shoes02.glb"
+    },
+    {
+      "id": "shoes03",
+      "sex": "male",
+      "slot": "shoes",
+      "label": "Shoes 03",
+      "path": "pieces/male_shoes03.glb"
+    },
+    {
+      "id": "shoes04",
+      "sex": "male",
+      "slot": "shoes",
+      "label": "Shoes 04",
+      "path": "pieces/male_shoes04.glb"
+    },
+    {
+      "id": "shoes05",
+      "sex": "male",
+      "slot": "shoes",
+      "label": "Shoes 05",
+      "path": "pieces/male_shoes05.glb"
+    },
+    {
+      "id": "afro01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Afro 01",
+      "path": "pieces/male_afro01.glb"
+    },
+    {
+      "id": "bob01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Bob 01",
+      "path": "pieces/male_bob01.glb"
+    },
+    {
+      "id": "bob02",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Bob 02",
+      "path": "pieces/male_bob02.glb"
+    },
+    {
+      "id": "braid01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Braid 01",
+      "path": "pieces/male_braid01.glb"
+    },
+    {
+      "id": "long01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Long 01",
+      "path": "pieces/male_long01.glb"
+    },
+    {
+      "id": "ponytail01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Ponytail 01",
+      "path": "pieces/male_ponytail01.glb"
+    },
+    {
+      "id": "short01",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Short 01",
+      "path": "pieces/male_short01.glb"
+    },
+    {
+      "id": "short02",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Short 02",
+      "path": "pieces/male_short02.glb"
+    },
+    {
+      "id": "short03",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Short 03",
+      "path": "pieces/male_short03.glb"
+    },
+    {
+      "id": "short04",
+      "sex": "male",
+      "slot": "hair",
+      "label": "Short 04",
+      "path": "pieces/male_short04.glb"
+    },
+    {
+      "id": "eyebrow001",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 01",
+      "path": "pieces/male_eyebrow001.glb"
+    },
+    {
+      "id": "eyebrow002",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 02",
+      "path": "pieces/male_eyebrow002.glb"
+    },
+    {
+      "id": "eyebrow003",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 03",
+      "path": "pieces/male_eyebrow003.glb"
+    },
+    {
+      "id": "eyebrow004",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 04",
+      "path": "pieces/male_eyebrow004.glb"
+    },
+    {
+      "id": "eyebrow005",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 05",
+      "path": "pieces/male_eyebrow005.glb"
+    },
+    {
+      "id": "eyebrow006",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 06",
+      "path": "pieces/male_eyebrow006.glb"
+    },
+    {
+      "id": "eyebrow007",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 07",
+      "path": "pieces/male_eyebrow007.glb"
+    },
+    {
+      "id": "eyebrow008",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 08",
+      "path": "pieces/male_eyebrow008.glb"
+    },
+    {
+      "id": "eyebrow009",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 09",
+      "path": "pieces/male_eyebrow009.glb"
+    },
+    {
+      "id": "eyebrow010",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 10",
+      "path": "pieces/male_eyebrow010.glb"
+    },
+    {
+      "id": "eyebrow011",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 11",
+      "path": "pieces/male_eyebrow011.glb"
+    },
+    {
+      "id": "eyebrow012",
+      "sex": "male",
+      "slot": "eyebrows",
+      "label": "Eyebrow 12",
+      "path": "pieces/male_eyebrow012.glb"
+    },
+    {
+      "id": "female_casualsuit01",
+      "sex": "female",
+      "slot": "suit",
+      "label": "Casual 01",
+      "path": "pieces/female_female_casualsuit01.glb"
+    },
+    {
+      "id": "female_casualsuit02",
+      "sex": "female",
+      "slot": "suit",
+      "label": "Casual 02",
+      "path": "pieces/female_female_casualsuit02.glb"
+    },
+    {
+      "id": "female_sportsuit01",
+      "sex": "female",
+      "slot": "suit",
+      "label": "Sport 01",
+      "path": "pieces/female_female_sportsuit01.glb"
+    },
+    {
+      "id": "female_elegantsuit01",
+      "sex": "female",
+      "slot": "suit",
+      "label": "Elegant 01",
+      "path": "pieces/female_female_elegantsuit01.glb"
+    },
+    {
+      "id": "shoes01",
+      "sex": "female",
+      "slot": "shoes",
+      "label": "Shoes 01",
+      "path": "pieces/female_shoes01.glb"
+    },
+    {
+      "id": "shoes02",
+      "sex": "female",
+      "slot": "shoes",
+      "label": "Shoes 02",
+      "path": "pieces/female_shoes02.glb"
+    },
+    {
+      "id": "shoes03",
+      "sex": "female",
+      "slot": "shoes",
+      "label": "Shoes 03",
+      "path": "pieces/female_shoes03.glb"
+    },
+    {
+      "id": "shoes04",
+      "sex": "female",
+      "slot": "shoes",
+      "label": "Shoes 04",
+      "path": "pieces/female_shoes04.glb"
+    },
+    {
+      "id": "shoes05",
+      "sex": "female",
+      "slot": "shoes",
+      "label": "Shoes 05",
+      "path": "pieces/female_shoes05.glb"
+    },
+    {
+      "id": "afro01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Afro 01",
+      "path": "pieces/female_afro01.glb"
+    },
+    {
+      "id": "bob01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Bob 01",
+      "path": "pieces/female_bob01.glb"
+    },
+    {
+      "id": "bob02",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Bob 02",
+      "path": "pieces/female_bob02.glb"
+    },
+    {
+      "id": "braid01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Braid 01",
+      "path": "pieces/female_braid01.glb"
+    },
+    {
+      "id": "long01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Long 01",
+      "path": "pieces/female_long01.glb"
+    },
+    {
+      "id": "ponytail01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Ponytail 01",
+      "path": "pieces/female_ponytail01.glb"
+    },
+    {
+      "id": "short01",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Short 01",
+      "path": "pieces/female_short01.glb"
+    },
+    {
+      "id": "short02",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Short 02",
+      "path": "pieces/female_short02.glb"
+    },
+    {
+      "id": "short03",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Short 03",
+      "path": "pieces/female_short03.glb"
+    },
+    {
+      "id": "short04",
+      "sex": "female",
+      "slot": "hair",
+      "label": "Short 04",
+      "path": "pieces/female_short04.glb"
+    },
+    {
+      "id": "eyebrow001",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 01",
+      "path": "pieces/female_eyebrow001.glb"
+    },
+    {
+      "id": "eyebrow002",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 02",
+      "path": "pieces/female_eyebrow002.glb"
+    },
+    {
+      "id": "eyebrow003",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 03",
+      "path": "pieces/female_eyebrow003.glb"
+    },
+    {
+      "id": "eyebrow004",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 04",
+      "path": "pieces/female_eyebrow004.glb"
+    },
+    {
+      "id": "eyebrow005",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 05",
+      "path": "pieces/female_eyebrow005.glb"
+    },
+    {
+      "id": "eyebrow006",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 06",
+      "path": "pieces/female_eyebrow006.glb"
+    },
+    {
+      "id": "eyebrow007",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 07",
+      "path": "pieces/female_eyebrow007.glb"
+    },
+    {
+      "id": "eyebrow008",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 08",
+      "path": "pieces/female_eyebrow008.glb"
+    },
+    {
+      "id": "eyebrow009",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 09",
+      "path": "pieces/female_eyebrow009.glb"
+    },
+    {
+      "id": "eyebrow010",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 10",
+      "path": "pieces/female_eyebrow010.glb"
+    },
+    {
+      "id": "eyebrow011",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 11",
+      "path": "pieces/female_eyebrow011.glb"
+    },
+    {
+      "id": "eyebrow012",
+      "sex": "female",
+      "slot": "eyebrows",
+      "label": "Eyebrow 12",
+      "path": "pieces/female_eyebrow012.glb"
+    }
+  ]
+}

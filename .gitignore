@@ -3,3 +3,4 @@
 Cargo.lock
 # ENGINE_SCREENSHOT captures
 /shots/
+/release/

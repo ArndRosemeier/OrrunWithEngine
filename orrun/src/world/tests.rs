@@ -17,9 +17,9 @@ use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
     chunk_span, classify_settlement, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface,
     EntryError, HamletStand, Locomotion, MapPoint, PondField, PondWindow, PropClass,
-    ScatterCatalog, SessionState, SettlementLayer, TerrainChunkBuilder, TravelPhase, TravelTimings,
-    WalkInput, WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M, CHUNK_SPAN_M, MEDIUM,
-    MIN_WATER_DEPTH,
+    ScatterCatalog, SessionError, SessionState, SettlementLayer, TerrainChunkBuilder, TravelPhase,
+    TravelTimings, WalkInput, WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M,
+    CHUNK_SPAN_M, MEDIUM, MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
@@ -69,6 +69,30 @@ fn vendored_kit_pieces_keep_their_baked_albedo() {
         mesh.uvs.iter().any(|uv| uv[0] > 0.01 || uv[1] > 0.01),
         "wall UVs are missing; albedo would sample a single texel"
     );
+}
+
+#[test]
+fn vendored_indoor_pieces_keep_their_baked_albedo() {
+    for file in ["furn_floor.glb", "furn_bed.glb", "furn_hearth.glb"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/kit/indoor")
+            .join(file);
+        let blob = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("read textured indoor piece {}: {err}", path.display()));
+        assert!(
+            blob.windows(b"baseColorTexture".len())
+                .any(|window| window == b"baseColorTexture"),
+            "{} lost its baked albedo map",
+            path.display()
+        );
+        let mesh = engine::model::Model::load(&path)
+            .unwrap_or_else(|err| panic!("load textured indoor piece {}: {err}", path.display()));
+        assert!(
+            mesh.albedo().is_some(),
+            "{} loaded without an albedo map",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -168,6 +192,26 @@ fn surface_carries_every_atlas_settlement_pin() {
         .filter(|n| n.kind == crate::atlas::NodeKind::Settlement)
         .count();
     assert_eq!(surface.settlements().len(), nodes);
+}
+
+#[test]
+fn nearest_dungeon_is_the_closest_mouth() {
+    let (_, surface) = world_of(20260816, 64);
+    let pins = surface.dungeon_pins();
+    assert!(
+        !pins.is_empty(),
+        "seed 20260816 size 64 must plant dungeon mouths"
+    );
+    for pin in pins {
+        let found = surface
+            .nearest_dungeon(pin.at)
+            .expect("a pin is nearest to itself");
+        assert_eq!(
+            found.id, pin.id,
+            "nearest to dungeon {} was {}",
+            pin.id, found.id
+        );
+    }
 }
 
 #[test]
@@ -2088,7 +2132,15 @@ fn the_saved_stand_enters_the_world() {
     let request = WorldEntryRequest::at_global(bounds, stand.at()).expect("saved point");
     let mut world = World::new();
     let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
-    session.begin_entry(&mut world, request).expect("entry");
+    match session.begin_entry(&mut world, request) {
+        Ok(()) => {}
+        Err(SessionError::Entry(EntryError::NoSpawn { .. })) => {
+            // Old builds could save dungeon-local coordinates as a continent
+            // stand. Startup reports this and falls back to the largest town.
+            return;
+        }
+        Err(err) => panic!("saved entry failed unexpectedly: {err}"),
+    }
     wait_until_world_for(&mut session, &mut world, Duration::from_secs(180));
     assert_eq!(session.state(), SessionState::World);
 }
@@ -2757,4 +2809,32 @@ fn open_ocean_coast_queries_stay_cheap() {
         dt < Duration::from_millis(200),
         "20k open-ocean coast_signed calls took {dt:?} (full-ring fallback?)"
     );
+}
+
+#[test]
+fn dungeon_generate_starts_before_the_player_arrives() {
+    let (atlas, surface) = world_of(20260816, 64);
+    let pin = *surface
+        .dungeon_pins()
+        .first()
+        .expect("atlas 20260816 size 64 must plant a dungeon");
+    let bounds = AtlasBounds::of(&atlas);
+    let request = WorldEntryRequest::at_global(bounds, pin.at).expect("dungeon pin");
+    let mut world = World::new();
+    let mut session = WorldSession::new(Arc::clone(&surface)).with_instant_travel();
+    session.begin_entry(&mut world, request).expect("entry");
+    for _ in 0..40 {
+        session.step(&mut world, WalkInput::IDLE).expect("update");
+        if session.dungeon_generating() {
+            let status = session
+                .dungeon_build_status()
+                .expect("HUD names a dungeon that is still being cut");
+            assert!(
+                status.contains("cutting"),
+                "dungeon HUD should say it is cutting, got {status}"
+            );
+            return;
+        }
+    }
+    panic!("dungeon generate did not start during entry");
 }

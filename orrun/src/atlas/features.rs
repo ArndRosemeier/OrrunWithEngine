@@ -64,6 +64,7 @@ pub enum NodeKind {
     Landmark = 3,
     Settlement = 4,
     ClaimReserved = 5,
+    Dungeon = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

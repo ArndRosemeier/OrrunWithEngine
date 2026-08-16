@@ -410,6 +410,24 @@ fn replace_interior_colliders(
             other => panic!("indoor structural collider is undefined for '{other}'"),
         }
     }
+    for item in &layout.furniture {
+        let name = item.piece.as_str();
+        if name == "stair" {
+            continue;
+        }
+        let (half_x, half_z) = interior::furniture_half_xz(name);
+        push_piece_box(
+            &mut colliders,
+            space,
+            door,
+            item,
+            0.0,
+            0.0,
+            half_x,
+            half_z,
+            0.0,
+        );
+    }
     world
         .collision_mut()
         .replace_layer(INTERIOR_LAYER, colliders)

@@ -6,7 +6,8 @@
 //! stand is streamed, then Start. Map (M in the world): drag to pan · scroll
 //! to zoom · F fit · left click travels there · right click reveals a cell
 //! overlay · C clears overlays · M returns to where you were standing · the
-//! largest-town button enters at the biggest settlement. World (first person):
+//! largest-town button enters at the biggest settlement · nearest-dungeon
+//! travels to the closest mouth. World (first person):
 //! click to look · Esc hands the mouse back · W/S walk · Q/E sidestep · A/D
 //! turn · Shift sprint · F fly · Space jump · M summons the map · Esc with a
 //! free cursor quits.
@@ -281,6 +282,7 @@ impl AtlasViewer {
                 NodeKind::ClaimReserved => Color32::from_rgb(217, 64, 179),
                 NodeKind::Settlement => Color32::from_rgb(255, 247, 217),
                 NodeKind::Landmark => Color32::from_rgb(242, 102, 89),
+                NodeKind::Dungeon => Color32::from_rgb(140, 92, 64),
             };
             let mut radius = (self.zoom * 0.18).max(2.0);
             if node.kind == NodeKind::Settlement {
@@ -678,9 +680,19 @@ fn main() {
                 let session = session.as_mut().expect("atlas ready");
                 if session.state() == SessionState::Atlas {
                     let request = opening_entry(remembered, bounds, session.surface());
-                    session
-                        .begin_entry(world, request)
-                        .unwrap_or_else(|err| panic!("cannot open the starting stand: {err}"));
+                    if let Err(err) = session.begin_entry(world, request) {
+                        if remembered.is_some() {
+                            eprintln!(
+                                "saved stand is not walkable ({err}); starting at the largest town"
+                            );
+                            let fallback = opening_entry(None, bounds, session.surface());
+                            session.begin_entry(world, fallback).unwrap_or_else(|err| {
+                                panic!("cannot open the starting stand: {err}")
+                            });
+                        } else {
+                            panic!("cannot open the starting stand: {err}");
+                        }
+                    }
                 }
                 if session.state() == SessionState::Travel {
                     session
@@ -731,9 +743,9 @@ fn main() {
             panic!("world session failed: {err}");
         }
 
-        if let (Some(p), Some(heading)) = (session.player_position(), session.player_heading()) {
+        if let Some((at, heading)) = session.saved_stand() {
             *stand_in_loop.lock().expect("last stand") =
-                Some(SavedStand::new(seed, size, GlobalXZ::at(p.x, p.z), heading));
+                Some(SavedStand::new(seed, size, at, heading));
         }
 
         match session.state() {
@@ -942,19 +954,25 @@ fn draw_atlas(
         .frame(egui::Frame::NONE.fill(Color32::from_rgb(12, 14, 18)))
         .show(&ctx, |ui| {
             let mut go_largest = false;
-            let town_btn = egui::Area::new(egui::Id::new("atlas_town_btn"))
+            let mut go_dungeon = false;
+            let travel_btns = egui::Area::new(egui::Id::new("atlas_travel_btns"))
                 .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style())
                         .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
-                            if ui.button("Go to largest town").clicked() {
-                                go_largest = true;
-                            }
+                            ui.vertical(|ui| {
+                                if ui.button("Go to largest town").clicked() {
+                                    go_largest = true;
+                                }
+                                if ui.button("Go to nearest dungeon").clicked() {
+                                    go_dungeon = true;
+                                }
+                            });
                         });
                 });
-            let btn_hit = town_btn.response.contains_pointer();
+            let btn_hit = travel_btns.response.contains_pointer();
 
             let panel = ui.available_size();
             if viewer.needs_fit {
@@ -1016,6 +1034,9 @@ fn draw_atlas(
 
             if go_largest {
                 travel_to_largest_town(viewer, session, world);
+            }
+            if go_dungeon {
+                travel_to_nearest_dungeon(viewer, session, world);
             }
 
             // Enter still travels to the last pick, and M puts a summoned map
@@ -1098,6 +1119,13 @@ fn draw_atlas(
                                         .color(Color32::from_rgb(120, 200, 255)),
                                 );
                             }
+                            if let Some(dungeon) = session.dungeon_build_status() {
+                                ui.label(
+                                    egui::RichText::new(dungeon)
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(210, 168, 128)),
+                                );
+                            }
                         });
                 });
         });
@@ -1121,6 +1149,46 @@ fn travel_to(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut W
         }
         Err(err) => {
             viewer.note = Some(format!("cannot land there: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn travel_to_nearest_dungeon(
+    viewer: &mut AtlasViewer,
+    session: &mut WorldSession,
+    world: &mut World,
+) {
+    let from = session
+        .player_position()
+        .map(|p| GlobalXZ::at(p.x, p.z))
+        .or_else(|| viewer.selection.map(|point| point.to_global()))
+        .unwrap_or_else(|| {
+            let half = viewer.bounds.metres() * 0.5;
+            GlobalXZ::at(half, half)
+        });
+    let Some(pin) = viewer.surface.nearest_dungeon(from) else {
+        viewer.note = Some("this continent has no dungeons".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, pin.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("nearest dungeon is off the map: {err}"));
+            return;
+        }
+    };
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some(format!(
+                "travelling to the nearest {} dungeon",
+                pin.tier_name()
+            ));
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at the nearest dungeon: {err}"));
             eprintln!("entry refused: {err}");
         }
     }
@@ -1348,6 +1416,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         InstanceSubmit::CpuIndexed => "CPU",
     };
     let door = session.door_hint().unwrap_or("");
+    let dungeon = session.dungeon_build_status();
     let text = format!(
         "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}{door}",
         p.x,
@@ -1375,6 +1444,13 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(text).size(14.0));
+                    if let Some(dungeon) = dungeon {
+                        ui.label(
+                            egui::RichText::new(dungeon)
+                                .size(14.0)
+                                .color(Color32::from_rgb(210, 168, 128)),
+                        );
+                    }
                 });
         });
 }

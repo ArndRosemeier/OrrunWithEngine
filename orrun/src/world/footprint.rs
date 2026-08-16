@@ -223,11 +223,75 @@ impl CastlePlot {
     }
 }
 
+/// Pit and approach ramp for an atlas dungeon mouth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DungeonPlot {
+    pub at: GlobalXZ,
+    /// Mouth disk half-extent (2.5 m for a 5 m cell).
+    pub half: f32,
+    pub floor_y: f32,
+    pub rim_y: f32,
+    pub approach_yaw: f32,
+    pub ramp_len: f32,
+    pub ramp_half: f32,
+}
+
+impl DungeonPlot {
+    fn local_xz(self, p: GlobalXZ) -> (f32, f32) {
+        let dx = (p.x - self.at.x) as f32;
+        let dz = (p.z - self.at.z) as f32;
+        let (sin, cos) = (self.approach_yaw.sin(), self.approach_yaw.cos());
+        (dx * cos - dz * sin, dx * sin + dz * cos)
+    }
+
+    fn on_ramp(self, lx: f32, lz: f32) -> bool {
+        lz > self.half && lz <= self.half + self.ramp_len && lx.abs() <= self.ramp_half
+    }
+
+    pub fn blocks_prop(self, p: GlobalXZ) -> bool {
+        let (lx, lz) = self.local_xz(p);
+        let r = (lx * lx + lz * lz).sqrt();
+        r <= self.half + PROP_CLEAR_M || self.on_ramp(lx, lz)
+    }
+
+    pub fn urban_cover(self, _p: GlobalXZ) -> bool {
+        false
+    }
+
+    pub fn terrain_cap(self, p: GlobalXZ) -> Option<f32> {
+        let (lx, lz) = self.local_xz(p);
+        let r = (lx * lx + lz * lz).sqrt();
+        if r <= self.half {
+            return Some(self.floor_y);
+        }
+        if self.on_ramp(lx, lz) {
+            let t = (lz - self.half) / self.ramp_len;
+            return Some(self.floor_y + (self.rim_y - self.floor_y) * t);
+        }
+        None
+    }
+
+    fn aabb(self) -> (f64, f64, f64, f64) {
+        let reach = f64::from(self.half + self.ramp_len);
+        (
+            self.at.x - reach,
+            self.at.z - reach,
+            self.at.x + reach,
+            self.at.z + reach,
+        )
+    }
+
+    pub fn colliders(self) -> Vec<StaticCollider> {
+        Vec::new()
+    }
+}
+
 /// House room or castle ring/keep. Scatter and terrain query this, not a filled castle OBB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BuildingPlot {
     House(HousePlot),
     Castle(CastlePlot),
+    Dungeon(DungeonPlot),
 }
 
 impl BuildingPlot {
@@ -235,6 +299,7 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.blocks_prop(p),
             Self::Castle(c) => c.blocks_prop(p),
+            Self::Dungeon(d) => d.blocks_prop(p),
         }
     }
 
@@ -242,6 +307,7 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.urban_cover(p),
             Self::Castle(c) => c.urban_cover(p),
+            Self::Dungeon(d) => d.urban_cover(p),
         }
     }
 
@@ -249,6 +315,20 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.terrain_cap(p),
             Self::Castle(c) => c.terrain_cap(p),
+            Self::Dungeon(d) => d.terrain_cap(p),
+        }
+    }
+
+    /// Discontinuous structural caps whose boundary must split terrain triangles.
+    ///
+    /// Dungeon pits are ordinary sampled heightfield deformation. Treating
+    /// their curved disk and ramp as house-wall boundaries creates T-junctions
+    /// and long underside wedges in the land mesh.
+    fn structural_cap(self, p: GlobalXZ) -> Option<f32> {
+        match self {
+            Self::House(h) => h.terrain_cap(p),
+            Self::Castle(c) => c.terrain_cap(p),
+            Self::Dungeon(_) => None,
         }
     }
 
@@ -256,6 +336,7 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.aabb(),
             Self::Castle(c) => c.aabb(),
+            Self::Dungeon(d) => d.aabb(),
         }
     }
 
@@ -263,6 +344,7 @@ impl BuildingPlot {
         match self {
             Self::House(h) => h.colliders(),
             Self::Castle(c) => c.colliders(),
+            Self::Dungeon(d) => d.colliders(),
         }
     }
 }
@@ -347,6 +429,21 @@ impl BuildingIndex {
         let mut cap: Option<f32> = None;
         self.for_nearby(p, 0.0, |plot| {
             let Some(y) = plot.terrain_cap(p) else {
+                return;
+            };
+            cap = Some(match cap {
+                Some(prev) => prev.min(y),
+                None => y,
+            });
+        });
+        cap
+    }
+
+    /// Structural cap used only by the sub-cell house-wall mesh splitter.
+    pub fn structural_cap(&self, p: GlobalXZ) -> Option<f32> {
+        let mut cap: Option<f32> = None;
+        self.for_nearby(p, 0.0, |plot| {
+            let Some(y) = plot.structural_cap(p) else {
                 return;
             };
             cap = Some(match cap {
@@ -679,6 +776,38 @@ mod tests {
             to.z < 189.0,
             "curtain beside the gate should stop the player, got z={}",
             to.z
+        );
+    }
+
+    fn dungeon_plot() -> DungeonPlot {
+        DungeonPlot {
+            at: GlobalXZ::at(50.0, 80.0),
+            half: 2.5,
+            floor_y: 10.0,
+            rim_y: 13.0,
+            approach_yaw: 0.0,
+            ramp_len: 8.0,
+            ramp_half: 1.6,
+        }
+    }
+
+    #[test]
+    fn a_dungeon_pit_sits_below_the_rim() {
+        let pit = dungeon_plot();
+        assert_eq!(pit.terrain_cap(pit.at), Some(10.0));
+        let ramp = GlobalXZ::at(50.0, 80.0 + 6.5);
+        let y = pit.terrain_cap(ramp).expect("ramp is walkable");
+        assert!(y > 10.0 && y < 13.0, "ramp should slope, got {y}");
+        assert!(pit.blocks_prop(pit.at));
+        assert!(!pit.urban_cover(pit.at));
+        assert!(pit.terrain_cap(GlobalXZ::at(70.0, 80.0)).is_none());
+
+        let index = BuildingIndex::new(vec![BuildingPlot::Dungeon(pit)]);
+        assert_eq!(index.terrain_cap(pit.at), Some(pit.floor_y));
+        assert_eq!(
+            index.structural_cap(pit.at),
+            None,
+            "a sampled dungeon stamp must not enter the house-wall triangle splitter"
         );
     }
 }

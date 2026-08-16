@@ -22,8 +22,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Instant;
 
-use engine::collision::{ColliderLayer, ColliderShape, StaticCollider};
+use engine::collision::{ColliderId, ColliderLayer, ColliderShape, StaticCollider};
 use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::EngineResult;
@@ -78,14 +79,28 @@ const RESEED_M: f64 = 20.0;
 const FAR_RESEED_M: f64 = 100.0;
 /// Pending full-res trees. Farther ones stay as LOD until they walk into this set.
 const MAX_TREE_QUEUE: usize = 1_000;
+/// Pending grass / rock / bush pieces. Farther bins stay empty until you walk in.
+const MAX_OTHER_QUEUE: usize = 10_000;
+/// Pending horizon pine *draw* cells. Each is a kilometre; the rest wait.
+const MAX_FAR_QUEUE: usize = 24;
 /// Full-res trees to promote per walking frame. Whole 200 m bins were hundreds.
 const MAX_TREES_PER_FRAME: usize = 40;
 /// Grass / rock / bush bins to upload per walking frame.
 const MAX_OTHER_BINS_PER_FRAME: usize = 4;
 /// Horizon pine *draw* cells to upload per frame. Each is a kilometre, not 200 m.
 const MAX_FAR_BINS_PER_FRAME: usize = 8;
+/// When near cover also wrote this frame, far uploads share the GPU less.
+const MAX_FAR_BINS_WHEN_NEAR_DIRTY: usize = 2;
+/// Main-thread upload slice. GPU sync is after this, so the cap is conservative.
+const UPLOAD_BUDGET_MS: f32 = 4.0;
 /// How many walked chunks fold into one far draw call. 5 × 200 m = 1 km.
 const FAR_DRAW_FOLD: i32 = 5;
+/// A 1 km square on the 36 m far lattice contains at most 29 × 29 candidates.
+/// Reserve the next power of two so changing forest density never reallocates
+/// the shared GPU batch.
+const FAR_DRAW_INSTANCE_RESERVE: usize = 1_024;
+/// Maximum 1 km draw cells touched by a 7 km-radius disk at any sub-cell offset.
+const FAR_DRAW_POOL: usize = 256;
 /// Engine collider layer for full-res tree trunks. Far proxies do not collide.
 const COLLIDER_LAYER: ColliderLayer = 1;
 /// Trunk radius at scale 1. Grows with the placed tree.
@@ -158,6 +173,9 @@ pub enum ScatterError {
         #[source]
         source: engine::error::EngineError,
     },
+
+    #[error("scatter GPU setup failed: {0}")]
+    Engine(#[from] engine::error::EngineError),
 
     #[error(
         "rock {0} has no baked albedo; generate it in the Asset Lab and re-run tools/sync_props.py"
@@ -704,6 +722,9 @@ struct LiveProp {
     taste: PropTaste,
     prototype: EntityId,
     bins: HashMap<(i32, i32), EntityId>,
+    /// Empty entities retained so a sliding window does not change the GPU
+    /// batch layout every time a cell leaves on one edge and enters on another.
+    spare_bins: Vec<EntityId>,
 }
 
 /// One prop standing on the ground, in the world's own coordinates.
@@ -748,10 +769,21 @@ struct FarSowing {
 }
 
 /// A sow in flight, and the state of the world it speaks for.
-struct Pending {
+struct Pending<T> {
     focus: GlobalXZ,
     resident_chunks: usize,
-    job: JoinHandle<(Vec<Sprig>, f32)>,
+    job: JoinHandle<(T, f32)>,
+}
+
+/// Near-window sprigs, already grouped on the sow thread.
+struct NearSown {
+    buckets: HashMap<(usize, i32, i32), Vec<Sprig>>,
+}
+
+/// Far-band pines, already grouped on the sow thread.
+struct FarSown {
+    cells: HashMap<(i32, i32), Vec<Sprig>>,
+    draws: HashMap<(i32, i32), Vec<(i32, i32)>>,
 }
 
 /// One tree-variant cell waiting to go full-res. `shown` trees already stand.
@@ -772,14 +804,11 @@ pub struct ScatterLayer {
     /// against. Both are `None`/zero until the first sow lands.
     centre: Option<GlobalXZ>,
     resident_chunks: usize,
-    /// The standing cover, in global metres.
-    sown: Vec<Sprig>,
-    far_sown: Vec<Sprig>,
     far_centre: Option<GlobalXZ>,
     near_placed: usize,
     far_placed: usize,
-    pending: Option<Pending>,
-    far_pending: Option<Pending>,
+    pending: Option<Pending<NearSown>>,
+    far_pending: Option<Pending<FarSown>>,
     /// What the last near sow took on its own thread. Worth watching: it is the
     /// budget that decides how far behind the cover can fall while moving.
     sow_ms: f32,
@@ -787,19 +816,31 @@ pub struct ScatterLayer {
     house_plots: Arc<BuildingIndex>,
     /// Sprigs of the standing near window, grouped for budgeted upload.
     near_buckets: HashMap<(usize, i32, i32), Vec<Sprig>>,
-    /// Tree cells waiting to go full-res, nearest first, then FIFO.
+    /// Tree cells waiting to go full-res, nearest to the player.
+    ///
+    /// Rebuilt each follow from the standing window, so walking toward a wood
+    /// promotes that wood instead of finishing a FIFO left over from the sow.
     tree_queue: VecDeque<TreeJob>,
-    /// Grass / rock / bush bins not yet spawned.
+    /// Grass / rock / bush bins not yet spawned, nearest to the player.
     other_queue: VecDeque<(usize, i32, i32)>,
     /// How many full-res trees each tree bin already shows.
     tree_shown: HashMap<(usize, i32, i32), usize>,
+    /// Collider handles per visible tree cell, kept in lockstep with
+    /// `tree_shown` instead of rebuilding the complete collision layer.
+    tree_colliders: HashMap<(usize, i32, i32), Vec<ColliderId>>,
     /// Walked-tier cells that already have full-res trees, so far proxies hide.
     near_tree_bins: HashSet<(i32, i32)>,
-    /// Far proxies in render space, one list per walked chunk.
-    far_live: HashMap<(i32, i32), Vec<Place>>,
+    /// Far proxies, still in global space, one list per walked chunk.
+    far_cells: HashMap<(i32, i32), Vec<Sprig>>,
+    /// Draw cell → walked cells. Built on the sow thread.
+    far_draws: HashMap<(i32, i32), Vec<(i32, i32)>>,
     /// GPU bin for each far cell. The prototype [`far_entity`] stays empty.
     far_bins: HashMap<(i32, i32), EntityId>,
-    /// Far cells not yet on the GPU, nearest-last (FIFO after a sow).
+    /// Empty far draw entities retained to keep the GPU batch layout stable.
+    far_spares: Vec<EntityId>,
+    /// Draw cells this sow still needs to write. The capped queue is a view of these.
+    far_unwritten: HashSet<(i32, i32)>,
+    /// Nearest unwritten far cells, rebuilt each follow.
     far_queue: VecDeque<(i32, i32)>,
 }
 
@@ -849,6 +890,7 @@ impl ScatterLayer {
                 taste: PropTaste::of(&stem),
                 prototype,
                 bins: HashMap::new(),
+                spare_bins: Vec::new(),
             });
         }
         let far_mesh = pine_proxy().expect("far-band pine proxy");
@@ -856,14 +898,18 @@ impl ScatterLayer {
         world
             .set_casts_shadow(far_entity, false)
             .expect("just spawned far pine prototype");
+        let mut far_spares = Vec::with_capacity(FAR_DRAW_POOL);
+        for _ in 0..FAR_DRAW_POOL {
+            let id = world.spawn_instanced_like(far_entity)?;
+            world.reserve_instances(id, FAR_DRAW_INSTANCE_RESERVE)?;
+            far_spares.push(id);
+        }
         Ok(Self {
             props,
             far_entity,
             seed: seed as u32 as u64,
             centre: None,
             resident_chunks: 0,
-            sown: Vec::new(),
-            far_sown: Vec::new(),
             far_centre: None,
             near_placed: 0,
             far_placed: 0,
@@ -875,9 +921,13 @@ impl ScatterLayer {
             tree_queue: VecDeque::new(),
             other_queue: VecDeque::new(),
             tree_shown: HashMap::new(),
+            tree_colliders: HashMap::new(),
             near_tree_bins: HashSet::new(),
-            far_live: HashMap::new(),
+            far_cells: HashMap::new(),
+            far_draws: HashMap::new(),
             far_bins: HashMap::new(),
+            far_spares,
+            far_unwritten: HashSet::new(),
             far_queue: VecDeque::new(),
         })
     }
@@ -904,7 +954,7 @@ impl ScatterLayer {
 
     /// Horizon pine cells not yet on the GPU.
     pub fn far_backlog(&self) -> usize {
-        self.far_queue.len()
+        self.far_unwritten.len()
     }
 
     /// Take everything down (leaving the world).
@@ -916,17 +966,21 @@ impl ScatterLayer {
             for id in prop.bins.values().copied() {
                 world.despawn(id);
             }
+            for id in prop.spare_bins.drain(..) {
+                world.despawn(id);
+            }
             prop.bins.clear();
         }
         world.set_instances(self.far_entity, &[])?;
         for id in self.far_bins.values().copied() {
             world.despawn(id);
         }
+        for id in self.far_spares.drain(..) {
+            world.despawn(id);
+        }
         self.far_bins.clear();
         self.pending = None;
         self.far_pending = None;
-        self.sown.clear();
-        self.far_sown.clear();
         self.centre = None;
         self.far_centre = None;
         self.resident_chunks = 0;
@@ -937,10 +991,13 @@ impl ScatterLayer {
         self.tree_queue.clear();
         self.other_queue.clear();
         self.tree_shown.clear();
+        self.tree_colliders.clear();
         self.near_tree_bins.clear();
-        self.far_live.clear();
+        self.far_cells.clear();
+        self.far_draws.clear();
+        self.far_unwritten.clear();
         self.far_queue.clear();
-        self.sync_tree_colliders(world);
+        world.collision_mut().clear_layer(COLLIDER_LAYER);
         Ok(())
     }
 
@@ -963,31 +1020,33 @@ impl ScatterLayer {
         let resident = stream.resident_count();
         let mut changed = false;
 
-        let mut trees_dirty = false;
+        let mut landed_near = false;
 
         if let Some(pending) = self.pending.take() {
             if pending.job.is_finished() {
                 let (sown, took_ms) = pending.job.join().expect("scatter thread");
-                self.sown = sown;
                 self.sow_ms = took_ms;
                 self.centre = Some(pending.focus);
                 self.resident_chunks = pending.resident_chunks;
-                self.queue_near(world, pending.focus);
-                trees_dirty = true;
+                self.accept_near(world, sown.buckets)?;
+                landed_near = true;
                 changed = true;
             } else {
                 self.pending = Some(pending);
             }
         }
-        if let Some(pending) = self.far_pending.take() {
-            if pending.job.is_finished() {
-                let (sown, _) = pending.job.join().expect("scatter far thread");
-                self.far_sown = sown;
-                self.far_centre = Some(pending.focus);
-                self.apply_far_sown(world)?;
-                changed = true;
-            } else {
-                self.far_pending = Some(pending);
+        // A near landing already dirties many instance batches. Applying a far
+        // sow on the same frame stacked the 200 ms hitches in the log.
+        if !landed_near {
+            if let Some(pending) = self.far_pending.take() {
+                if pending.job.is_finished() {
+                    let (sown, _) = pending.job.join().expect("scatter far thread");
+                    self.far_centre = Some(pending.focus);
+                    self.accept_far(world, sown)?;
+                    changed = true;
+                } else {
+                    self.far_pending = Some(pending);
+                }
             }
         }
         if rebased {
@@ -995,8 +1054,8 @@ impl ScatterLayer {
                 self.restand_applied(world)?;
                 changed = true;
             }
-            if !self.far_sown.is_empty() {
-                self.apply_far_sown(world)?;
+            if !self.far_bins.is_empty() {
+                self.restand_far(world)?;
                 changed = true;
             }
         }
@@ -1004,14 +1063,10 @@ impl ScatterLayer {
         if self.follow_near(stream, surface, ponds, focus, house_plots, resident)? {
             changed = true;
         }
-        let trees = self.drain_trees(world, MAX_TREES_PER_FRAME)?;
-        let other = self.drain_other(world, MAX_OTHER_BINS_PER_FRAME)?;
-        let far = self.drain_far(world, MAX_FAR_BINS_PER_FRAME)?;
+        self.reprioritize_uploads(focus);
+        let upload = self.drain_uploads(world, landed_near)?;
         self.follow_far(surface, ponds, focus)?;
-        if trees_dirty || trees {
-            self.sync_tree_colliders(world);
-        }
-        Ok(changed || trees || other || far)
+        Ok(changed || upload.trees || upload.other || upload.far)
     }
 
     fn follow_near(
@@ -1099,19 +1154,15 @@ impl ScatterLayer {
         Ok(())
     }
 
-    /// Group the standing near window. Tree cells around the player go into a
-    /// capped FIFO; farther full-res work is dropped and stays as LOD.
-    fn queue_near(&mut self, world: &mut World, focus: GlobalXZ) {
-        let mut buckets: HashMap<(usize, i32, i32), Vec<Sprig>> = HashMap::new();
-        for sprig in &self.sown {
-            let bin = xz_bin(sprig.at.horizontal());
-            buckets
-                .entry((sprig.variant, bin.0, bin.1))
-                .or_default()
-                .push(*sprig);
-        }
-
+    /// Take a window the sow thread already grouped. Main thread only drops
+    /// cells that walked off and stores the buckets.
+    fn accept_near(
+        &mut self,
+        world: &mut World,
+        buckets: HashMap<(usize, i32, i32), Vec<Sprig>>,
+    ) -> EngineResult<()> {
         let mut dropped_trees = false;
+        let mut dropped_tree_cells = Vec::new();
         for (vi, prop) in self.props.iter_mut().enumerate() {
             let stale: Vec<(i32, i32)> = prop
                 .bins
@@ -1122,20 +1173,35 @@ impl ScatterLayer {
             let is_tree = prop.class == PropClass::Tree;
             for key in stale {
                 if let Some(id) = prop.bins.remove(&key) {
-                    world.despawn(id);
+                    world.set_instances(id, &[])?;
+                    prop.spare_bins.push(id);
                     if is_tree {
                         dropped_trees = true;
                         self.tree_shown.remove(&(vi, key.0, key.1));
+                        dropped_tree_cells.push((vi, key.0, key.1));
                     }
                 }
             }
+        }
+        for key in dropped_tree_cells {
+            self.remove_tree_cell_colliders(world, key);
         }
         if dropped_trees {
             self.rebuild_tree_bins();
         }
 
         self.near_buckets = buckets;
-        self.tree_queue = cap_tree_jobs(
+        self.recount_near();
+        Ok(())
+    }
+
+    /// Nearest pending uploads first, from where the player is now.
+    ///
+    /// A sow sorts once against the focus it started with. Walking for the
+    /// next half-second would otherwise drain that stale FIFO while the wood
+    /// you walked into stays at the back — or falls off the cap.
+    fn reprioritize_uploads(&mut self, focus: GlobalXZ) {
+        self.tree_queue = cap_nearest(
             self.tree_jobs_nearest(focus),
             |job| self.tree_remaining(job),
             MAX_TREE_QUEUE,
@@ -1150,8 +1216,40 @@ impl ScatterLayer {
             })
             .collect();
         other.sort_by_key(|&(_, bx, bz)| bin_dist_key(bx, bz, focus));
-        self.other_queue = other.into();
-        self.recount_near();
+        self.other_queue = cap_nearest(
+            other,
+            |&(vi, bx, bz)| {
+                self.near_buckets
+                    .get(&(vi, bx, bz))
+                    .map(Vec::len)
+                    .unwrap_or(0)
+            },
+            MAX_OTHER_QUEUE,
+        );
+        let mut far: Vec<(i32, i32)> = self.far_unwritten.iter().copied().collect();
+        far.sort_by_key(|&draw| far_draw_dist_key(draw, focus));
+        self.far_queue = cap_nearest(far, |_| 1, MAX_FAR_QUEUE);
+    }
+
+    fn drain_uploads(&mut self, world: &mut World, landed_near: bool) -> EngineResult<UploadDrain> {
+        let started = Instant::now();
+        let trees = self.drain_trees(world, MAX_TREES_PER_FRAME, started)?;
+        let other = if upload_budget_left(started) {
+            self.drain_other(world, MAX_OTHER_BINS_PER_FRAME, started)?
+        } else {
+            false
+        };
+        let far = if landed_near || !upload_budget_left(started) {
+            false
+        } else {
+            let far_n = if trees || other {
+                MAX_FAR_BINS_WHEN_NEAR_DIRTY
+            } else {
+                MAX_FAR_BINS_PER_FRAME
+            };
+            self.drain_far(world, far_n, started)?
+        };
+        Ok(UploadDrain { trees, other, far })
     }
 
     fn tree_jobs_nearest(&self, focus: GlobalXZ) -> Vec<TreeJob> {
@@ -1185,15 +1283,20 @@ impl ScatterLayer {
             .unwrap_or(0)
     }
 
-    fn drain_trees(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+    fn drain_trees(
+        &mut self,
+        world: &mut World,
+        budget: usize,
+        started: Instant,
+    ) -> EngineResult<bool> {
         let origin = world.render_origin();
         let mut left = budget;
         let mut completed_cell = false;
-        while left > 0 {
+        while left > 0 && upload_budget_left(started) {
             let Some(mut job) = self.tree_queue.pop_front() else {
                 break;
             };
-            let places = {
+            let (places, capacity) = {
                 let Some(sprigs) = self.near_buckets.get(&(job.vi, job.bx, job.bz)) else {
                     continue;
                 };
@@ -1204,19 +1307,24 @@ impl ScatterLayer {
                 let take = (total - job.shown).min(left);
                 job.shown += take;
                 left -= take;
-                places_of(&sprigs[..job.shown], origin)
+                (places_of(&sprigs[..job.shown], origin), total)
             };
             let prop = &mut self.props[job.vi];
             let id = match prop.bins.get(&(job.bx, job.bz)) {
                 Some(id) => *id,
                 None => {
-                    let id = world.spawn_instanced_like(prop.prototype)?;
+                    let id = match prop.spare_bins.pop() {
+                        Some(id) => id,
+                        None => world.spawn_instanced_like(prop.prototype)?,
+                    };
                     prop.bins.insert((job.bx, job.bz), id);
                     id
                 }
             };
+            world.reserve_instances(id, capacity)?;
             world.set_instances(id, &places)?;
             self.tree_shown.insert((job.vi, job.bx, job.bz), job.shown);
+            self.sync_tree_cell_colliders(world, (job.vi, job.bx, job.bz), job.shown)?;
             let done = self
                 .near_buckets
                 .get(&(job.vi, job.bx, job.bz))
@@ -1237,10 +1345,18 @@ impl ScatterLayer {
         Ok(completed_cell)
     }
 
-    fn drain_other(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+    fn drain_other(
+        &mut self,
+        world: &mut World,
+        budget: usize,
+        started: Instant,
+    ) -> EngineResult<bool> {
         let origin = world.render_origin();
         let mut wrote = false;
         for _ in 0..budget {
+            if !upload_budget_left(started) {
+                break;
+            }
             let Some((vi, bx, bz)) = self.other_queue.pop_front() else {
                 break;
             };
@@ -1254,11 +1370,15 @@ impl ScatterLayer {
             let id = match prop.bins.get(&(bx, bz)) {
                 Some(id) => *id,
                 None => {
-                    let id = world.spawn_instanced_like(prop.prototype)?;
+                    let id = match prop.spare_bins.pop() {
+                        Some(id) => id,
+                        None => world.spawn_instanced_like(prop.prototype)?,
+                    };
                     prop.bins.insert((bx, bz), id);
                     id
                 }
             };
+            world.reserve_instances(id, places.len())?;
             world.set_instances(id, &places)?;
             wrote = true;
         }
@@ -1318,71 +1438,81 @@ impl ScatterLayer {
         }
     }
 
-    fn sync_tree_colliders(&self, world: &mut World) {
-        world
-            .collision_mut()
-            .replace_layer(COLLIDER_LAYER, self.shown_tree_colliders())
-            .expect("tree colliders");
+    fn remove_tree_cell_colliders(&mut self, world: &mut World, key: (usize, i32, i32)) {
+        let Some(ids) = self.tree_colliders.remove(&key) else {
+            return;
+        };
+        for id in ids {
+            world.collision_mut().remove(id);
+        }
     }
 
-    fn shown_tree_colliders(&self) -> Vec<StaticCollider> {
-        let mut out = Vec::new();
-        for (vi, prop) in self.props.iter().enumerate() {
-            if prop.class != PropClass::Tree {
-                continue;
+    fn sync_tree_cell_colliders(
+        &mut self,
+        world: &mut World,
+        key: (usize, i32, i32),
+        shown: usize,
+    ) -> EngineResult<()> {
+        let sprigs = self
+            .near_buckets
+            .get(&key)
+            .unwrap_or_else(|| panic!("tree collider cell {key:?} has no sprigs"));
+        if shown > sprigs.len() {
+            panic!(
+                "tree collider cell {key:?} shows {shown} of {} sprigs",
+                sprigs.len()
+            );
+        }
+
+        let existing = self.tree_colliders.get(&key).map(Vec::len).unwrap_or(0);
+        if existing > shown {
+            let removed = self
+                .tree_colliders
+                .get_mut(&key)
+                .expect("tree collider cell disappeared")
+                .split_off(shown);
+            for id in removed {
+                world.collision_mut().remove(id);
             }
-            for &(bx, bz) in prop.bins.keys() {
-                let Some(sprigs) = self.near_buckets.get(&(vi, bx, bz)) else {
-                    continue;
-                };
-                let shown = self
-                    .tree_shown
-                    .get(&(vi, bx, bz))
-                    .copied()
-                    .unwrap_or(0)
-                    .min(sprigs.len());
-                for sprig in &sprigs[..shown] {
-                    out.push(StaticCollider::new(
+        }
+        if existing < shown {
+            let added: Vec<StaticCollider> = sprigs[existing..shown]
+                .iter()
+                .map(|sprig| {
+                    StaticCollider::new(
                         sprig.at.horizontal(),
                         0.0,
                         ColliderShape::Cylinder {
                             radius: TREE_TRUNK_RADIUS_M * sprig.scale,
                         },
-                    ));
-                }
+                    )
+                })
+                .collect();
+            let ids = self.tree_colliders.entry(key).or_default();
+            for collider in added {
+                ids.push(world.collision_mut().insert(COLLIDER_LAYER, collider)?);
             }
         }
-        out
+        Ok(())
     }
 
-    fn apply_far_sown(&mut self, world: &mut World) -> EngineResult<()> {
-        self.rebuild_far_live(world.render_origin());
-        self.retire_stale_far_bins(world);
+    fn accept_far(&mut self, world: &mut World, sown: FarSown) -> EngineResult<()> {
+        self.far_cells = sown.cells;
+        self.far_draws = sown.draws;
+        self.retire_stale_far_bins(world)?;
         self.queue_all_far();
         Ok(())
     }
 
-    fn rebuild_far_live(&mut self, origin: RenderOrigin) {
-        let mut grouped: HashMap<(i32, i32), Vec<Place>> = HashMap::new();
-        for sprig in &self.far_sown {
-            let bin = xz_bin(sprig.at.horizontal());
-            if self.near_tree_bins.contains(&bin) {
-                continue;
-            }
-            let Ok(render) = sprig.at.to_render(origin) else {
-                continue;
-            };
-            let at = render.vec3();
-            grouped.entry(bin).or_default().push(
-                Place::new(at.x, at.y, at.z)
-                    .with_yaw_deg(sprig.yaw_deg)
-                    .with_scale(sprig.scale),
-            );
+    fn restand_far(&mut self, world: &mut World) -> EngineResult<()> {
+        let draws: Vec<(i32, i32)> = self.far_bins.keys().copied().collect();
+        for draw in draws {
+            self.refresh_far_draw(world, draw)?;
         }
-        self.far_live = grouped;
+        Ok(())
     }
 
-    fn retire_stale_far_bins(&mut self, world: &mut World) {
+    fn retire_stale_far_bins(&mut self, world: &mut World) -> EngineResult<()> {
         let stale: Vec<(i32, i32)> = self
             .far_bins
             .keys()
@@ -1390,68 +1520,88 @@ impl ScatterLayer {
             .filter(|draw| !self.draw_bin_has_live(*draw))
             .collect();
         for draw in stale {
+            self.far_unwritten.remove(&draw);
             if let Some(id) = self.far_bins.remove(&draw) {
-                world.despawn(id);
+                world.set_instances(id, &[])?;
+                self.far_spares.push(id);
             }
         }
         self.recount_far();
+        Ok(())
     }
 
     fn queue_all_far(&mut self) {
-        self.far_queue.clear();
-        let mut seen = HashSet::new();
-        for cell in self.far_live.keys() {
-            let draw = far_draw_bin(*cell);
-            if seen.insert(draw) {
-                self.far_queue.push_back(draw);
-            }
-        }
+        self.far_unwritten = self.far_draws.keys().copied().collect();
     }
 
     fn hide_far_bin(&mut self, world: &mut World, cell: (i32, i32)) -> EngineResult<()> {
-        self.far_live.remove(&cell);
-        self.refresh_far_draw(world, far_draw_bin(cell))?;
+        self.far_cells.remove(&cell);
+        let draw = far_draw_bin(cell);
+        if let Some(cells) = self.far_draws.get_mut(&draw) {
+            cells.retain(|c| *c != cell);
+            if cells.is_empty() {
+                self.far_draws.remove(&draw);
+            }
+        }
+        self.refresh_far_draw(world, draw)?;
         self.recount_far();
         Ok(())
     }
 
     fn refresh_far_draw(&mut self, world: &mut World, draw: (i32, i32)) -> EngineResult<()> {
-        let places = self.places_for_draw_bin(draw);
+        let places = self.places_for_draw_bin(draw, world.render_origin());
         if places.is_empty() {
             self.far_queue.retain(|b| *b != draw);
+            self.far_unwritten.remove(&draw);
             if let Some(id) = self.far_bins.remove(&draw) {
-                world.despawn(id);
+                world.set_instances(id, &[])?;
+                self.far_spares.push(id);
             }
             return Ok(());
         }
         if let Some(&id) = self.far_bins.get(&draw) {
             world.set_instances(id, &places)?;
+            self.far_unwritten.remove(&draw);
         }
         Ok(())
     }
 
-    fn drain_far(&mut self, world: &mut World, budget: usize) -> EngineResult<bool> {
+    fn drain_far(
+        &mut self,
+        world: &mut World,
+        budget: usize,
+        started: Instant,
+    ) -> EngineResult<bool> {
         let mut wrote = false;
         for _ in 0..budget {
+            if !upload_budget_left(started) {
+                break;
+            }
             let Some(draw) = self.far_queue.pop_front() else {
                 break;
             };
-            let places = self.places_for_draw_bin(draw);
+            let places = self.places_for_draw_bin(draw, world.render_origin());
             if places.is_empty() {
                 if let Some(id) = self.far_bins.remove(&draw) {
-                    world.despawn(id);
+                    world.set_instances(id, &[])?;
+                    self.far_spares.push(id);
                 }
                 continue;
             }
             let id = match self.far_bins.get(&draw) {
                 Some(id) => *id,
                 None => {
-                    let id = world.spawn_instanced_like(self.far_entity)?;
+                    let id = match self.far_spares.pop() {
+                        Some(id) => id,
+                        None => world.spawn_instanced_like(self.far_entity)?,
+                    };
                     self.far_bins.insert(draw, id);
                     id
                 }
             };
+            world.reserve_instances(id, FAR_DRAW_INSTANCE_RESERVE)?;
             world.set_instances(id, &places)?;
+            self.far_unwritten.remove(&draw);
             wrote = true;
         }
         if wrote {
@@ -1461,32 +1611,45 @@ impl ScatterLayer {
     }
 
     fn draw_bin_has_live(&self, draw: (i32, i32)) -> bool {
-        self.far_live.keys().any(|cell| far_draw_bin(*cell) == draw)
+        self.far_draws.get(&draw).is_some_and(|cells| {
+            cells.iter().any(|cell| {
+                !self.near_tree_bins.contains(cell) && self.far_cells.contains_key(cell)
+            })
+        })
     }
 
-    fn places_for_draw_bin(&self, draw: (i32, i32)) -> Vec<Place> {
+    fn places_for_draw_bin(&self, draw: (i32, i32), origin: RenderOrigin) -> Vec<Place> {
+        let Some(cells) = self.far_draws.get(&draw) else {
+            return Vec::new();
+        };
         let mut places = Vec::new();
-        for (cell, list) in &self.far_live {
-            if far_draw_bin(*cell) == draw {
-                places.extend_from_slice(list);
+        for cell in cells {
+            if self.near_tree_bins.contains(cell) {
+                continue;
             }
+            let Some(sprigs) = self.far_cells.get(cell) else {
+                continue;
+            };
+            places.extend(places_of(sprigs, origin));
         }
         places
     }
 
     fn recount_far(&mut self) {
         self.far_placed = self
-            .far_live
+            .far_draws
             .iter()
-            .filter(|(cell, _)| self.far_bins.contains_key(&far_draw_bin(**cell)))
-            .map(|(_, list)| list.len())
+            .filter(|(draw, _)| self.far_bins.contains_key(*draw))
+            .flat_map(|(_, cells)| cells.iter())
+            .filter(|cell| !self.near_tree_bins.contains(cell))
+            .filter_map(|cell| self.far_cells.get(cell).map(Vec::len))
             .sum();
     }
 }
 
 impl Sowing {
-    /// Sow every class over the window around `focus`.
-    fn sow(&self, focus: GlobalXZ) -> Vec<Sprig> {
+    /// Sow every class over the window around `focus`, already binned.
+    fn sow(&self, focus: GlobalXZ) -> NearSown {
         let mut out = Vec::new();
         for class in PROP_CLASSES {
             let variants: Vec<usize> = self
@@ -1501,7 +1664,9 @@ impl Sowing {
             }
             self.sow_class(class, &variants, focus, &mut out);
         }
-        out
+        NearSown {
+            buckets: bucket_near_sprigs(out),
+        }
     }
 
     fn sow_class(
@@ -1647,8 +1812,8 @@ impl Sowing {
 }
 
 impl FarSowing {
-    fn sow(&self, focus: GlobalXZ) -> Vec<Sprig> {
-        sow_far_forest(
+    fn sow(&self, focus: GlobalXZ) -> FarSown {
+        bucket_far_sprigs(sow_far_forest(
             self.seed,
             self.surface.as_ref(),
             self.ponds.as_ref(),
@@ -1656,7 +1821,7 @@ impl FarSowing {
             self.inner_m,
             self.outer_m,
             self.spacing_m,
-        )
+        ))
     }
 }
 
@@ -1779,25 +1944,69 @@ fn bin_dist_key(bx: i32, bz: i32, focus: GlobalXZ) -> i64 {
     (dx * dx + dz * dz) as i64
 }
 
-fn cap_tree_jobs(
-    jobs: Vec<TreeJob>,
-    remaining: impl Fn(&TreeJob) -> usize,
-    cap: usize,
-) -> VecDeque<TreeJob> {
+fn far_draw_dist_key(draw: (i32, i32), focus: GlobalXZ) -> i64 {
+    let span = CHUNK_SPAN_M * f64::from(FAR_DRAW_FOLD);
+    let cx = (f64::from(draw.0) + 0.5) * span;
+    let cz = (f64::from(draw.1) + 0.5) * span;
+    let dx = cx - focus.x;
+    let dz = cz - focus.z;
+    (dx * dx + dz * dz) as i64
+}
+
+fn cap_nearest<T>(items: Vec<T>, weight: impl Fn(&T) -> usize, cap: usize) -> VecDeque<T> {
     let mut q = VecDeque::new();
     let mut n = 0;
-    for job in jobs {
-        let left = remaining(&job);
-        if left == 0 {
+    for item in items {
+        let w = weight(&item);
+        if w == 0 {
             continue;
         }
         if n >= cap {
             break;
         }
-        n += left;
-        q.push_back(job);
+        n += w;
+        q.push_back(item);
     }
     q
+}
+
+fn bucket_near_sprigs(
+    sprigs: impl IntoIterator<Item = Sprig>,
+) -> HashMap<(usize, i32, i32), Vec<Sprig>> {
+    let mut buckets: HashMap<(usize, i32, i32), Vec<Sprig>> = HashMap::new();
+    for sprig in sprigs {
+        let bin = xz_bin(sprig.at.horizontal());
+        buckets
+            .entry((sprig.variant, bin.0, bin.1))
+            .or_default()
+            .push(sprig);
+    }
+    buckets
+}
+
+fn bucket_far_sprigs(sprigs: impl IntoIterator<Item = Sprig>) -> FarSown {
+    let mut cells: HashMap<(i32, i32), Vec<Sprig>> = HashMap::new();
+    for sprig in sprigs {
+        cells
+            .entry(xz_bin(sprig.at.horizontal()))
+            .or_default()
+            .push(sprig);
+    }
+    let mut draws: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+    for &cell in cells.keys() {
+        draws.entry(far_draw_bin(cell)).or_default().push(cell);
+    }
+    FarSown { cells, draws }
+}
+
+fn upload_budget_left(started: Instant) -> bool {
+    started.elapsed().as_secs_f32() * 1_000.0 < UPLOAD_BUDGET_MS
+}
+
+struct UploadDrain {
+    trees: bool,
+    other: bool,
+    far: bool,
 }
 
 fn places_of(sprigs: &[Sprig], origin: RenderOrigin) -> Vec<Place> {
@@ -1913,13 +2122,124 @@ mod tests {
             .collect();
         // 80 pending trees per cell → 13 cells = 1040, so the cap keeps 13 and drops the rest.
         let remaining = |job: &TreeJob| 80 - job.shown;
-        let q = cap_tree_jobs(jobs, remaining, 1_000);
+        let q = cap_nearest(jobs, remaining, 1_000);
         assert_eq!(q.len(), 13);
         assert_eq!(q.front().unwrap().bx, 0);
         assert_eq!(q.back().unwrap().bx, 12);
         let queued: usize = q.iter().map(remaining).sum();
         assert!(queued >= 1_000);
         assert!(queued < 1_000 + 80);
+    }
+
+    #[test]
+    fn the_tree_queue_follows_the_player_not_the_sow() {
+        let jobs = [
+            TreeJob {
+                vi: 0,
+                bx: 0,
+                bz: 0,
+                shown: 0,
+            },
+            TreeJob {
+                vi: 0,
+                bx: 10,
+                bz: 0,
+                shown: 0,
+            },
+        ];
+        let remaining = |_job: &TreeJob| 80;
+        let mut at_sow = jobs.to_vec();
+        at_sow.sort_by_key(|job| bin_dist_key(job.bx, job.bz, GlobalXZ::at(0.0, 0.0)));
+        let q = cap_nearest(at_sow, remaining, 80);
+        assert_eq!(q.front().unwrap().bx, 0);
+        assert_eq!(q.len(), 1, "the farther cell must fall off the cap");
+
+        let mut at_walk = jobs.to_vec();
+        at_walk.sort_by_key(|job| bin_dist_key(job.bx, job.bz, GlobalXZ::at(2_000.0, 0.0)));
+        let q = cap_nearest(at_walk, remaining, 80);
+        assert_eq!(
+            q.front().unwrap().bx,
+            10,
+            "walking toward a cell must promote it over the sow's FIFO"
+        );
+    }
+
+    #[test]
+    fn far_draw_cells_sort_nearest_to_the_player() {
+        let focus = GlobalXZ::at(2_500.0, 0.0);
+        let mut draws = vec![(0, 0), (2, 0), (5, 0)];
+        draws.sort_by_key(|&draw| far_draw_dist_key(draw, focus));
+        assert_eq!(draws[0], (2, 0));
+    }
+
+    #[test]
+    fn the_sow_thread_bins_before_the_main_thread_sees_them() {
+        let at = |x, z| GlobalXZ::at(x, z).with_height(0.0).expect("height");
+        let sprigs = vec![
+            Sprig {
+                variant: 0,
+                at: at(50.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+            Sprig {
+                variant: 0,
+                at: at(250.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+            Sprig {
+                variant: 1,
+                at: at(50.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+        ];
+        let buckets = bucket_near_sprigs(sprigs);
+        assert_eq!(buckets.len(), 3);
+        assert_eq!(buckets[&(0, 0, 0)].len(), 1);
+        assert_eq!(buckets[&(0, 1, 0)].len(), 1);
+        assert_eq!(buckets[&(1, 0, 0)].len(), 1);
+    }
+
+    #[test]
+    fn far_sows_group_walked_cells_under_draw_cells() {
+        let at = |x, z| GlobalXZ::at(x, z).with_height(0.0).expect("height");
+        let sown = bucket_far_sprigs([
+            Sprig {
+                variant: 0,
+                at: at(50.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+            Sprig {
+                variant: 0,
+                at: at(250.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+            Sprig {
+                variant: 0,
+                at: at(1_050.0, 50.0),
+                yaw_deg: 0.0,
+                scale: 1.0,
+            },
+        ]);
+        assert_eq!(sown.cells.len(), 3);
+        assert_eq!(sown.draws.len(), 2);
+        assert_eq!(sown.draws[&(0, 0)].len(), 2);
+        assert_eq!(sown.draws[&(1, 0)].len(), 1);
+    }
+
+    #[test]
+    fn the_far_queue_keeps_the_nearest_draw_cells() {
+        let focus = GlobalXZ::at(0.0, 0.0);
+        let mut draws = vec![(0, 0), (3, 0), (1, 0), (8, 0)];
+        draws.sort_by_key(|&draw| far_draw_dist_key(draw, focus));
+        let q = cap_nearest(draws, |_| 1, 2);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q.front().unwrap(), &(0, 0));
+        assert_eq!(q.back().unwrap(), &(1, 0));
     }
 
     #[test]

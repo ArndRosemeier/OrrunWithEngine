@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::doors::DoorLayer;
+use super::dungeon::{DungeonError, DungeonLayer};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::fauna::{FaunaError, FaunaLayer};
 use super::footprint::BuildingIndex;
@@ -71,6 +72,9 @@ pub enum SessionError {
 
     #[error(transparent)]
     Fauna(#[from] FaunaError),
+
+    #[error(transparent)]
+    Dungeon(#[from] DungeonError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -294,6 +298,8 @@ pub struct WorldSession {
     fauna: Option<FaunaLayer>,
     /// Swinging house leaves and the one live portal interior.
     doors: DoorLayer,
+    /// Atlas dungeon mouths: pits, background generate, floor hatches.
+    dungeons: Option<DungeonLayer>,
     state: SessionState,
     /// The request being loaded, until the water under it has been scanned and
     /// the spawn it resolves to is known.
@@ -305,6 +311,8 @@ pub struct WorldSession {
     travel_space: Option<SpaceId>,
     proxy_spec: Option<ContinentProxySpec>,
     proxy: Option<InstalledProxy>,
+    /// Last stand in the default space. A hatch teleport must not overwrite this.
+    overworld: Option<(GlobalXZ, Heading)>,
 }
 
 impl WorldSession {
@@ -320,6 +328,7 @@ impl WorldSession {
             paths: None,
             fauna: None,
             doors: DoorLayer::new(),
+            dungeons: None,
             state: SessionState::Atlas,
             entering: None,
             spawn: None,
@@ -329,6 +338,7 @@ impl WorldSession {
             travel_space: None,
             proxy_spec: None,
             proxy: None,
+            overworld: None,
         }
     }
 
@@ -410,10 +420,15 @@ impl WorldSession {
     }
 
     fn plot_index(&self) -> Arc<BuildingIndex> {
-        self.settlements
+        let mut plots = self
+            .settlements
             .as_ref()
-            .map(SettlementLayer::plot_index)
-            .unwrap_or_else(|| Arc::new(BuildingIndex::new(Vec::new())))
+            .map(|s| s.plots().to_vec())
+            .unwrap_or_default();
+        if let Some(dungeons) = &self.dungeons {
+            plots.extend(dungeons.plots());
+        }
+        Arc::new(BuildingIndex::new(plots))
     }
 
     /// Global position of the player, once they exist.
@@ -505,6 +520,14 @@ impl WorldSession {
     /// What the loading screen should say. Progress stays at 0 until spawn is
     /// known, which used to read as a stuck ground streamer while water scanned.
     pub fn loading_status(&self) -> String {
+        let core = self.loading_core();
+        match self.dungeon_build_status() {
+            Some(dungeon) => format!("{dungeon}  ·  {core}"),
+            None => core,
+        }
+    }
+
+    fn loading_core(&self) -> String {
         if let Some(travel) = &self.travel {
             if !travel.handed_off {
                 return "rising…".into();
@@ -694,12 +717,16 @@ impl WorldSession {
         if let Some(fauna) = self.fauna.as_mut() {
             fauna.clear(world)?;
         }
+        if let Some(dungeons) = self.dungeons.as_mut() {
+            dungeons.clear(world)?;
+        }
 
         self.stream.reset(world);
         world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
         self.spawn = None;
         self.player = None;
         self.entering = Some(request);
+        self.overworld = None;
         let travel = self.travel.as_mut().expect("travel");
         travel.handed_off = true;
         travel.handoffs += 1;
@@ -729,6 +756,9 @@ impl WorldSession {
         world.look_first_person_global(player.eye(), player.yaw_degrees, player.pitch_degrees)?;
         self.travel = None;
         self.state = SessionState::World;
+        if let Some(player) = self.player {
+            self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees);
+        }
         Ok(())
     }
 
@@ -862,6 +892,15 @@ impl WorldSession {
                     Some(SettlementLayer::install(world, self.surface.world_seed())?);
                 self.paths = Some(PathLayer::new());
                 self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
+                self.dungeons = Some(DungeonLayer::install());
+            }
+            if let Some(dungeons) = self.dungeons.as_mut() {
+                let rebuilt =
+                    dungeons.follow(world, &self.stream, &self.surface, request.requested())?;
+                if rebuilt {
+                    let plots = self.plot_index();
+                    self.stream.set_house_plots(world, (*plots).clone())?;
+                }
             }
             if !self.ponds.traced(request.requested()) {
                 return Ok(false);
@@ -882,6 +921,13 @@ impl WorldSession {
         }
         let spawn = self.spawn.ok_or(SessionError::NoWorld)?;
         let focus = spawn.ground();
+        if let Some(dungeons) = self.dungeons.as_mut() {
+            let rebuilt = dungeons.follow(world, &self.stream, &self.surface, focus)?;
+            if rebuilt {
+                let plots = self.plot_index();
+                self.stream.set_house_plots(world, (*plots).clone())?;
+            }
+        }
         self.stream.sync(world, focus, None)?;
         if !self.stream.required_ready(focus) {
             return Ok(false);
@@ -1020,9 +1066,18 @@ impl WorldSession {
         }
         match player.mode {
             Locomotion::Walk => {
-                let to = world.move_actor(&player.body, player.position.horizontal(), dx, dz);
-                player.position.x = to.x;
-                player.position.z = to.z;
+                let in_dungeon = self
+                    .dungeons
+                    .as_ref()
+                    .and_then(|d| d.indoor_floor_y(world, player.position))
+                    .is_some();
+                if in_dungeon {
+                    move_dungeon_walker(world, &mut player, dx, dz, input.jump, input.dt);
+                } else {
+                    let to = world.move_actor(&player.body, player.position.horizontal(), dx, dz);
+                    player.position.x = to.x;
+                    player.position.z = to.z;
+                }
             }
             Locomotion::Fly => {
                 player.position.x += dx;
@@ -1051,7 +1106,23 @@ impl WorldSession {
         } else {
             false
         };
-        if rebuilt {
+        let t_dungeon = Instant::now();
+        let dungeon_rebuilt = if let Some(dungeons) = self.dungeons.as_mut() {
+            dungeons.follow(world, &self.stream, &self.surface, foot)?
+        } else {
+            false
+        };
+        world.hitch_span(
+            "dungeons",
+            hitch_ms(t_dungeon),
+            format!(
+                "generating={} seated={} ready={}",
+                self.dungeon_generating(),
+                self.dungeon_seated_count(),
+                self.dungeon_ready_count(),
+            ),
+        );
+        if rebuilt || dungeon_rebuilt {
             let plots = self.plot_index();
             self.stream.set_house_plots(world, (*plots).clone())?;
         }
@@ -1157,15 +1228,47 @@ impl WorldSession {
             input.interact,
             input.dt,
         )?;
+        if let Some(dungeons) = self.dungeons.as_mut() {
+            let t = Instant::now();
+            dungeons.frame(world, player.position, player.yaw_degrees)?;
+            world.hitch_span(
+                "dungeon_frame",
+                hitch_ms(t),
+                format!(
+                    "generating={} ready={}",
+                    dungeons.generating(),
+                    dungeons.ready_count()
+                ),
+            );
+        }
         let hidden_leaf = self.doors.hidden_leaf();
         if let Some(settlements) = self.settlements.as_mut() {
             settlements.hide_leaf(world, hidden_leaf)?;
         }
 
-        // Probe with the actor's centre, not the soles. The latter sit only a
-        // few centimetres above the opening's lower edge and can miss the
-        // rectangle on uneven door terrain.
-        let portal_probe_y = f64::from(player.body.height * 0.5);
+        // Doors need the actor centre. The outdoor hatch needs the soles for
+        // falling through; the dungeon ceiling hatch needs the actor's head.
+        self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees);
+        let near_hatch = self
+            .dungeons
+            .as_ref()
+            .is_some_and(|d| d.near_hatch(player.position));
+        let hatch_armed = self
+            .dungeons
+            .as_ref()
+            .is_some_and(DungeonLayer::hatch_armed);
+        let in_dungeon = self
+            .dungeons
+            .as_ref()
+            .and_then(|d| d.indoor_floor_y(world, player.position))
+            .is_some();
+        let portal_probe_y = if near_hatch && hatch_armed {
+            0.12
+        } else if in_dungeon {
+            f64::from(player.body.height)
+        } else {
+            f64::from(player.body.height * 0.5)
+        };
         let portal_probe = GlobalPosition::at(
             player.position.x,
             player.position.y + portal_probe_y,
@@ -1181,8 +1284,18 @@ impl WorldSession {
                 landed_probe.z,
             );
             player.yaw_degrees = yaw;
-            self.doors
-                .settle_after_travel(world, &player.body, entered, &mut player.position);
+            if self.doors.hidden_leaf().is_some() {
+                self.doors
+                    .settle_after_travel(world, &player.body, entered, &mut player.position);
+            } else if let Some(dungeons) = &self.dungeons {
+                dungeons.settle_after_travel(
+                    world,
+                    &player.body,
+                    entered,
+                    &mut player.position,
+                    &mut player.yaw_degrees,
+                );
+            }
         }
 
         match player.mode {
@@ -1191,21 +1304,28 @@ impl WorldSession {
             // different surface than the one being drawn. Indoors the house
             // floor is the contact, not the outdoor plot cap.
             Locomotion::Walk => {
-                let indoor = self.doors.indoor_floor_y(world, player.position);
-                let ground = if indoor.is_some() {
-                    indoor
-                } else {
-                    let stand = player.position.horizontal();
-                    let terrain = self.stream.contact_height(stand);
-                    let deck = self.paths.as_ref().and_then(|p| p.deck_height(stand));
-                    match (terrain, deck) {
-                        (Some(t), Some(d)) => Some(t.max(d)),
-                        (Some(t), None) => Some(t),
-                        (None, Some(d)) => Some(d),
-                        (None, None) => None,
-                    }
-                };
-                apply_walk_height(&mut player, ground, input.jump, input.dt);
+                let in_dungeon = self
+                    .dungeons
+                    .as_ref()
+                    .and_then(|d| d.indoor_floor_y(world, player.position))
+                    .is_some();
+                if !in_dungeon {
+                    let indoor = self.doors.indoor_floor_y(world, player.position);
+                    let ground = if indoor.is_some() {
+                        indoor
+                    } else {
+                        let stand = player.position.horizontal();
+                        let terrain = self.stream.contact_height(stand);
+                        let deck = self.paths.as_ref().and_then(|p| p.deck_height(stand));
+                        match (terrain, deck) {
+                            (Some(t), Some(d)) => Some(t.max(d)),
+                            (Some(t), None) => Some(t),
+                            (None, Some(d)) => Some(d),
+                            (None, None) => None,
+                        }
+                    };
+                    apply_walk_height(&mut player, ground, input.jump, input.dt);
+                }
             }
             Locomotion::Fly => {}
         }
@@ -1221,6 +1341,26 @@ impl WorldSession {
         self.stream.contact_height(p)
     }
 
+    /// Stand to write on exit: the last default-space feet, never a dungeon interior.
+    pub fn saved_stand(&self) -> Option<(GlobalXZ, Heading)> {
+        if let Some(stand) = self.overworld {
+            return Some(stand);
+        }
+        let player = self.player?;
+        let heading = Heading::from_degrees(player.yaw_degrees).ok()?;
+        Some((player.position.horizontal(), heading))
+    }
+
+    fn remember_overworld_from(&mut self, world: &World, at: GlobalXZ, yaw_degrees: f32) {
+        if world.living_in() != SpaceId::DEFAULT {
+            return;
+        }
+        let Ok(heading) = Heading::from_degrees(yaw_degrees) else {
+            return;
+        };
+        self.overworld = Some((at, heading));
+    }
+
     /// Compass heading the player is facing.
     pub fn player_heading(&self) -> Option<Heading> {
         self.player
@@ -1234,7 +1374,27 @@ impl WorldSession {
 
     /// HUD line when a house door is in reach.
     pub fn door_hint(&self) -> Option<&str> {
-        self.doors.hint()
+        self.doors
+            .hint()
+            .or_else(|| self.dungeons.as_ref().and_then(DungeonLayer::hint))
+    }
+
+    /// True while a nearby dungeon layout is still on the worker.
+    pub fn dungeon_generating(&self) -> bool {
+        self.dungeons.as_ref().is_some_and(DungeonLayer::generating)
+    }
+
+    /// HUD line while a nearby dungeon is still being cut.
+    pub fn dungeon_build_status(&self) -> Option<String> {
+        self.dungeons.as_ref().and_then(DungeonLayer::build_status)
+    }
+
+    pub fn dungeon_ready_count(&self) -> usize {
+        self.dungeons.as_ref().map_or(0, DungeonLayer::ready_count)
+    }
+
+    pub fn dungeon_seated_count(&self) -> usize {
+        self.dungeons.as_ref().map_or(0, DungeonLayer::seated_count)
     }
 
     /// Where the camera sits, once the player exists.
@@ -1273,6 +1433,31 @@ fn wrap_degrees(degrees: f32) -> f32 {
 
 fn hitch_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
+}
+
+fn move_dungeon_walker(world: &World, player: &mut Player, dx: f64, dz: f64, jump: bool, dt: f32) {
+    if jump && !player.airborne {
+        player.vy = JUMP_SPEED;
+        player.airborne = true;
+    }
+    player.vy -= GRAVITY * dt;
+    let moved = world.move_actor_3d(
+        &player.body,
+        player.position,
+        dx,
+        f64::from(player.vy * dt),
+        dz,
+    );
+    player.position = moved.position;
+    if moved.grounded {
+        player.vy = 0.0;
+        player.airborne = false;
+    } else {
+        player.airborne = true;
+    }
+    if moved.hit_ceiling && player.vy > 0.0 {
+        player.vy = 0.0;
+    }
 }
 
 fn apply_walk_height(player: &mut Player, ground: Option<f32>, jump: bool, dt: f32) {

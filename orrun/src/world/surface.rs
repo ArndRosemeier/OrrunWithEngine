@@ -645,6 +645,27 @@ pub struct SettlementPin {
     pub population: i32,
 }
 
+/// Atlas dungeon mouth, in world metres. The 3D layer seats a pit here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DungeonPin {
+    pub id: i32,
+    pub at: GlobalXZ,
+    /// 0=compact, 1=wing, 2=keep.
+    pub tier: u8,
+    pub seed: u64,
+}
+
+impl DungeonPin {
+    pub fn tier_name(self) -> &'static str {
+        match self.tier {
+            0 => "compact",
+            1 => "wing",
+            2 => "keep",
+            other => panic!("dungeon tier {other} is not 0..=2"),
+        }
+    }
+}
+
 /// Godot `VillageTier.classify`: inland low-pop is a hamlet; a river mouth is a port.
 ///
 /// Atlas population is only 0..=15, and `mouth_dist == 0` is the mouth cell
@@ -716,6 +737,36 @@ fn ensure_settlement_ladder(ranked: &mut [(i32, SettlementPin)]) {
     }
 }
 
+fn dungeon_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[DungeonPin]> {
+    atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .map(|n| {
+            let at = GlobalXZ::at(
+                (n.ax as f64 + 0.5) * f64::from(CELL_METRES),
+                (n.az as f64 + 0.5) * f64::from(CELL_METRES),
+            );
+            let mix = crate::atlas::feature_hash(&[
+                &atlas.world_seed.to_string(),
+                "dungeon",
+                &n.id.to_string(),
+            ]);
+            let tier = match (mix as u32) % 20 {
+                0 => 2,
+                1..=3 => 1,
+                _ => 0,
+            };
+            DungeonPin {
+                id: n.id,
+                at,
+                tier,
+                seed: mix as u64,
+            }
+        })
+        .collect()
+}
+
 fn pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[SettlementPin]> {
     let mut ranked: Vec<(i32, SettlementPin)> = atlas
         .nodes
@@ -754,6 +805,7 @@ pub struct ContinentalSurface {
     world_seed: i32,
     detail: TerrainDetail,
     settlements: Arc<[SettlementPin]>,
+    dungeons: Arc<[DungeonPin]>,
     roads: Arc<[RoadPath]>,
 }
 
@@ -781,6 +833,7 @@ impl ContinentalSurface {
             world_seed: atlas.world_seed,
             detail: TerrainDetail::new(atlas.world_seed, massifs),
             settlements: pins_from_atlas(atlas),
+            dungeons: dungeon_pins_from_atlas(atlas),
             roads: bake_road_paths(atlas).into(),
         };
         surface.validate()?;
@@ -866,6 +919,11 @@ impl ContinentalSurface {
         &self.settlements
     }
 
+    /// Dungeon mouths on this continent, in world metres.
+    pub fn dungeon_pins(&self) -> &[DungeonPin] {
+        &self.dungeons
+    }
+
     /// Highest-tier settlement, then highest population, then stable id.
     ///
     /// Same order as Godot `SettlementLayout.spawn_plaza_largest`: port before
@@ -875,6 +933,17 @@ impl ContinentalSurface {
             .iter()
             .copied()
             .max_by_key(|pin| (pin.tier, pin.population, pin.id))
+    }
+
+    /// Closest dungeon mouth to `from`. Ties break on the smaller pin id.
+    pub fn nearest_dungeon(&self, from: GlobalXZ) -> Option<DungeonPin> {
+        self.dungeons.iter().copied().min_by(|a, b| {
+            let da = a.at.distance(from);
+            let db = b.at.distance(from);
+            da.partial_cmp(&db)
+                .unwrap_or_else(|| panic!("dungeon distance from {from:?} is not finite"))
+                .then_with(|| a.id.cmp(&b.id))
+        })
     }
 
     /// Atlas roads in world metres, meandered like the map overlay.

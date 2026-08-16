@@ -246,3 +246,37 @@ fn a_settlement_cell_is_a_spur_or_a_through_road() {
         }
     }
 }
+
+#[test]
+fn dungeon_nodes_are_inland_and_deterministic() {
+    let a = ContinentAtlas::generate(20260816, 64);
+    let b = ContinentAtlas::generate(20260816, 64);
+    let da: Vec<_> = a
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .map(|n| (n.id, n.ax, n.az))
+        .collect();
+    let db: Vec<_> = b
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .map(|n| (n.id, n.ax, n.az))
+        .collect();
+    assert!(!da.is_empty(), "a 64-cell atlas must plant dungeon mouths");
+    assert_eq!(da, db);
+    for node in a.nodes.iter().filter(|n| n.kind == NodeKind::Dungeon) {
+        let biome = pack::biome(a.cell_at(node.ax, node.az));
+        assert!(
+            biomes::is_land(biome) && biome != Biome::Coast && biome != Biome::Wetland,
+            "dungeon {} in {:?}",
+            node.id,
+            biome
+        );
+        assert!(
+            a.links_in_cell(node.ax, node.az, Kind::Road).is_empty(),
+            "dungeon {} has a road through its atlas cell",
+            node.id
+        );
+    }
+}

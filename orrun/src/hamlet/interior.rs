@@ -1,15 +1,18 @@
 //! Indoor kit: structure from Modular, furniture as post-assembly places.
 //!
-//! Meshes are generated to the catalog grid (Asset Lab can replace them later).
-//! Furniture never `mate`s into a wall cell.
+//! Walls stay generated to the catalog grid. Floors and furniture are Asset Lab
+//! meshes (`furn_*`), seated against the plaster — never mated into a wall cell.
+
+use std::path::{Path, PathBuf};
 
 use engine::color::Color;
 use engine::mesh::Mesh;
+use engine::model::Model;
 use engine::place::Place;
 use glam::Vec3;
 use modular::prelude::*;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 
 const INDOOR_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -29,20 +32,38 @@ fn plaster_color() -> Color {
 fn plaster_b_color() -> Color {
     Color::rgb(220, 200, 176)
 }
-fn floor_color() -> Color {
-    Color::rgb(168, 112, 72)
-}
 fn ceiling_color() -> Color {
     Color::rgb(214, 198, 176)
 }
 fn wood_color() -> Color {
     Color::rgb(89, 56, 31)
 }
-fn linen_color() -> Color {
-    Color::rgb(196, 178, 142)
-}
-fn hearth_color() -> Color {
-    Color::rgb(70, 64, 58)
+
+/// Piece id → vendored indoor glb. Floor and plinth share the planked cell.
+const INDOOR_GLBS: &[(&str, &str)] = &[
+    ("floor", "furn_floor.glb"),
+    ("plinth", "furn_floor.glb"),
+    ("table", "furn_table.glb"),
+    ("bed", "furn_bed.glb"),
+    ("chest", "furn_chest.glb"),
+    ("hearth", "furn_hearth.glb"),
+    ("shelf", "furn_shelf.glb"),
+    ("cupboard", "furn_cupboard.glb"),
+    ("bench", "furn_bench.glb"),
+];
+
+/// Footprint half-extents for the shipped furniture meshes (metres).
+pub fn furniture_half_xz(piece: &str) -> (f32, f32) {
+    match piece {
+        "table" => (0.68, 0.41),
+        "bed" => (1.025, 0.59),
+        "chest" => (0.45, 0.25),
+        "hearth" => (0.75, 0.31),
+        "shelf" => (0.775, 0.13),
+        "cupboard" => (0.54, 0.23),
+        "bench" => (0.69, 0.18),
+        other => panic!("indoor furniture has no collider for '{other}'"),
+    }
 }
 
 fn pid(id: &str) -> PieceId {
@@ -105,20 +126,8 @@ pub fn assemble(catalog_id: &str, seed: u64) -> InteriorLayout {
         .find(|item| item.piece.as_str() == "door")
         .map(|item| opening_place(&item.place))
         .unwrap_or_else(|| panic!("{catalog_id} indoor kit has no exterior door"));
-    let (sx, sz) = if catalog_id == "house_hall_large" {
-        (2.8, 3.6)
-    } else {
-        (2.8, 1.8)
-    };
-    pieces.push(PlacedMesh {
-        piece: pid("floor"),
-        place: Place::new(0.0, 0.02, 0.0).with_stretch(Vec3::new(sx, 1.0, sz)),
-    });
     if storeys > 1 {
-        pieces.push(PlacedMesh {
-            piece: pid("floor"),
-            place: Place::new(0.0, STOREY_M, 0.0).with_stretch(Vec3::new(sx, 1.0, sz)),
-        });
+        pieces.extend(cover_upper_floors(catalog_id, origin, &pieces, stair_cell));
     }
     let stair_local = stair_cell.map(|c| {
         Vec3::new(
@@ -143,8 +152,11 @@ pub fn assemble(catalog_id: &str, seed: u64) -> InteriorLayout {
     }
 }
 
-/// Generated mesh for an indoor piece id. Matches the 4 × 2.7 m cell.
+/// Mesh for an indoor piece id. Floors and furniture are Asset Lab glbs.
 pub fn piece_mesh(piece: &str) -> Mesh {
+    if let Some(file) = indoor_glb(piece) {
+        return load_indoor_glb(piece, file);
+    }
     match piece {
         "wall" | "wall_b" => slab(
             (0.0, STOREY_M * 0.5, WALL_CENTER_Z),
@@ -159,20 +171,75 @@ pub fn piece_mesh(piece: &str) -> Mesh {
         "door" => door_wall(WALL_CENTER_Z, plaster(piece)),
         "partition_door" => door_wall(0.0, plaster(piece)),
         "corner" => corner_wall(plaster_color()),
-        "floor" => slab((0.0, 0.04, 0.0), (CELL_M, 0.08, CELL_M), floor_color()),
         "ceiling" => slab(
             (0.0, STOREY_M - 0.04, 0.0),
             (CELL_M, 0.08, CELL_M),
             ceiling_color(),
         ),
-        "plinth" => slab((0.0, -0.08, 0.0), (CELL_M, 0.16, CELL_M), wood_color()),
         "stair" => stair_mesh(),
-        "table" => slab((0.0, 0.38, 0.0), (1.2, 0.76, 0.8), wood_color()),
-        "bed" => slab((0.0, 0.28, 0.0), (2.0, 0.56, 1.1), linen_color()),
-        "chest" => slab((0.0, 0.28, 0.0), (0.7, 0.56, 0.45), wood_color()),
-        "hearth" => slab((0.0, 0.45, 0.0), (1.1, 0.9, 0.55), hearth_color()),
         other => panic!("indoor kit has no mesh for '{other}'"),
     }
+}
+
+fn indoor_glb(piece: &str) -> Option<&'static str> {
+    INDOOR_GLBS
+        .iter()
+        .find(|(id, _)| *id == piece)
+        .map(|(_, file)| *file)
+}
+
+fn indoor_search_paths(file: &str) -> Vec<PathBuf> {
+    let mut tried = Vec::new();
+    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
+        tried.push(PathBuf::from(dir).join("kit").join("indoor").join(file));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            tried.push(dir.join("assets").join("kit").join("indoor").join(file));
+        }
+    }
+    tried.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("kit")
+            .join("indoor")
+            .join(file),
+    );
+    tried.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("AssetGenerator")
+            .join("assets")
+            .join("out")
+            .join(file),
+    );
+    tried
+}
+
+fn load_indoor_glb(piece: &str, file: &str) -> Mesh {
+    let tried = indoor_search_paths(file);
+    let path = tried.iter().find(|p| p.is_file()).cloned().unwrap_or_else(|| {
+        panic!(
+            "indoor mesh '{piece}' ({file}) not found (tried {}). From C:\\Projekte\\AssetGenerator run: python tools/ag.py generate {} then python tools/sync_props.py",
+            tried
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Path::new(file)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.to_string()),
+        )
+    });
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    Model::load_with(&path, base, &engine::EngineLimits::default()).unwrap_or_else(|err| {
+        panic!(
+            "indoor mesh '{}' failed to load from {}: {err}",
+            path.display(),
+            piece
+        )
+    })
 }
 
 fn plaster(piece: &str) -> Color {
@@ -493,6 +560,62 @@ fn shift_xz(places: &mut [PlacedMesh], origin: Vec3) {
     }
 }
 
+fn cover_upper_floors(
+    catalog_id: &str,
+    origin: Vec3,
+    existing: &[PlacedMesh],
+    stair_cell: Option<Cell>,
+) -> Vec<PlacedMesh> {
+    let (cells_x, cells_z) = room_cells(catalog_id);
+    let mut out = Vec::new();
+    for x in 0..cells_x {
+        for z in 0..cells_z {
+            if stair_cell.is_some_and(|c| c.x == x && c.z == z) {
+                continue;
+            }
+            let px = (x as f32 + 0.5) * CELL_M + origin.x;
+            let pz = (z as f32 + 0.5) * CELL_M + origin.z;
+            if existing.iter().any(|item| {
+                item.piece.as_str() == "floor"
+                    && (item.place.position.x - px).abs() < 0.2
+                    && (item.place.position.z - pz).abs() < 0.2
+                    && (item.place.position.y - STOREY_M).abs() < 0.2
+            }) {
+                continue;
+            }
+            out.push(PlacedMesh {
+                piece: pid("floor"),
+                place: Place::new(px, STOREY_M, pz),
+            });
+        }
+    }
+    out
+}
+
+fn room_cells(catalog_id: &str) -> (i32, i32) {
+    if catalog_id == "house_hall_large" {
+        (3, 4)
+    } else {
+        (3, 2)
+    }
+}
+
+fn room_inner(catalog_id: &str) -> (f32, f32) {
+    let (cells_x, cells_z) = room_cells(catalog_id);
+    (
+        cells_x as f32 * CELL_M * 0.5 - WALL_T,
+        cells_z as f32 * CELL_M * 0.5 - WALL_T,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Wall {
+    North,
+    South,
+    East,
+    West,
+}
+
 /// Furniture sits on finished faces. Door is local −Z; keep that aisle clear.
 fn decorate(
     catalog_id: &str,
@@ -500,41 +623,100 @@ fn decorate(
     storeys: u32,
     stair_local: Option<Vec3>,
 ) -> Vec<PlacedMesh> {
-    let mut rng = StdRng::seed_from_u64(seed ^ 0xF01D_E001);
-    let depth = if catalog_id == "house_hall_large" {
-        6.0
-    } else {
-        3.2
+    let _ = seed;
+    let (inner_x, inner_z) = room_inner(catalog_id);
+    let ground = Room {
+        inner_x,
+        inner_z,
+        y: 0.0,
     };
     let mut out = Vec::new();
-    out.push(furn("table", 0.4 + rng.gen_range(-0.3..0.3), 0.0, 0.6));
-    out.push(furn("bed", rng.gen_range(-2.2..-1.4), 0.0, depth - 0.8));
-    out.push(furn("chest", 2.0, 0.0, -depth + 1.4));
-    out.push(furn(
-        "hearth",
-        rng.gen_range(1.6..2.3),
-        0.0,
-        rng.gen_range(0.2..1.1),
-    ));
-    if storeys > 1 {
+    out.push(ground.against(Wall::North, -2.4, "bed"));
+    out.push(ground.against(Wall::North, 2.6, "shelf"));
+    out.push(ground.against(Wall::East, 1.4, "hearth"));
+    out.push(ground.against(Wall::East, -2.2, "chest"));
+    out.push(ground.against(Wall::West, 1.3, "cupboard"));
+    out.push(ground.against(Wall::West, -2.0, "shelf"));
+    out.push(ground.open_floor("table", 0.9, 0.2));
+    out.push(ground.against(Wall::South, 2.5, "bench"));
+    if catalog_id == "house_hall_large" {
+        out.push(ground.against(Wall::North, 0.0, "bench"));
+        out.push(ground.against(Wall::South, -2.5, "bench"));
+        out.push(ground.against(Wall::East, 3.8, "bench"));
         if let Some(stair) = stair_local {
-            // Stay off the stair footprint and the door aisle (z < -1).
             assert!(
                 stair.z > -1.2 || stair.x.abs() > 1.4,
                 "stair sits in the door aisle"
             );
-        } else {
-            out.push(furn("stair", 2.2, 0.0, 1.6));
         }
+    }
+    if storeys > 1 {
+        let upper = Room {
+            inner_x,
+            inner_z,
+            y: STOREY_M,
+        };
+        out.push(upper.against(Wall::North, -2.2, "bed"));
+        out.push(upper.against(Wall::West, 0.4, "chest"));
+        out.push(upper.against(Wall::East, 0.8, "shelf"));
+        out.push(upper.against(Wall::South, 2.5, "bench"));
+        if stair_local.is_none() {
+            out.push(furn_at("stair", 2.2, 0.0, 1.6, 0.0));
+        }
+    }
+    for item in &out {
+        assert_clear_of_door(item);
     }
     out
 }
 
-fn furn(piece: &str, x: f32, y: f32, z: f32) -> PlacedMesh {
+struct Room {
+    inner_x: f32,
+    inner_z: f32,
+    y: f32,
+}
+
+impl Room {
+    fn against(&self, wall: Wall, along: f32, piece: &str) -> PlacedMesh {
+        let (half_x, half_z) = furniture_half_xz(piece);
+        let y = if piece == "shelf" {
+            self.y + 0.95
+        } else {
+            self.y
+        };
+        let (x, z, yaw) = match wall {
+            Wall::North => (along, self.inner_z - half_z, 180.0),
+            Wall::South => (along, -self.inner_z + half_z, 0.0),
+            Wall::East => (self.inner_x - half_z, along, -90.0),
+            Wall::West => (-self.inner_x + half_z, along, 90.0),
+        };
+        let _ = half_x;
+        furn_at(piece, x, y, z, yaw)
+    }
+
+    fn open_floor(&self, piece: &str, x: f32, z: f32) -> PlacedMesh {
+        furn_at(piece, x, self.y, z, 0.0)
+    }
+}
+
+fn furn_at(piece: &str, x: f32, y: f32, z: f32, yaw: f32) -> PlacedMesh {
     PlacedMesh {
         piece: pid(piece),
-        place: Place::new(x, y, z),
+        place: Place::new(x, y, z).with_yaw_deg(yaw),
     }
+}
+
+fn assert_clear_of_door(item: &PlacedMesh) {
+    if item.piece.as_str() == "stair" {
+        return;
+    }
+    let p = item.place.position;
+    let in_aisle = p.x.abs() < 1.35 && p.z < -1.2 && p.y < 1.0;
+    assert!(
+        !in_aisle,
+        "{} at ({:.2}, {:.2}, {:.2}) blocks the door aisle",
+        item.piece, p.x, p.y, p.z
+    );
 }
 
 #[cfg(test)]
@@ -555,13 +737,60 @@ mod tests {
                 layout.furniture.iter().any(|p| p.piece.as_str() == "table"),
                 "{id} has no table"
             );
-            let door_aisle = layout
-                .furniture
-                .iter()
-                .filter(|p| p.piece.as_str() != "chest")
-                .all(|p| p.place.position.z > -2.4 || p.place.position.x.abs() > 1.2);
-            assert!(door_aisle, "{id} furniture blocks the door aisle");
+            assert!(
+                layout.furniture.iter().any(|p| p.piece.as_str() == "shelf"),
+                "{id} has no wall shelf"
+            );
+            assert!(
+                layout
+                    .furniture
+                    .iter()
+                    .any(|p| p.piece.as_str() == "cupboard"),
+                "{id} has no cupboard"
+            );
+            let (inner_x, inner_z) = room_inner(id);
+            for item in &layout.furniture {
+                if matches!(item.piece.as_str(), "table" | "stair") {
+                    continue;
+                }
+                if item.place.position.y > 1.0 && item.piece.as_str() == "bench" {
+                    // upstairs south bench is still on a wall
+                }
+                let p = item.place.position;
+                let on_wall = p.x.abs() > inner_x - 1.1 || p.z.abs() > inner_z - 1.1;
+                assert!(
+                    on_wall,
+                    "{id} {} sits in the room middle at {:?}",
+                    item.piece, p
+                );
+            }
         }
+    }
+
+    #[test]
+    fn planked_floor_replaces_the_stretched_slab() {
+        let layout = assemble("house_hut_thatch", 7);
+        assert!(
+            layout
+                .pieces
+                .iter()
+                .any(|p| p.piece.as_str() == "plinth" && p.place.stretch == Vec3::ONE),
+            "ground plinths must stay unstretched plank cells"
+        );
+        assert!(
+            layout
+                .pieces
+                .iter()
+                .filter(|p| p.piece.as_str() == "floor")
+                .all(|p| p.place.stretch == Vec3::ONE),
+            "no stretched floor overlay"
+        );
+        let floor = piece_mesh("floor");
+        assert!(
+            floor.point_count() > 24,
+            "planked floor should be more than a box, got {} points",
+            floor.point_count()
+        );
     }
 
     #[test]

@@ -119,6 +119,17 @@ pub fn seed_nodes(
             }
         }
     }
+
+    seed_dungeon_nodes(
+        world_seed,
+        size,
+        cells,
+        landmass_id,
+        lake_id,
+        &mut occupied,
+        spacing,
+        nodes,
+    );
 }
 
 fn seed_settlement_nodes(
@@ -329,6 +340,118 @@ fn try_add_node(
         }
     }
 
+    let id = feature_hash(&[
+        &world_seed.to_string(),
+        "node",
+        &ax.to_string(),
+        &az.to_string(),
+        &(kind as u8).to_string(),
+    ]);
+    nodes.push(GraphNode {
+        id,
+        kind,
+        cell: idx as i32,
+        ax,
+        az,
+        landmass: mass,
+    });
+    occupied.insert(idx as i32, true);
+}
+
+fn seed_dungeon_nodes(
+    world_seed: i32,
+    size: usize,
+    cells: &[i32],
+    landmass_id: &mut [i32],
+    lake_id: &[i32],
+    occupied: &mut FxHashMap<i32, bool>,
+    spacing: i32,
+    nodes: &mut Vec<GraphNode>,
+) {
+    let mut rng = ChaCha8Rng::seed_from_u64(u64::from(layer_seed(world_seed, "atlas_dungeons")));
+    let target = (8 * size as i32 / SIZE_FULL).max(2).clamp(2, 16) as usize;
+    let dungeon_spacing = spacing.max(6);
+    let collar = (collar_cells(size) + 3).min(size as i32 / 4).max(2);
+    let attempts = target * 80;
+    for _ in 0..attempts {
+        if nodes.iter().filter(|n| n.kind == NodeKind::Dungeon).count() >= target {
+            return;
+        }
+        let ax = rng.gen_range(collar..size as i32 - collar);
+        let az = rng.gen_range(collar..size as i32 - collar);
+        try_add_dungeon(
+            world_seed,
+            size,
+            cells,
+            landmass_id,
+            lake_id,
+            ax,
+            az,
+            occupied,
+            dungeon_spacing,
+            nodes,
+        );
+    }
+}
+
+fn try_add_dungeon(
+    world_seed: i32,
+    size: usize,
+    cells: &[i32],
+    landmass_id: &mut [i32],
+    lake_id: &[i32],
+    ax: i32,
+    az: i32,
+    occupied: &mut FxHashMap<i32, bool>,
+    spacing: i32,
+    nodes: &mut Vec<GraphNode>,
+) {
+    if ax < 0 || az < 0 || ax as usize >= size || az as usize >= size {
+        return;
+    }
+    let idx = az as usize * size + ax as usize;
+    if occupied.contains_key(&(idx as i32)) {
+        return;
+    }
+    let biome = pack::biome(cells[idx]);
+    if !matches!(
+        biome,
+        biomes::Biome::Plains
+            | biomes::Biome::Forest
+            | biomes::Biome::Arid
+            | biomes::Biome::Alpine
+            | biomes::Biome::Tundra
+    ) {
+        return;
+    }
+    if near_lake(ax, az, size, lake_id) {
+        return;
+    }
+    if pack::relief(cells[idx]) > 28 {
+        return;
+    }
+    if pack::elevation(cells[idx]) < 50 {
+        return;
+    }
+    if pack::population(cells[idx]) >= SETTLEMENT_MIN_POP {
+        return;
+    }
+    for node in nodes.iter() {
+        let need = if node.kind == NodeKind::Settlement {
+            spacing + 2
+        } else {
+            spacing
+        };
+        if (node.ax - ax).abs() + (node.az - az).abs() < need {
+            return;
+        }
+    }
+    let mut mass = landmass_id[idx];
+    if mass < 0 {
+        mass = 0;
+        landmass_id[idx] = 0;
+    }
+    let kind = NodeKind::Dungeon;
     let id = feature_hash(&[
         &world_seed.to_string(),
         "node",

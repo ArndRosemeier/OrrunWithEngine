@@ -465,13 +465,13 @@ fn lerp_xz(a: GlobalXZ, b: GlobalXZ, t: f32) -> GlobalXZ {
 }
 
 fn wall_t(plots: &BuildingIndex, a: GlobalXZ, b: GlobalXZ) -> f32 {
-    let a_in = plots.terrain_cap(a).is_some();
+    let a_in = plots.structural_cap(a).is_some();
     let mut lo = 0.0f32;
     let mut hi = 1.0f32;
     for _ in 0..20 {
         let mid = 0.5 * (lo + hi);
         let p = lerp_xz(a, b, mid);
-        if plots.terrain_cap(p).is_some() == a_in {
+        if plots.structural_cap(p).is_some() == a_in {
             lo = mid;
         } else {
             hi = mid;
@@ -496,9 +496,9 @@ fn push_wall_vert(
     let t = wall_t(plots, a, b);
     let p = lerp_xz(a, b, t);
     let cap = plots
-        .terrain_cap(p)
-        .or_else(|| plots.terrain_cap(a))
-        .or_else(|| plots.terrain_cap(b))
+        .structural_cap(p)
+        .or_else(|| plots.structural_cap(a))
+        .or_else(|| plots.structural_cap(b))
         .expect("a split edge belongs to a house wall");
     let (lx, lz) = ((p.x - s.origin.x) as f32, (p.z - s.origin.z) as f32);
     positions.push(Vec3::new(lx, cap - sink_m, lz));
@@ -554,16 +554,16 @@ fn emit_land_tri(
     depth: u8,
 ) {
     let ins = [
-        plots.terrain_cap(pa).is_some(),
-        plots.terrain_cap(pb).is_some(),
-        plots.terrain_cap(pc).is_some(),
+        plots.structural_cap(pa).is_some(),
+        plots.structural_cap(pb).is_some(),
+        plots.structural_cap(pc).is_some(),
     ];
     let n_in = ins.iter().filter(|v| **v).count();
     if n_in == 0 || n_in == 3 {
         if n_in == 0 && depth < 2 {
             let mid = lerp_xz(pa, lerp_xz(pb, pc, 0.5), 0.5);
-            if plots.terrain_cap(mid).is_some() {
-                let cap = plots.terrain_cap(mid).expect("just tested");
+            if plots.structural_cap(mid).is_some() {
+                let cap = plots.structural_cap(mid).expect("just tested");
                 let (lx, lz) = ((mid.x - s.origin.x) as f32, (mid.z - s.origin.z) as f32);
                 let im = positions.len() as u32;
                 positions.push(Vec3::new(lx, cap - sink_m, lz));

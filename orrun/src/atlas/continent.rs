@@ -9,7 +9,7 @@ use thiserror::Error;
 use super::biomes::{self, Biome};
 use super::cardinal;
 use super::classify;
-use super::features::{Dir, EndpointKind, Kind};
+use super::features::{Dir, EndpointKind, Kind, NodeKind};
 use super::hydro::HydroVectors;
 use super::lakes::{self, LakeScratch};
 use super::landmask::{self, collar_cells};
@@ -588,7 +588,11 @@ impl ContinentAtlas {
         }
 
         let mut by_mass: FxHashMap<i32, Vec<i32>> = FxHashMap::default();
-        for node in &self.nodes {
+        for node in self
+            .nodes
+            .iter()
+            .filter(|node| node.kind != NodeKind::Dungeon)
+        {
             by_mass.entry(node.landmass).or_default().push(node.id);
         }
 
@@ -615,11 +619,11 @@ impl ContinentAtlas {
             }
         }
 
+        let road_node_count: usize = by_mass.values().map(Vec::len).sum();
         let min_nodes = 8.max(self.size / 20);
-        if self.nodes.len() < min_nodes {
+        if road_node_count < min_nodes {
             errors.push(format!(
-                "too few road nodes ({} < {min_nodes})",
-                self.nodes.len()
+                "too few road nodes ({road_node_count} < {min_nodes})"
             ));
         }
         let mut expected_primary_edges = 0;
@@ -634,7 +638,7 @@ impl ContinentAtlas {
                 self.primary_road_edges.len()
             ));
         }
-        let min_road_cells = 24.max(self.nodes.len() * 4);
+        let min_road_cells = 24.max(road_node_count * 4);
         if self.road_links.len() < min_road_cells {
             errors.push(format!(
                 "road cell coverage starved ({} cells < {min_road_cells})",

@@ -59,9 +59,15 @@ pub fn build_roads(
         .filter(|n| n.kind == NodeKind::Settlement)
         .map(|n| n.cell)
         .collect();
+    let dungeons: FxHashSet<i32> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .map(|n| n.cell)
+        .collect();
 
     let mut road_serial = 0i32;
     for (_mass, mut indices) in by_mass {
+        indices.retain(|&i| nodes[i].kind != NodeKind::Dungeon);
         if indices.len() < 2 {
             continue;
         }
@@ -109,6 +115,7 @@ pub fn build_roads(
                 elev_code,
                 &river_adjacent,
                 &channel_mask,
+                &dungeons,
                 a,
                 b,
                 RoadClass::Primary,
@@ -154,6 +161,7 @@ pub fn build_roads(
                     elev_code,
                     &river_adjacent,
                     &channel_mask,
+                    &dungeons,
                     ni,
                     nj,
                     RoadClass::Secondary,
@@ -239,6 +247,7 @@ fn route_and_stamp_road(
     elev_code: &[u8],
     river_adjacent: &[u8],
     river_channel: &[u8],
+    dungeons: &FxHashSet<i32>,
     a: &GraphNode,
     b: &GraphNode,
     road_class: RoadClass,
@@ -252,11 +261,12 @@ fn route_and_stamp_road(
         elev_code,
         river_adjacent,
         river_channel,
+        dungeons,
         a.cell,
         b.cell,
     );
     if path.len() < 2 {
-        path = road_bresenham(size, cells, a.ax, a.az, b.ax, b.az);
+        path = road_bresenham(size, cells, dungeons, a.ax, a.az, b.ax, b.az);
     }
     if path.len() < 2 {
         return false;
@@ -300,6 +310,7 @@ pub fn road_astar(
     elev_code: &[u8],
     river_adjacent: &[u8],
     river_channel: &[u8],
+    forbidden: &FxHashSet<i32>,
     start: i32,
     goal: i32,
 ) -> Vec<i32> {
@@ -350,7 +361,7 @@ pub fn road_astar(
             }
             let nb = nz * size as i32 + nx;
             let nbu = nb as usize;
-            if closed[nbu] {
+            if closed[nbu] || forbidden.contains(&nb) {
                 continue;
             }
             let cell_word = cells[nbu];
@@ -396,7 +407,15 @@ fn reconstruct(came: &[i32], mut current: i32) -> Vec<i32> {
     path
 }
 
-fn road_bresenham(size: usize, cells: &[i32], ax0: i32, az0: i32, ax1: i32, az1: i32) -> Vec<i32> {
+fn road_bresenham(
+    size: usize,
+    cells: &[i32],
+    forbidden: &FxHashSet<i32>,
+    ax0: i32,
+    az0: i32,
+    ax1: i32,
+    az1: i32,
+) -> Vec<i32> {
     let mut path = Vec::new();
     let mut x = ax0;
     let mut z = az0;
@@ -410,7 +429,7 @@ fn road_bresenham(size: usize, cells: &[i32], ax0: i32, az0: i32, ax1: i32, az1:
             return Vec::new();
         }
         let idx = z as usize * size + x as usize;
-        if pack::biome(cells[idx]) == Biome::Ocean {
+        if pack::biome(cells[idx]) == Biome::Ocean || forbidden.contains(&(idx as i32)) {
             return Vec::new();
         }
         path.push(idx as i32);

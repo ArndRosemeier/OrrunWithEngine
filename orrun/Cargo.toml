@@ -36,6 +36,7 @@ path = "src/bin/pond_map.rs"
 [dependencies]
 engine = { workspace = true }
 modular = { workspace = true }
+dungeon_kit = { path = "../../Modular/examples/dungeon_kit" }
 glam = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
