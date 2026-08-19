@@ -395,6 +395,20 @@ impl WorldSession {
         self.combat.lock
     }
 
+    /// Lock tell inspect: name + current HP. None if unlocked or name/hp unset.
+    pub fn lock_name_hp(&self) -> Option<(&str, f64)> {
+        let id = self.combat.lock?;
+        let h = self.combat.hostiles.iter().find(|h| h.idx == id)?;
+        if h.name.is_empty() {
+            return None;
+        }
+        Some((h.name.as_str(), h.hp))
+    }
+
+    pub fn fixture_mesh_visible(&self, world: &World) -> bool {
+        self.combat_layer.mesh_visible(world)
+    }
+
     pub fn first_auto_hit(&self) -> Option<i32> {
         self.combat_layer.first_auto()
     }
@@ -407,8 +421,9 @@ impl WorldSession {
         WALK_SPEED
     }
 
-    /// Next world tick reseats the L1 wolf line on the current facing.
-    pub fn rearm_combat_fixtures(&mut self) {
+    /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
+    pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
         self.combat_layer.rearm();
     }
 
@@ -1152,6 +1167,22 @@ impl WorldSession {
                     facing.x as f64,
                     facing.z as f64,
                 );
+                let feet: Vec<f64> = self
+                    .combat
+                    .hostiles
+                    .iter()
+                    .map(|h| {
+                        self.contact_height(GlobalXZ::at(h.x, h.z))
+                            .map(|g| (g + FOOT_CLEARANCE_M) as f64)
+                            .unwrap_or(player.position.y)
+                    })
+                    .collect();
+                self.combat_layer.spawn_wolf_meshes(
+                    world,
+                    &mut self.combat,
+                    &feet,
+                    player.yaw_degrees,
+                )?;
             }
         }
         if input.tab || (input.capture_look && world.pointer_lock()) {

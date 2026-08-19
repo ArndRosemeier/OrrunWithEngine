@@ -211,6 +211,10 @@ pub struct WorldHostile {
     pub stun_s: f64,
     pub slow_s: f64,
     pub root_s: f64,
+    /// Display name for the lock tell. Fixture wolves use "wolf-spider".
+    pub name: String,
+    /// Visible body entity, if the fixture mesh has been spawned.
+    pub entity: Option<engine::world::EntityId>,
 }
 
 #[derive(Clone, Debug)]

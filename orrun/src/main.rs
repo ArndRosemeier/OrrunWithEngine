@@ -1672,6 +1672,17 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                                 .color(Color32::from_rgb(210, 168, 128)),
                         );
                     }
+                    if let Some(id) = session.lock_id() {
+                        if let Some(hostile) = session.combat().hostiles.iter().find(|h| h.idx == id) {
+                            ui.label(egui::RichText::new(format!(
+                                "{}  {:.0}/{:.0}",
+                                hostile.name,
+                                hostile.hp,
+                                hostile.max_hp,
+                            )).size(14.0));
+                        }
+                    }
                 });
         });
 }
+

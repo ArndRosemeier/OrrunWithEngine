@@ -6,7 +6,7 @@
 //! not as an absolute setLook.
 //!
 //! Usage:
-//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls`
+//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls,combat_body`
 
 use std::fs;
 use std::path::PathBuf;
@@ -59,7 +59,10 @@ fn main() {
         "standing.json",
         "dungeon_fill.json",
         "combat.json",
+        "combat.png",
         "controls.json",
+        "combat_body.json",
+        "combat_body.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -112,6 +115,7 @@ fn main() {
         request,
         sea,
         combat_tab_sent: false,
+        combat_shot_sent: false,
         controls_stage: ControlsStage::Tab,
     };
 
@@ -282,6 +286,7 @@ enum Phase {
     BindForceWalk,
     BindWrite,
     CombatLive,
+    CombatBodyLive,
     ControlsLive,
     NextHook,
     Done,
@@ -320,6 +325,7 @@ struct Driver {
     request: WorldEntryRequest,
     sea: f32,
     combat_tab_sent: bool,
+    combat_shot_sent: bool,
     controls_stage: ControlsStage,
 }
 
@@ -413,7 +419,7 @@ impl Driver {
                 }
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
-            Phase::CombatLive => {
+            Phase::CombatLive | Phase::CombatBodyLive => {
                 if !self.combat_tab_sent {
                     input.tab = true;
                 }
@@ -518,6 +524,7 @@ impl Driver {
             Phase::BindForceWalk => self.tick_force_walk(world, frame),
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
+            Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::NextHook => {
                 self.hook_i += 1;
@@ -542,6 +549,7 @@ impl Driver {
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
             "combat" => self.start_combat(world, frame),
+            "combat_body" => self.start_combat_body(world, frame),
             "controls" => self.start_controls(world, frame),
             "faction_overlay" => {
                 self.write_json(&name, json!({ "status": "absent" }));
@@ -1215,6 +1223,86 @@ impl Driver {
         .expect("report.json");
     }
 
+
+    fn start_combat_body(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_combat_fixtures(world);
+        self.combat_tab_sent = false;
+        self.phase = Phase::CombatBodyLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_body(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_body: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(pos) = self.session.player_position() {
+            if !self.session.stream().required_ready(pos.horizontal()) {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_body: required_ready stayed false");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        if !self.combat_tab_sent {
+            self.combat_tab_sent = true;
+        }
+        self.aim_pitch(HORIZON_PITCH);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if !pitch_near(pitch, HORIZON_PITCH) {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current(&format!(
+                    "combat_body: horizon look failed, pitch={pitch} (want {HORIZON_PITCH}, not floor)"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_body: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let mesh_visible = self.session.fixture_mesh_visible(world);
+        if !mesh_visible {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_body: wolf mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        // Let the wolf body land in the GPU view (horizon/eye, not floor).
+        if frame.time - self.phase_t0 < 0.45 {
+            return;
+        }
+        self.write_json(
+            "combat_body",
+            json!({
+                "status": "ok",
+                "name": lock_name,
+                "lock_name": lock_name,
+                "hp": lock_hp,
+                "mesh_visible": true,
+                "mesh": "fauna/wolf/wolf.gltf",
+                "mesh_note": "catalog has wolf, not spider",
+                "horizon": true,
+                "look_down": false,
+                "shot": "combat_body.png",
+            }),
+        );
+        self.ok_hook("combat_body");
+        world.mark_ready();
+        self.queue_shot(world, frame, "combat_body");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
         match orrun::combat::fixture_l1_martial_wolf() {
             Ok(fight) => {
@@ -1248,8 +1336,9 @@ impl Driver {
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                self.session.rearm_combat_fixtures();
+                self.session.rearm_combat_fixtures(world);
                 self.combat_tab_sent = false;
+                self.combat_shot_sent = false;
                 self.phase = Phase::CombatLive;
                 self.phase_t0 = frame.time;
             }
@@ -1263,38 +1352,74 @@ impl Driver {
     fn tick_combat_live(&mut self, world: &mut World, frame: &Frame) {
         if !self.combat_tab_sent {
             self.combat_tab_sent = true;
+            return;
         }
-        let walk = self.session.combat_walk_speed();
-        let live = self.session.first_auto_hit();
-        if live == Some(11) && (walk - 4.5).abs() <= 1e-4 {
-            let fight = orrun::combat::fixture_l1_martial_wolf().expect("sim inspect");
+        if !self.combat_shot_sent {
+            if self.session.lock_id().is_none() {
+                if frame.time - self.phase_t0 > 5.0 {
+                    self.fail_current("combat: lock unset after Tab");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            let Some((name, hp)) = self.session.lock_name_hp() else {
+                if frame.time - self.phase_t0 > 5.0 {
+                    self.fail_current("combat: lock name/hp unset after Tab");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            };
+            let name = name.to_string();
+            self.aim_pitch(HORIZON_PITCH);
+            let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+            if !pitch_near(pitch, HORIZON_PITCH) {
+                if frame.time - self.phase_t0 > 5.0 {
+                    self.fail_current("combat: horizon look failed before combat.png");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            if !self.session.fixture_mesh_visible(world) {
+                if frame.time - self.phase_t0 > 5.0 {
+                    self.fail_current("combat: wolf meshes not visible");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            if self.session.first_auto_hit().is_some() {
+                self.fail_current("combat: first auto landed before combat.png");
+                self.advance_after_fail(world, frame);
+                return;
+            }
+            let hp_max = self
+                .session
+                .combat()
+                .hostiles
+                .iter()
+                .find(|h| Some(h.idx) == self.session.lock_id())
+                .map(|h| h.max_hp)
+                .unwrap_or(hp);
             self.write_json(
                 "combat",
                 json!({
                     "status": "ok",
-                    "scenario_id": "1_l1_martial_1wolf",
-                    "winner": fight.get("winner"),
-                    "time_to_kill_s": fight.get("time_to_kill_s"),
-                    "time_to_die_s": fight.get("time_to_die_s"),
-                    "hp_remaining": fight.get("hp_remaining"),
-                    "hp_max": fight.get("hp_max"),
-                    "hp_pct": fight.get("hp_pct"),
-                    "mana_spent": fight.get("mana_spent"),
-                    "min_mana": fight.get("min_mana"),
-                    "mana_decision": fight.get("mana_decision"),
-                    "lock": fight.get("lock"),
-                    "player_sprinted": fight.get("player_sprinted"),
-                    "used_pin_or_bind": fight.get("used_pin_or_bind"),
-                    "damage_taken": fight.get("damage_taken"),
-                    "swings": fight.get("swings"),
-                    "spells_used": fight.get("spells_used"),
-                    "band_pass": fight.get("band_pass"),
-                    "oneshot": fight.get("oneshot"),
-                    "first_mitigated_auto": 11,
-                    "live_first_auto": live,
-                    "combat_walk_mps": walk,
+                    "lock": self.session.lock_id(),
+                    "name": name,
+                    "hp": hp,
+                    "hp_max": hp_max,
+                    "shot": "combat.png",
+                    "first_auto_before_shot": self.session.first_auto_hit(),
                 }),
             );
+            self.combat_shot_sent = true;
+            world.mark_ready();
+            self.queue_shot(world, frame, "combat");
+            return;
+        }
+        let walk = self.session.combat_walk_speed();
+        let live = self.session.first_auto_hit();
+        if live == Some(11) && (walk - 4.5).abs() <= 1e-4 {
+            // combat.json was written at screenshot time (lock + wolf-spider 70/70).
             self.ok_hook("combat");
             self.phase = Phase::NextHook;
             self.phase_t0 = frame.time;
@@ -1395,7 +1520,7 @@ impl Driver {
             return;
         }
         self.session.set_key_binds(binds);
-        self.session.rearm_combat_fixtures();
+        self.session.rearm_combat_fixtures(world);
         self.controls_stage = ControlsStage::Tab;
         self.phase = Phase::ControlsLive;
         self.phase_t0 = frame.time;
