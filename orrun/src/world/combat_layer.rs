@@ -100,9 +100,10 @@ impl CombatLayer {
                 .yaw_deg(yaw)?
                 .scale(1.0)?;
             let id = world.spawn_animated_shared(model.clone(), place)?;
-            world.play_animation(id, "Idle")?;
-            world.set_animation_speed(id, 0.65)?;
-            h.name = "Wolf".into();
+            if model.find_clip("Idle").is_some() {
+                world.play_animation(id, "Idle")?;
+                world.set_animation_speed(id, 0.65)?;
+            }
             h.entity = Some(id);
             self.mesh_ids.push(id);
         }

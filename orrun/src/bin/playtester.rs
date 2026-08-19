@@ -433,6 +433,22 @@ impl Driver {
                     }
                 } else if self.session.lock_id().is_none() {
                     input.tab = true;
+                } else if self.combat_shot_sent {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        combat_melee_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.35 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                        }
+                    }
+                    if let Some((eye, target)) = wolf_line_look(&self.session) {
+                        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+                        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+                        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+                        input.yaw_delta_degrees = dyaw;
+                        input.pitch_delta_degrees = dpitch;
+                    }
                 }
             }
             Phase::CombatBodyLive => {
@@ -1285,7 +1301,7 @@ impl Driver {
             }
             return;
         };
-        if lock_name != "wolf-spider" || lock_hp <= 0.0 {
+        if lock_name != "Wolf" || lock_hp <= 0.0 {
             self.fail_current(&format!(
                 "combat_body: lock want name Wolf + HP>0, got {lock_name} hp={lock_hp}"
             ));
@@ -1473,11 +1489,12 @@ impl Driver {
             }
             return;
         }
-        if self.session.first_auto_hit().is_some() {
+        if !self.combat_shot_sent && self.session.first_auto_hit().is_some() {
             self.fail_current("combat: first auto landed before combat.png");
             self.advance_after_fail(world, frame);
             return;
         }
+        if !self.combat_shot_sent {
         let Some((name, hp)) = self.session.lock_name_hp() else {
             if frame.time - self.phase_t0 > 5.0 {
                 self.fail_current("combat: lock name/hp unset after Tab");
@@ -1512,10 +1529,25 @@ impl Driver {
                 "first_auto_before_shot": self.session.first_auto_hit(),
             }),
         );
-        self.ok_hook("combat");
+        self.combat_shot_sent = true;
         world.mark_ready();
         self.queue_shot(world, frame, "combat");
-        self.phase = Phase::NextHook;
+        return;
+        }
+        let walk = self.session.combat_walk_speed();
+        let live = self.session.first_auto_hit();
+        if live == Some(11) && (walk - 4.5).abs() <= 1e-4 {
+            self.ok_hook("combat");
+            self.phase = Phase::NextHook;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > 20.0 {
+            self.fail_current(&format!(
+                "live lock+auto want first mitigated 11, got {live:?}; walk {walk}"
+            ));
+            self.advance_after_fail(world, frame);
+        }
     }
 
     fn aim_at_wolf_line(&mut self) {
@@ -1927,6 +1959,23 @@ fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
         a.x - fx * 5.0 + rx * 8.0,
         a.z - fz * 5.0 + rz * 8.0,
     ))
+}
+
+fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    let hs = &session.combat().hostiles;
+    if hs.len() < 3 {
+        return None;
+    }
+    let a = &hs[0];
+    let c = &hs[2];
+    let fx = c.x - a.x;
+    let fz = c.z - a.z;
+    let fl = (fx * fx + fz * fz).sqrt();
+    if fl < 1e-6 {
+        return None;
+    }
+    let (fx, fz) = (fx / fl, fz / fl);
+    Some(GlobalXZ::at(a.x - fx * 2.0, a.z - fz * 2.0))
 }
 
 fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
