@@ -653,6 +653,10 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.mark_t = combat.mark_t;
     out.second_wind_used = combat.second_wind_used;
     out.last_rank_gate = combat.last_rank_gate;
+    out.dead = combat.dead;
+    out.slain_by = combat.slain_by.clone();
+    out.slain_hold_s = combat.slain_hold_s;
+    out.last_incoming = combat.last_incoming.clone();
     out
 }
 

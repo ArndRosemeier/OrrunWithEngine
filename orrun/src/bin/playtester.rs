@@ -451,30 +451,19 @@ impl Driver {
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
             Phase::CombatLive => {
-                // Stay in melee until the first auto, then walk to the side
-                // vantage so the gold lock ring is in combat.png.
+                // Stay in melee until wolves finish the kill. Do not walk to
+                // the side vantage (that is outside 1.8 m reach).
                 if !self.combat_tab_sent {
                     // look only; fixture wolves spawn in melee in front of the player
-                } else if self.session.lock_id().is_none() {
+                } else if self.session.slain_line().is_none() && self.session.lock_id().is_none() {
                     input.tab = true;
-                } else if self.session.first_auto_hit().is_none() || !self.combat_hurt_sent {
+                } else if self.session.slain_line().is_none() {
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
                         combat_melee_stand(&self.session),
                     ) {
                         if pos.horizontal().distance(stand) > 0.35 {
                             input = walk_toward(pos.horizontal(), stand, dt);
-                            input.yaw_delta_degrees = self.pending_yaw_delta;
-                            input.pitch_delta_degrees = self.pending_pitch_delta;
-                        }
-                    }
-                } else if !self.combat_shot_sent {
-                    if let (Some(pos), Some(vantage)) = (
-                        self.session.player_position(),
-                        combat_side_vantage(&self.session),
-                    ) {
-                        if pos.horizontal().distance(vantage) > 0.75 {
-                            input = walk_toward(pos.horizontal(), vantage, dt);
                             input.yaw_delta_degrees = self.pending_yaw_delta;
                             input.pitch_delta_degrees = self.pending_pitch_delta;
                         }
@@ -1476,6 +1465,83 @@ impl Driver {
             }
             return;
         }
+        if self.combat_hurt_sent {
+            if !self.combat_death_sent {
+                if self.session.slain_line().is_none() {
+                    self.aim_at_wolf_line();
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat: wolves never finished the kill");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                if self.session.swings_stopped() || self.session.player_hp() <= 0.0 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat: slain hold never resolved to shrine");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                self.aim_pitch(HORIZON_PITCH);
+                let Some(here) = self.session.player_position() else {
+                    return;
+                };
+                if let Some(place) = self.session.last_shrine() {
+                    if here.horizontal().distance(place.position.horizontal()) > 2.5 {
+                        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                            self.fail_current("combat: death did not reach shrine");
+                            self.advance_after_fail(world, frame);
+                        }
+                        return;
+                    }
+                }
+                let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+                let still_fighting = self.session.lock_id().is_some()
+                    || self.session.lock_name_hp().is_some()
+                    || self.session.lock_ring_visible(world)
+                    || self.session.fixture_mesh_visible(world);
+                if still_fighting
+                    || self.session.slain_line().is_none()
+                    || !self.session.is_shaken()
+                    || !pitch_near(pitch, HORIZON_PITCH)
+                {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat: death shot still locked or missing slain/shaken");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                let shrine = self.session.last_shrine();
+                let chipped = self.incoming_hp.unwrap_or(self.session.player_hp());
+                self.write_json(
+                    "combat",
+                    json!({
+                        "status": "ok",
+                        "shot": "hurt.png",
+                        "slain_shot": "slain.png",
+                        "player_hp": chipped,
+                        "respawn_hp": self.session.player_hp(),
+                        "player_hp_max": self.session.player_hp_max(),
+                        "incoming_hit": true,
+                        "hurt_sfx": "hurt.wav",
+                        "dead": false,
+                        "slain": self.session.slain_line(),
+                        "shaken": self.session.is_shaken(),
+                        "shaken_outgoing": 0.90,
+                        "swings_stopped": self.session.swings_stopped(),
+                        "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
+                    }),
+                );
+                self.combat_death_sent = true;
+                self.combat_shot_sent = true;
+                self.ok_hook("combat");
+                world.mark_ready();
+                self.queue_shot(world, frame, "slain");
+                self.phase = Phase::NextHook;
+                self.phase_t0 = frame.time;
+            }
+            return;
+        }
         if !self.session.fixture_mesh_visible(world) {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat: wolf meshes not visible");
@@ -1618,49 +1684,6 @@ impl Driver {
             self.combat_hurt_sent = true;
             world.mark_ready();
             self.queue_shot(world, frame, "hurt");
-            return;
-        }
-        if !self.combat_death_sent {
-            if self.session.player_hp() > 0.0 && !self.session.swings_stopped() {
-                self.session.combat_mut().player.resources.hp = 0.0;
-                self.session.combat_mut().dead = true;
-                if self.session.combat().slain_by.is_none() {
-                    self.session.combat_mut().slain_by = Some("wolf-spider".into());
-                }
-            }
-            if !self.session.swings_stopped() || self.session.slain_line().is_none() || !self.session.is_shaken() {
-                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                    self.fail_current("combat: death did not slain/shrine/shaken");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            }
-            let shrine = self.session.last_shrine();
-            let chipped = self.incoming_hp.unwrap_or(self.session.player_hp());
-            self.write_json(
-                "combat",
-                json!({
-                    "status": "ok",
-                    "shot": "hurt.png",
-                    "slain_shot": "slain.png",
-                    "player_hp": chipped,
-                    "player_hp_max": self.session.player_hp_max(),
-                    "incoming_hit": true,
-                    "hurt_sfx": "hurt.wav",
-                    "dead": true,
-                    "slain": self.session.slain_line(),
-                    "shaken": self.session.is_shaken(),
-                    "swings_stopped": self.session.swings_stopped(),
-                    "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
-                }),
-            );
-            self.combat_death_sent = true;
-            self.combat_shot_sent = true;
-            self.ok_hook("combat");
-            world.mark_ready();
-            self.queue_shot(world, frame, "slain");
-            self.phase = Phase::NextHook;
-            self.phase_t0 = frame.time;
             return;
         }
     }
@@ -2090,7 +2113,8 @@ fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
         return None;
     }
     let (fx, fz) = (fx / fl, fz / fl);
-    Some(GlobalXZ::at(a.x - fx * 2.0, a.z - fz * 2.0))
+    // 1.2 m back: inside wolf reach (1.8 m). 2.0 m was just outside it.
+    Some(GlobalXZ::at(a.x - fx * 1.2, a.z - fz * 1.2))
 }
 
 fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
@@ -2186,11 +2210,24 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                     let (pip_rect, _) =
                         ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
                     ui.painter().rect_filled(pip_rect, 2.0, pip);
-                    if let Some((name, mob_hp)) = session.lock_name_hp() {
+                    if let Some(slain) = session.slain_line() {
+                        ui.label(
+                            egui::RichText::new(slain)
+                                .size(20.0)
+                                .color(Color32::from_rgb(230, 70, 70)),
+                        );
+                    } else if let Some((name, mob_hp)) = session.lock_name_hp() {
                         ui.label(
                             egui::RichText::new(format!("{name}  {mob_hp:.0}"))
                                 .size(16.0)
                                 .color(Color32::from_rgb(240, 210, 80)),
+                        );
+                    }
+                    if session.is_shaken() {
+                        ui.label(
+                            egui::RichText::new("Shaken")
+                                .size(16.0)
+                                .color(Color32::from_rgb(200, 160, 80)),
                         );
                     }
                 });

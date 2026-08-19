@@ -93,6 +93,8 @@ pub const THREAT_DMG: f64 = 1.0;
 pub const THREAT_HEAL: f64 = 0.5;
 pub const SHAKEN_DMG: f64 = 0.90;
 pub const SHAKEN_S: f64 = 300.0;
+/// Visible slain beat before shrine teleport.
+pub const SLAIN_HOLD_S: f64 = 2.0;
 pub const RANK5_WEAPON: f64 = 1.10;
 pub const RANK10_SPELL: f64 = 1.15;
 

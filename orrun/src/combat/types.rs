@@ -252,6 +252,7 @@ pub struct WorldCombat {
     pub last_rank_gate: Option<crate::controls::RankGate>,
     pub dead: bool,
     pub slain_by: Option<String>,
+    pub slain_hold_s: f64,
     pub last_incoming: Option<IncomingHit>,
 }
 
@@ -280,6 +281,7 @@ impl WorldCombat {
             last_rank_gate: None,
             dead: false,
             slain_by: None,
+            slain_hold_s: 0.0,
             last_incoming: None,
         }
     }
@@ -317,6 +319,17 @@ impl WorldCombat {
         let ids = tab_candidates(player_x, player_z, facing_x, facing_z, &self.hostile_pairs());
         self.lock = ids.first().copied();
         self.cycle = ids;
+    }
+
+    /// After the slain hold: full resources, Shaken live, swings can start again.
+    pub fn finish_death_respawn(&mut self) {
+        self.player.shaken = Some(Shaken::from_death());
+        self.player.resources.hp = self.player.resources.hp_max;
+        self.player.resources.mana = self.player.resources.mana_max;
+        self.lock = None;
+        self.auto_cd = MELEE_SWING_S;
+        self.dead = false;
+        self.slain_hold_s = 0.0;
     }
 
     /// Melee auto only if lock is in 2.8 m and 120° cone. Uses sim melee_raw.
@@ -415,9 +428,70 @@ impl WorldCombat {
                 self.lock = None;
                 self.auto_cd = 999.0;
                 self.slain_by = Some(h.name.clone());
+                self.slain_hold_s = SLAIN_HOLD_S;
                 break;
             }
         }
         last
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_wolf(dmg: i32) -> WorldHostile {
+        WorldHostile {
+            idx: 0,
+            x: 1.0,
+            z: 0.0,
+            hp: 70.0,
+            max_hp: 70.0,
+            armor: 8,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: "wolf-spider".into(),
+            entity: None,
+            damage: dmg,
+            swing_s: 2.0,
+            swing_cd: 0.0,
+            reach_m: 1.8,
+        }
+    }
+
+    #[test]
+    fn incoming_can_kill_and_holds_before_respawn() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        c.hostiles.push(dummy_wolf(80));
+        c.player.resources.hp = 10.0;
+        let hit = c.tick_incoming(0.0, 0.0, 0.1).expect("hit");
+        assert!(hit.killed);
+        assert!(c.dead);
+        assert_eq!(c.slain_by.as_deref(), Some("wolf-spider"));
+        assert!((c.slain_hold_s - SLAIN_HOLD_S).abs() < 1e-9);
+        assert!(c.tick_melee_auto(0.0, 0.0, 1.0, 0.0, 2.0).is_none());
+        assert!(c.tick_incoming(0.0, 0.0, 0.1).is_none());
+    }
+
+    #[test]
+    fn shaken_ticks_and_multiplies_outgoing_after_clear_dead() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        c.hostiles.push(dummy_wolf(10));
+        c.finish_death_respawn();
+        c.lock = Some(0);
+        assert!(!c.dead);
+        assert!(c.player.shaken.is_some());
+        let dealt = c.tick_melee_auto(0.0, 0.0, 1.0, 0.0, 2.0).expect("swing");
+        let raw = c.player.stats.melee_hit(false);
+        let shaken_raw = crate::combat::math::trunc(f64::from(raw) * SHAKEN_DMG);
+        let want = mitigation(f64::from(shaken_raw), c.hostiles[0].armor);
+        let unshaken = mitigation(f64::from(raw), c.hostiles[0].armor);
+        assert_eq!(dealt, want);
+        assert_ne!(dealt, unshaken);
+        c.tick_verbs(0.0, 0.0, 10.0);
+        let left = c.player.shaken.as_ref().unwrap().remaining_s;
+        assert!((left - (SHAKEN_S - 10.0)).abs() < 1e-6);
     }
 }

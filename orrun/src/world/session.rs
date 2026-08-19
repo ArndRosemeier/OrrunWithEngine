@@ -474,7 +474,7 @@ impl WorldSession {
         self.combat_layer.first_auto()
     }
 
-    fn resolve_death(&mut self) {
+    fn resolve_death(&mut self, world: &mut World) {
         let place = self.last_shrine().or_else(|| {
             self.spawn.map(|s| {
                 GlobalPlace::at(s.position()).with_yaw_deg(s.heading().degrees())
@@ -484,13 +484,12 @@ impl WorldSession {
             if let Some(player) = self.player.as_mut() {
                 player.position = place.position;
                 player.yaw_degrees = place.yaw_degrees;
+                player.pitch_degrees = -15.0;
             }
         }
-        self.combat.player.shaken = Some(crate::combat::Shaken::from_death());
-        self.combat.player.resources.hp = self.combat.player.resources.hp_max;
-        self.combat.player.resources.mana = self.combat.player.resources.mana_max;
-        self.combat.lock = None;
-        self.combat.auto_cd = 999.0;
+        self.combat.finish_death_respawn();
+        self.combat.hostiles.clear();
+        self.combat_layer.despawn_meshes(world);
     }
 
     pub fn last_shrine(&self) -> Option<GlobalPlace> {
@@ -1366,8 +1365,11 @@ impl WorldSession {
                     .unwrap_or(py)
             };
             self.combat_layer.present(world, &self.combat, ground_y, input.dt)?;
-            if self.combat.dead && self.combat.player.resources.hp <= 0.0 {
-                self.resolve_death();
+            if self.combat.dead
+                && self.combat.player.resources.hp <= 0.0
+                && self.combat.slain_hold_s <= 0.0
+            {
+                self.resolve_death(world);
             }
             if let Some(d) = self.dungeons.as_ref() {
                 if let Some(place) = d.shrine() {

@@ -188,6 +188,15 @@ impl WorldCombat {
         if dt <= 0.0 {
             return;
         }
+        if self.slain_hold_s > 0.0 {
+            self.slain_hold_s = (self.slain_hold_s - dt).max(0.0);
+        }
+        if let Some(shaken) = &mut self.player.shaken {
+            shaken.remaining_s = (shaken.remaining_s - dt).max(0.0);
+        }
+        if self.player.shaken.as_ref().is_some_and(|s| s.remaining_s <= 0.0) {
+            self.player.shaken = None;
+        }
         for v in self.cds.values_mut() {
             *v = (*v - dt).max(0.0);
         }

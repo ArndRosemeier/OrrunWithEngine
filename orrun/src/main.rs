@@ -1726,6 +1726,13 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                                 .color(Color32::from_rgb(230, 70, 70)),
                         );
                     }
+                    if session.is_shaken() {
+                        ui.label(
+                            egui::RichText::new("Shaken")
+                                .size(16.0)
+                                .color(Color32::from_rgb(200, 160, 80)),
+                        );
+                    }
                     ui.add(
                         egui::ProgressBar::new(mana_frac)
                             .fill(Color32::from_rgb(48, 120, 210))
