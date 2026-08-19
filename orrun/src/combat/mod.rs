@@ -3,6 +3,7 @@
 //! One formula set. The `combat_sim` bin is a thin CLI over this crate.
 
 pub mod lock;
+pub mod log;
 pub mod math;
 pub mod sheets;
 pub mod sim;
@@ -26,6 +27,7 @@ pub use types::{
     WorldCombat, WorldHostile,
 };
 pub use verbs::CombatVerb;
+pub use log::CombatLog;
 
 /// Published L1 Martial vs 1 wolf fixture used by playtester `combat`.
 pub fn fixture_l1_martial_wolf() -> Result<serde_json::Value, String> {

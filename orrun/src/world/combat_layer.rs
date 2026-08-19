@@ -152,6 +152,11 @@ impl CombatLayer {
         std::mem::take(&mut self.pending_sfx)
     }
 
+    pub fn log_potion(&self, combat: &mut WorldCombat) {
+        let heal = combat.last_potion_heal;
+        combat.log.push(format!("You drink a potion for {heal}"));
+    }
+
     pub fn rearm(&mut self) {
         self.fixture = false;
         self.first_auto = None;
@@ -368,6 +373,7 @@ impl CombatLayer {
         while self.accum_s + 1e-12 >= TICK {
             self.accum_s -= TICK;
             combat.tick_verbs(player_x, player_z, TICK);
+            let strike = combat.strike_armed;
             if let Some(dealt) =
                 combat.tick_melee_auto(player_x, player_z, facing_x, facing_z, TICK)
             {
@@ -381,11 +387,33 @@ impl CombatLayer {
                 self.pending_sfx.push(CombatSfx::Hit);
                 self.pending_flinch = true;
                 just = Some(dealt);
+                let name = combat
+                    .lock
+                    .and_then(|id| {
+                        combat
+                            .hostiles
+                            .iter()
+                            .find(|h| h.idx == id)
+                            .map(|h| h.name.clone())
+                    })
+                    .or_else(|| combat.hostiles.first().map(|h| h.name.clone()))
+                    .unwrap_or_else(|| "wolf-spider".into());
+                if strike {
+                    combat.log.push(format!("You Strike {name} for {dealt}"));
+                } else {
+                    combat.log.push(format!("You hit {name} for {dealt}"));
+                }
             }
-            if combat.tick_incoming(player_x, player_z, TICK).is_some() {
+            if let Some(hit) = combat.tick_incoming(player_x, player_z, TICK) {
                 self.incoming_hit = true;
                 self.hurt_flash_s = 0.15;
                 self.pending_sfx.push(CombatSfx::Hurt);
+                combat
+                    .log
+                    .push(format!("{} hits you for {}", hit.by, hit.dealt));
+                if hit.killed {
+                    combat.log.push("You are slain");
+                }
             }
         }
         just
@@ -657,7 +685,7 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.slain_by = combat.slain_by.clone();
     out.slain_hold_s = combat.slain_hold_s;
     out.last_incoming = combat.last_incoming.clone();
-    out.combat_log = combat.combat_log.clone();
+    out.log = combat.log.clone();
     out
 }
 
@@ -855,5 +883,31 @@ mod tests {
         let mesh = lock_ring_mesh().expect("ring mesh");
         assert!(mesh.point_count() > 32);
         assert!(mesh.face_count() > 32);
+    }
+
+    #[test]
+    fn tick_pushes_outgoing_and_incoming_log_lines() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(
+            lines.iter().any(|l| l.starts_with("You hit wolf-spider for ")),
+            "{lines:?}"
+        );
+        combat.player.resources.hp = 5.0;
+        for h in &mut combat.hostiles {
+            h.swing_cd = 0.0;
+        }
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(
+            lines.iter().any(|l| l.contains(" hits you for ")),
+            "{lines:?}"
+        );
+        layer.log_potion(&mut combat);
+        assert!(combat.log.lines().any(|l| l.starts_with("You drink a potion for ")));
     }
 }

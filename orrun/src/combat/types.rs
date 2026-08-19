@@ -1,7 +1,6 @@
 //! Live combat types. Same numbers as the sim — do not invent a second formula set.
 
-use std::collections::VecDeque;
-
+use super::log::CombatLog;
 use super::math::*;
 use super::sheets::{player_stats, PlayerStats};
 
@@ -256,7 +255,7 @@ pub struct WorldCombat {
     pub slain_by: Option<String>,
     pub slain_hold_s: f64,
     pub last_incoming: Option<IncomingHit>,
-    pub combat_log: VecDeque<String>,
+    pub log: CombatLog,
 }
 
 impl WorldCombat {
@@ -286,7 +285,7 @@ impl WorldCombat {
             slain_by: None,
             slain_hold_s: 0.0,
             last_incoming: None,
-            combat_log: VecDeque::new(),
+            log: CombatLog::new(),
         }
     }
 
@@ -337,12 +336,6 @@ impl WorldCombat {
         self.slain_by = None;
     }
 
-    pub fn push_log(&mut self, line: impl Into<String>) {
-        self.combat_log.push_back(line.into());
-        while self.combat_log.len() > 8 {
-            self.combat_log.pop_front();
-        }
-    }
 
     pub fn outgoing_raw(&self, raw: i32) -> i32 {
         let mut raw = raw;
@@ -397,9 +390,7 @@ impl WorldCombat {
         raw = self.outgoing_raw(raw);
         let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
         self.last_auto_dealt = dealt;
-        let name = self.hostiles[hi].name.clone();
         self.hostiles[hi].hp -= f64::from(dealt);
-        self.push_log(format!("You hit {name} for {dealt}."));
         if self.hostiles[hi].hp <= 0.0 {
             self.hostiles[hi].hp = 0.0;
             self.hostiles[hi].alive = false;
@@ -420,7 +411,6 @@ impl WorldCombat {
         }
         let grit = self.player.stats.attrs.grit;
         let mut last = None;
-        let mut pending = Vec::new();
         for h in &mut self.hostiles {
             if !h.alive || h.stun_s > 0.0 {
                 continue;
@@ -445,19 +435,14 @@ impl WorldCombat {
             };
             self.last_incoming = Some(hit.clone());
             last = Some(hit);
-            pending.push(format!("{} hits you for {}.", h.name, dealt));
             if killed {
                 self.dead = true;
                 self.lock = None;
                 self.auto_cd = 999.0;
                 self.slain_by = Some(h.name.clone());
                 self.slain_hold_s = SLAIN_HOLD_S;
-                pending.push(format!("slain by {}.", h.name));
                 break;
             }
-        }
-        for line in pending {
-            self.push_log(line);
         }
         last
     }
@@ -523,18 +508,10 @@ mod tests {
     }
 
     #[test]
-    fn combat_log_has_outgoing_incoming_and_slain_then_clears_slain_by() {
+    fn slain_by_clears_after_respawn() {
         let mut c = WorldCombat::specialist(1, Discipline::Martial);
-        c.hostiles.push(dummy_wolf(80));
-        c.lock = Some(0);
-        c.tick_melee_auto(0.0, 0.0, 1.0, 0.0, 2.0);
-        assert!(c.combat_log.iter().any(|l| l.starts_with("You hit wolf-spider for ")));
-        c.player.resources.hp = 5.0;
-        c.hostiles[0].swing_cd = 0.0;
-        c.tick_incoming(0.0, 0.0, 0.1);
-        assert!(c.combat_log.iter().any(|l| l.contains(" hits you for ")));
-        assert!(c.combat_log.iter().any(|l| l == "slain by wolf-spider."));
-        assert_eq!(c.slain_by.as_deref(), Some("wolf-spider"));
+        c.slain_by = Some("wolf-spider".into());
+        c.dead = true;
         c.finish_death_respawn();
         assert!(c.slain_by.is_none());
         assert!(!c.dead);

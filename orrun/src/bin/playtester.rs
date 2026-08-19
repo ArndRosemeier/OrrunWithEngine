@@ -391,7 +391,7 @@ impl Driver {
         let paint_combat_hud = matches!(self.phase, Phase::CombatLive)
             || matches!(
                 self.awaiting_shot.as_deref(),
-                Some("combat") | Some("hurt") | Some("slain")
+                Some("combat") | Some("hurt") | Some("slain") | Some("hud")
             );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -400,8 +400,8 @@ impl Driver {
         if let Some(name) = self.awaiting_shot.clone() {
             let path = self.shots.join(format!("{name}.png"));
             if path.is_file() {
-                if name == "hurt" {
-                    let _ = fs::copy(&path, self.shots.join("hud.png"));
+                if name == "hud" {
+                    let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
                 self.awaiting_shot = None;
             } else if frame.time - self.phase_t0 > 8.0 {
@@ -1535,9 +1535,9 @@ impl Driver {
                         "shaken": self.session.is_shaken(),
                         "shaken_outgoing": 0.90,
                         "swings_stopped": self.session.swings_stopped(),
-                        "hotbar": true,
+                        "hotbar_visible": true,
                         "hud_shot": "hud.png",
-                        "log": self.session.combat_log(),
+                        "log_lines": self.session.combat_log(),
                         "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
                     }),
                 );
@@ -1664,7 +1664,7 @@ impl Driver {
             let has_in = log.iter().any(|l| l.contains(" hits you for "));
             if !has_out || !has_in {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                    self.fail_current("combat: log missing outgoing or incoming line");
+                    self.fail_current("combat: log missing a live hit line");
                     self.advance_after_fail(world, frame);
                 }
                 return;
@@ -1697,14 +1697,15 @@ impl Driver {
                     "lock_ring": self.session.lock_ring_visible(world),
                     "swing_whoosh": self.session.swing_whoosh(),
                     "hit_flash": self.session.hit_flash(),
-                    "hotbar": true,
-                    "log": log,
+                    "hotbar_visible": true,
+                    "log_lines": log,
+                    "hud_shot": "hud.png",
                 }),
             );
             self.incoming_hp = Some(self.session.player_hp());
             self.combat_hurt_sent = true;
             world.mark_ready();
-            self.queue_shot(world, frame, "hurt");
+            self.queue_shot(world, frame, "hud");
             return;
         }
     }

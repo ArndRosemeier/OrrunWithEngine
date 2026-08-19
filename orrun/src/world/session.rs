@@ -455,7 +455,7 @@ impl WorldSession {
     }
 
     pub fn combat_log(&self) -> Vec<String> {
-        self.combat.combat_log.iter().cloned().collect()
+        self.combat.log.lines().map(str::to_string).collect()
     }
 
     pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
@@ -1288,13 +1288,16 @@ impl WorldSession {
         }
         for verb in input.actions.iter() {
             let facing = Camera::facing_xz(player.yaw_degrees);
-            self.combat.press_verb(
+            let started = self.combat.press_verb(
                 verb,
                 player.position.x,
                 player.position.z,
                 facing.x as f64,
                 facing.z as f64,
             );
+            if started && verb == crate::controls::Action::Potion {
+                self.combat_layer.log_potion(&mut self.combat);
+            }
         }
         player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);
         player.pitch_degrees = (player.pitch_degrees + input.pitch_delta_degrees)

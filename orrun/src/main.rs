@@ -1750,5 +1750,6 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     ui.painter().rect_filled(pip_rect, 2.0, pip);
                 });
         });
-    hud::draw_hotbar_and_log(&ctx, session.combat(), session.key_binds());
+    hud::draw_hotbar(&ctx, session.combat(), session.key_binds());
+    hud::draw_combat_log(&ctx, session.combat());
 }

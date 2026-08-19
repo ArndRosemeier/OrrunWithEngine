@@ -289,9 +289,7 @@ impl WorldCombat {
                 );
                 let raw = self.outgoing_raw(self.player.stats.bow_hit(kind == "aimed", d));
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
-                let name = self.hostiles[hi].name.clone();
                 self.hostiles[hi].hp -= f64::from(dealt);
-                self.push_log(format!("You hit {name} for {dealt}."));
                 if kind == "pin" {
                     self.hostiles[hi].slow_s = PIN_DUR_S;
                     self.player.used_pin_or_bind = true;
@@ -322,9 +320,7 @@ impl WorldCombat {
                 }
                 let raw = self.outgoing_raw(self.player.stats.ember());
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
-                let name = self.hostiles[hi].name.clone();
                 self.hostiles[hi].hp -= f64::from(dealt);
-                self.push_log(format!("You hit {name} for {dealt}."));
                 if self.hostiles[hi].hp <= 0.0 {
                     self.hostiles[hi].hp = 0.0;
                     self.hostiles[hi].alive = false;

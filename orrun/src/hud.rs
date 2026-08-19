@@ -1,17 +1,27 @@
-//! Visible combat chrome: hotbar + a short always-hit log.
+//! Visible combat chrome: one hotbar row and a short always-hit log.
 
 use engine::egui::{self, Color32, Sense, StrokeKind};
 
 use crate::combat::WorldCombat;
 use crate::controls::{Action, KeyBinds};
 
-const LOG_MAX: usize = 8;
+const HOTBAR: [Action; 9] = [
+    Action::Strike,
+    Action::Bash,
+    Action::AimedShot,
+    Action::Pin,
+    Action::Ember,
+    Action::Bind,
+    Action::Mend,
+    Action::Ward,
+    Action::Potion,
+];
 
-pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
+pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
     let screen = ctx.screen_rect();
-    let slot = 62.0;
+    let slot = 64.0;
     let gap = 6.0;
-    let n = Action::ALL.len() as f32;
+    let n = HOTBAR.len() as f32;
     let bar_w = n * slot + (n - 1.0) * gap;
     let bar_x = ((screen.width() - bar_w) * 0.5).max(12.0);
     let bar_y = screen.height() - slot - 18.0;
@@ -24,8 +34,9 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 let ranks = combat.player.stats.ranks;
-                for action in Action::ALL {
-                    let gated = !action.rank_ok(ranks.martial, ranks.hunt, ranks.arcane);
+                for action in HOTBAR {
+                    let gated = !action.rank_ok(ranks.martial, ranks.hunt, ranks.arcane)
+                        || binds.get(action).is_none();
                     let cd = combat.verb_cd_frac(action);
                     let fill = if gated {
                         Color32::from_rgb(48, 48, 48)
@@ -43,7 +54,7 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
                         let mut cover = rect;
                         cover.set_height(rect.height() * cd);
                         ui.painter()
-                            .rect_filled(cover, 0.0, Color32::from_black_alpha(160));
+                            .rect_filled(cover, 0.0, Color32::from_rgba_unmultiplied(20, 20, 40, 170));
                     }
                     ui.painter().rect_stroke(
                         rect,
@@ -68,14 +79,17 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
                 }
             });
         });
+}
 
-    let lines: Vec<String> = combat.combat_log.iter().rev().take(LOG_MAX).cloned().collect();
-    let lines: Vec<String> = lines.into_iter().rev().collect();
+pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
+    let screen = ctx.screen_rect();
+    let lines: Vec<&str> = combat.log.lines().collect();
     if lines.is_empty() {
         return;
     }
+    let bar_y = screen.height() - 64.0 - 18.0;
     egui::Area::new(egui::Id::new("combat_log"))
-        .fixed_pos(egui::pos2(20.0, bar_y - 8.0 * 22.0 - 16.0))
+        .fixed_pos(egui::pos2(20.0, (bar_y - 8.0 * 22.0 - 16.0).max(12.0)))
         .order(egui::Order::Foreground)
         .interactable(false)
         .show(ctx, |ui| {
@@ -91,4 +105,9 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
                     }
                 });
         });
+}
+
+pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
+    draw_hotbar(ctx, combat, binds);
+    draw_combat_log(ctx, combat);
 }
