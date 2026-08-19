@@ -1,4 +1,4 @@
-//! Press-verb binds. Last assign wins. Esc/E reserved. Q stays strafe.
+//! Press-verb binds. Last assign wins. Esc/E/Q reserved. Q stays strafe.
 
 use engine::{Input, Key};
 use serde::{Deserialize, Serialize};
@@ -102,19 +102,33 @@ impl Action {
     }
 
     /// Rank-gate: the key is a no-op until this rank is known.
+    /// Ember is known at create (need 0): Martial/Hunt use ember_rank 1.00.
     pub fn rank_ok(self, martial: i32, hunt: i32, arcane: i32) -> bool {
+        self.rank_have(martial, hunt, arcane) >= self.rank_need()
+    }
+
+    pub fn rank_need(self) -> i32 {
         match self {
-            Self::Strike => martial >= 1,
-            Self::Bash => martial >= 3,
-            Self::AimedShot => hunt >= 1,
-            Self::Pin => hunt >= 3,
-            Self::Ember => true,
-            Self::Bind => arcane >= 5,
-            Self::Mend => arcane >= 3,
-            Self::Ward => arcane >= 7,
-            Self::Potion => true,
-            Self::Mark => hunt >= 10,
-            Self::SecondWind => martial >= 10,
+            Self::Strike => 1,
+            Self::Bash => 3,
+            Self::AimedShot => 1,
+            Self::Pin => 3,
+            Self::Ember => 0,
+            Self::Bind => 5,
+            Self::Mend => 3,
+            Self::Ward => 7,
+            Self::Potion => 0,
+            Self::Mark => 10,
+            Self::SecondWind => 10,
+        }
+    }
+
+    pub fn rank_have(self, martial: i32, hunt: i32, arcane: i32) -> i32 {
+        match self {
+            Self::Strike | Self::Bash | Self::SecondWind => martial,
+            Self::AimedShot | Self::Pin | Self::Mark => hunt,
+            Self::Bind | Self::Mend | Self::Ward => arcane,
+            Self::Ember | Self::Potion => i32::MAX,
         }
     }
 
@@ -134,6 +148,8 @@ impl std::fmt::Display for Action {
 pub struct RankGate {
     pub action: Action,
     pub blocked: bool,
+    pub have: i32,
+    pub need: i32,
 }
 
 /// Copy-sized set of actions that went down this frame.
@@ -166,17 +182,17 @@ impl PressedActions {
     }
 }
 
-/// Escape is not an engine gameplay [Key]; E is door interact. Neither is rebindable.
-pub const RESERVED: [&str; 2] = ["Escape", "E"];
+/// Escape is not an engine gameplay [Key]; E is door interact; Q is left strafe.
+pub const RESERVED: [&str; 3] = ["Escape", "E", "Q"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReservedKey;
 
 pub fn is_reserved(key: Key) -> bool {
-    key == Key::E
+    key == Key::E || key == Key::Q
 }
 
-pub fn reserved_names() -> [&'static str; 2] {
+pub fn reserved_names() -> [&'static str; 3] {
     RESERVED
 }
 
@@ -439,15 +455,23 @@ mod tests {
         assert_eq!(keys.get(Action::Strike), Some(Key::Digit1));
         assert!(is_reserved(Key::E));
         assert!(resolve(&keys, [Key::E]).is_empty());
-        assert_eq!(RESERVED, ["Escape", "E"]);
+        assert_eq!(RESERVED, ["Escape", "E", "Q"]);
     }
 
     #[test]
     fn q_is_strafe_not_a_default_bind() {
         let keys = KeyBinds::default();
-        assert!(!is_reserved(Key::Q));
+        assert!(is_reserved(Key::Q));
         assert_eq!(keys.action_for(Key::Q), None);
         assert_eq!(keys.get(Action::Potion), Some(Key::R));
+    }
+
+    #[test]
+    fn assign_must_not_steal_q() {
+        let mut keys = KeyBinds::default();
+        assert!(assign(&mut keys, Action::Strike, Key::Q).is_err());
+        assert_eq!(keys.get(Action::Strike), Some(Key::Digit1));
+        assert_eq!(keys.action_for(Key::Q), None);
     }
 
     #[test]
@@ -455,6 +479,9 @@ mod tests {
         assert!(Action::Strike.rank_ok(1, 0, 0));
         assert!(!Action::Bash.rank_ok(1, 0, 0));
         assert!(Action::Ember.rank_ok(1, 0, 0));
+        assert_eq!(Action::Bash.rank_have(1, 0, 0), 1);
+        assert_eq!(Action::Bash.rank_need(), 3);
+        assert_eq!(Action::Ember.rank_need(), 0);
         assert!(!Action::Mark.rank_ok(1, 0, 0));
         assert!(!Action::SecondWind.rank_ok(1, 0, 0));
     }

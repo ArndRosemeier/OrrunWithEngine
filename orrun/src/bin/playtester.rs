@@ -329,6 +329,8 @@ enum ControlsStage {
     Strike,
     WaitHit,
     Bash,
+    Ember,
+    Potion,
 }
 
 impl Driver {
@@ -430,6 +432,18 @@ impl Driver {
                         input.actions = PressedActions::from_actions(&controls::resolve(
                             self.session.key_binds(),
                             [engine::Key::Digit2],
+                        ));
+                    }
+                    ControlsStage::Ember => {
+                        input.actions = PressedActions::from_actions(&controls::resolve(
+                            self.session.key_binds(),
+                            [engine::Key::Digit5],
+                        ));
+                    }
+                    ControlsStage::Potion => {
+                        input.actions = PressedActions::from_actions(&controls::resolve(
+                            self.session.key_binds(),
+                            [engine::Key::R],
                         ));
                     }
                 }
@@ -1341,8 +1355,27 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
+        if controls::resolve(&binds, [engine::Key::Digit5]) != vec![Action::Ember] {
+            self.fail_current("controls: default Ember key 5 is not bound to Ember");
+            self.advance_after_fail(world, frame);
+            return;
+        }
         if controls::resolve(&binds, [engine::Key::R]) != vec![Action::Potion] {
             self.fail_current("controls: potion is R, not Q");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if controls::resolve(&binds, [engine::Key::T]) != vec![Action::Mark]
+            || binds.inspect_map().get("mark") != Some(&serde_json::Value::String("T".into()))
+        {
+            self.fail_current("controls: Mark must be bound to T");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if controls::resolve(&binds, [engine::Key::G]) != vec![Action::SecondWind]
+            || binds.inspect_map().get("second_wind") != Some(&serde_json::Value::String("G".into()))
+        {
+            self.fail_current("controls: SecondWind must be bound to G");
             self.advance_after_fail(world, frame);
             return;
         }
@@ -1353,6 +1386,11 @@ impl Driver {
         }
         if controls::assign(&mut loaded.keys.clone(), Action::Strike, engine::Key::E).is_ok() {
             self.fail_current("controls: E is reserved");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if controls::assign(&mut loaded.keys.clone(), Action::Strike, engine::Key::Q).is_ok() {
+            self.fail_current("controls: Q is reserved (strafe)");
             self.advance_after_fail(world, frame);
             return;
         }
@@ -1413,7 +1451,62 @@ impl Driver {
                     self.advance_after_fail(world, frame);
                     return;
                 }
+                if self.session.combat().cast_kind == Some("bash") {
+                    self.fail_current("controls: Digit2 on L1 Martial must not fire Bash");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                // Ember is known at create. Do not pad ranks.arcane.
+                assert_eq!(
+                    self.session.combat().player.stats.ranks.arcane, 0,
+                    "L1 Martial must keep arcane 0; Ember uses ember_rank 1.00"
+                );
+                self.controls_stage = ControlsStage::Ember;
+            }
+            ControlsStage::Ember => {
+                if !self.session.combat().ember_started {
+                    self.fail_current(
+                        "controls: L1 Martial key 5 must start Ember without padding Arcane",
+                    );
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                if self.session.combat().player.stats.ranks.arcane != 0 {
+                    self.fail_current("controls: Ember hook must not cheat ranks.arcane = 1");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.session.combat_mut().player.resources.hp = 50.0;
+                self.controls_stage = ControlsStage::Potion;
+            }
+            ControlsStage::Potion => {
+                let hp = self.session.combat().player.resources.hp;
+                let potions = self.session.combat().player.potions;
+                let heal = self.session.combat().last_potion_heal;
+                if (hp - 90.0).abs() > 1e-6 || potions != 0 || heal != 40 {
+                    self.fail_current(&format!(
+                        "controls: potion want hp 90 potions 0 heal 40, got hp {hp} potions {potions} heal {heal}"
+                    ));
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
                 let binds = self.session.key_binds().inspect_map();
+                if binds.get("mark") != Some(&serde_json::Value::String("T".into()))
+                    || binds.get("second_wind") != Some(&serde_json::Value::String("G".into()))
+                {
+                    self.fail_current("controls: inspect binds must include mark=T and second_wind=G");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                let gate = self.session.combat().last_rank_gate.expect("bash rank gate");
+                if !gate.blocked || gate.action != Action::Bash || gate.have != 1 || gate.need != 3 {
+                    self.fail_current(&format!(
+                        "controls: rank_gate want bash blocked have=1 need=3, got blocked={} action={:?} have={} need={}",
+                        gate.blocked, gate.action, gate.have, gate.need
+                    ));
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
                 let path = orrun::settings::settings_path().expect("settings path");
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                 let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(json!({}));
@@ -1426,13 +1519,19 @@ impl Driver {
                         "unbound": [],
                         "bible_verbs_missing_bind": [],
                         "settings_json_has_keys": parsed.get("keys").is_some(),
-                        "fired": {"strike": true, "bash": false},
+                        "fired": {"strike": true, "bash": false, "ember": true, "potion": true},
                         "rank_gate": {
                             "action": "bash",
                             "blocked": true,
+                            "have": gate.have,
+                            "need": gate.need,
                         },
                         "used_pin_or_bind": self.session.combat().player.used_pin_or_bind,
                         "strike_first_auto": 16,
+                        "ember_started": true,
+                        "ember_arcane_rank": self.session.combat().player.stats.ranks.arcane,
+                        "potion_hp": hp,
+                        "potion_heal": heal,
                         "potion_key": "R",
                         "q_strafe": true,
                     }),

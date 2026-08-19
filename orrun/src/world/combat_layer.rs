@@ -218,15 +218,16 @@ mod tests {
     }
 
     #[test]
-    fn ember_starts_when_arcane_known() {
+    fn ember_starts_on_l1_martial_without_arcane_rank() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
         combat.lock = Some(0);
-        combat.player.stats.ranks.arcane = 1;
+        assert_eq!(combat.player.stats.ranks.arcane, 0);
         let mana_before = combat.player.resources.mana;
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
         assert!(combat.ember_started);
+        assert_eq!(combat.player.stats.ranks.arcane, 0);
         assert!(combat.player.resources.mana < mana_before);
     }
 

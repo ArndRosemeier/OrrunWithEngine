@@ -42,6 +42,8 @@ impl WorldCombat {
             self.last_rank_gate = Some(RankGate {
                 action: verb,
                 blocked: true,
+                have: verb.rank_have(ranks.martial, ranks.hunt, ranks.arcane),
+                need: verb.rank_need(),
             });
             return false;
         }
