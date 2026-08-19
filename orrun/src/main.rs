@@ -37,6 +37,7 @@ use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
 use orrun::save::{SaveError, SavedStand};
 use orrun::controls::{is_reserved, Action};
+use orrun::hud;
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell,
@@ -1749,4 +1750,5 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     ui.painter().rect_filled(pip_rect, 2.0, pip);
                 });
         });
+    hud::draw_hotbar_and_log(&ctx, session.combat(), session.key_binds());
 }

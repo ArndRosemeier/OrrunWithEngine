@@ -657,6 +657,7 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.slain_by = combat.slain_by.clone();
     out.slain_hold_s = combat.slain_hold_s;
     out.last_incoming = combat.last_incoming.clone();
+    out.combat_log = combat.combat_log.clone();
     out
 }
 

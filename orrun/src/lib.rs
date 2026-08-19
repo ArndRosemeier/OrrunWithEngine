@@ -4,6 +4,7 @@ pub mod atlas;
 pub mod combat;
 pub mod controls;
 pub mod hamlet;
+pub mod hud;
 pub mod save;
 pub mod settings;
 pub mod world;

@@ -454,6 +454,10 @@ impl WorldSession {
         self.combat.player.shaken.as_ref().is_some_and(|s| s.remaining_s > 0.0)
     }
 
+    pub fn combat_log(&self) -> Vec<String> {
+        self.combat.combat_log.iter().cloned().collect()
+    }
+
     pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
         self.combat_layer.take_combat_sfx()
     }

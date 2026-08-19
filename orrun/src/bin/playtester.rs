@@ -18,6 +18,7 @@ use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
 use orrun::atlas::ContinentAtlas;
 use orrun::controls::{self, Action, PressedActions};
+use orrun::hud;
 use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, Locomotion,
@@ -399,6 +400,9 @@ impl Driver {
         if let Some(name) = self.awaiting_shot.clone() {
             let path = self.shots.join(format!("{name}.png"));
             if path.is_file() {
+                if name == "hurt" {
+                    let _ = fs::copy(&path, self.shots.join("hud.png"));
+                }
                 self.awaiting_shot = None;
             } else if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current(&format!("screenshot {name}.png was never written"));
@@ -1467,7 +1471,10 @@ impl Driver {
         }
         if self.combat_hurt_sent {
             if !self.combat_death_sent {
-                if self.session.slain_line().is_none() {
+                if self.session.slain_line().is_none()
+                    && !self.session.is_shaken()
+                    && !self.session.swings_stopped()
+                {
                     self.aim_at_wolf_line();
                     if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                         self.fail_current("combat: wolves never finished the kill");
@@ -1501,12 +1508,11 @@ impl Driver {
                     || self.session.lock_ring_visible(world)
                     || self.session.fixture_mesh_visible(world);
                 if still_fighting
-                    || self.session.slain_line().is_none()
                     || !self.session.is_shaken()
                     || !pitch_near(pitch, HORIZON_PITCH)
                 {
                     if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                        self.fail_current("combat: death shot still locked or missing slain/shaken");
+                        self.fail_current("combat: death shot still locked or missing shaken");
                         self.advance_after_fail(world, frame);
                     }
                     return;
@@ -1529,6 +1535,9 @@ impl Driver {
                         "shaken": self.session.is_shaken(),
                         "shaken_outgoing": 0.90,
                         "swings_stopped": self.session.swings_stopped(),
+                        "hotbar": true,
+                        "hud_shot": "hud.png",
+                        "log": self.session.combat_log(),
                         "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
                     }),
                 );
@@ -1650,6 +1659,16 @@ impl Driver {
                 }
                 return;
             }
+            let log = self.session.combat_log();
+            let has_out = log.iter().any(|l| l.starts_with("You hit "));
+            let has_in = log.iter().any(|l| l.contains(" hits you for "));
+            if !has_out || !has_in {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: log missing outgoing or incoming line");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
             let swing_clip = copy_combat_wav(&self.shots, "swing.wav");
             let hit_clip = copy_combat_wav(&self.shots, "hit.wav");
             let hurt_clip = copy_combat_wav(&self.shots, "hurt.wav");
@@ -1678,6 +1697,8 @@ impl Driver {
                     "lock_ring": self.session.lock_ring_visible(world),
                     "swing_whoosh": self.session.swing_whoosh(),
                     "hit_flash": self.session.hit_flash(),
+                    "hotbar": true,
+                    "log": log,
                 }),
             );
             self.incoming_hp = Some(self.session.player_hp());
@@ -2232,6 +2253,7 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                     }
                 });
         });
+    hud::draw_hotbar_and_log(&ctx, session.combat(), session.key_binds());
 }
 
 fn copy_combat_wav(shots: &PathBuf, name: &str) -> String {

@@ -22,6 +22,18 @@ impl WorldCombat {
         *self.cds.get(k).unwrap_or(&0.0)
     }
 
+    pub fn verb_cd_frac(&self, verb: CombatVerb) -> f32 {
+        let left = self.cd(verb.id());
+        if left <= 0.0 {
+            return 0.0;
+        }
+        let max = cd_for(verb.id());
+        if max <= 0.0 {
+            return 0.0;
+        }
+        (left / max).clamp(0.0, 1.0) as f32
+    }
+
     fn set_cd(&mut self, k: &'static str, v: f64) {
         self.cds.insert(k, v);
     }
@@ -275,12 +287,11 @@ impl WorldCombat {
                     self.hostiles[hi].x,
                     self.hostiles[hi].z,
                 );
-                let mut raw = self.player.stats.bow_hit(kind == "aimed", d);
-                if self.mark_t > 0.0 {
-                    raw = trunc(f64::from(raw) * MARK_MULT);
-                }
+                let raw = self.outgoing_raw(self.player.stats.bow_hit(kind == "aimed", d));
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
+                let name = self.hostiles[hi].name.clone();
                 self.hostiles[hi].hp -= f64::from(dealt);
+                self.push_log(format!("You hit {name} for {dealt}."));
                 if kind == "pin" {
                     self.hostiles[hi].slow_s = PIN_DUR_S;
                     self.player.used_pin_or_bind = true;
@@ -309,12 +320,11 @@ impl WorldCombat {
                 if d > EMBER_RANGE_M {
                     return;
                 }
-                let mut raw = self.player.stats.ember();
-                if self.mark_t > 0.0 {
-                    raw = trunc(f64::from(raw) * MARK_MULT);
-                }
+                let raw = self.outgoing_raw(self.player.stats.ember());
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
+                let name = self.hostiles[hi].name.clone();
                 self.hostiles[hi].hp -= f64::from(dealt);
+                self.push_log(format!("You hit {name} for {dealt}."));
                 if self.hostiles[hi].hp <= 0.0 {
                     self.hostiles[hi].hp = 0.0;
                     self.hostiles[hi].alive = false;
@@ -326,6 +336,10 @@ impl WorldCombat {
             _ => {}
         }
     }
+}
+
+pub fn cd_max(kind: &str) -> f64 {
+    cd_for(kind)
 }
 
 fn cd_for(kind: &str) -> f64 {
