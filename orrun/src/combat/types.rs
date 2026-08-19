@@ -215,6 +215,17 @@ pub struct WorldHostile {
     pub name: String,
     /// Visible body entity, if the fixture mesh has been spawned.
     pub entity: Option<engine::world::EntityId>,
+    pub damage: i32,
+    pub swing_s: f64,
+    pub swing_cd: f64,
+    pub reach_m: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct IncomingHit {
+    pub dealt: i32,
+    pub by: String,
+    pub killed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +250,9 @@ pub struct WorldCombat {
     pub mark_t: f64,
     pub second_wind_used: bool,
     pub last_rank_gate: Option<crate::controls::RankGate>,
+    pub dead: bool,
+    pub slain_by: Option<String>,
+    pub last_incoming: Option<IncomingHit>,
 }
 
 impl WorldCombat {
@@ -264,6 +278,9 @@ impl WorldCombat {
             mark_t: 0.0,
             second_wind_used: false,
             last_rank_gate: None,
+            dead: false,
+            slain_by: None,
+            last_incoming: None,
         }
     }
 
@@ -311,6 +328,9 @@ impl WorldCombat {
         facing_z: f64,
         dt: f64,
     ) -> Option<i32> {
+        if self.dead {
+            return None;
+        }
         if self.player.stats.discipline != Discipline::Martial {
             return None;
         }
@@ -334,6 +354,9 @@ impl WorldCombat {
         }
         let strike = self.strike_armed;
         let mut raw = self.player.stats.melee_hit(strike);
+        if let Some(shaken) = &self.player.shaken {
+            raw = crate::combat::math::trunc(f64::from(raw) * shaken.outgoing_mult());
+        }
         if strike {
             self.strike_armed = false;
         }
@@ -354,5 +377,47 @@ impl WorldCombat {
 
     pub fn in_combat(&self) -> bool {
         self.lock.is_some() || self.hostiles.iter().any(|h| h.alive)
+    }
+
+    /// Mob autos. Same mitigation as the sim. Reach is the sheet reach (1.8 m).
+    pub fn tick_incoming(&mut self, player_x: f64, player_z: f64, dt: f64) -> Option<IncomingHit> {
+        if self.dead || dt <= 0.0 {
+            return None;
+        }
+        let grit = self.player.stats.attrs.grit;
+        let mut last = None;
+        for h in &mut self.hostiles {
+            if !h.alive || h.stun_s > 0.0 {
+                continue;
+            }
+            let dx = player_x - h.x;
+            let dz = player_z - h.z;
+            if (dx * dx + dz * dz).sqrt() > h.reach_m {
+                continue;
+            }
+            h.swing_cd -= dt;
+            if h.swing_cd > 0.0 {
+                continue;
+            }
+            let dealt = mitigation(f64::from(h.damage), grit);
+            self.player.resources.hp = (self.player.resources.hp - f64::from(dealt)).max(0.0);
+            h.swing_cd += h.swing_s;
+            let killed = self.player.resources.hp <= 0.0;
+            let hit = IncomingHit {
+                dealt,
+                by: h.name.clone(),
+                killed,
+            };
+            self.last_incoming = Some(hit.clone());
+            last = Some(hit);
+            if killed {
+                self.dead = true;
+                self.lock = None;
+                self.auto_cd = 999.0;
+                self.slain_by = Some(h.name.clone());
+                break;
+            }
+        }
+        last
     }
 }

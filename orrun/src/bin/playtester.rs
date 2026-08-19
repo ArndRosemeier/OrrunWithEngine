@@ -61,6 +61,8 @@ fn main() {
         "dungeon_fill.json",
         "combat.json",
         "combat.png",
+        "hurt.png",
+        "slain.png",
         "controls.json",
         "combat_body.json",
         "combat_body.png",
@@ -117,6 +119,9 @@ fn main() {
         sea,
         combat_tab_sent: false,
         combat_shot_sent: false,
+        combat_hurt_sent: false,
+        combat_death_sent: false,
+        incoming_hp: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -334,6 +339,9 @@ struct Driver {
     sea: f32,
     combat_tab_sent: bool,
     combat_shot_sent: bool,
+    combat_hurt_sent: bool,
+    combat_death_sent: bool,
+    incoming_hp: Option<f64>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -380,7 +388,10 @@ impl Driver {
         self.pending_pitch_delta = 0.0;
 
         let paint_combat_hud = matches!(self.phase, Phase::CombatLive)
-            || self.awaiting_shot.as_deref() == Some("combat");
+            || matches!(
+                self.awaiting_shot.as_deref(),
+                Some("combat") | Some("hurt") | Some("slain")
+            );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
         }
@@ -446,7 +457,7 @@ impl Driver {
                     // look only; fixture wolves spawn in melee in front of the player
                 } else if self.session.lock_id().is_none() {
                     input.tab = true;
-                } else if self.session.first_auto_hit().is_none() {
+                } else if self.session.first_auto_hit().is_none() || !self.combat_hurt_sent {
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
                         combat_melee_stand(&self.session),
@@ -1485,12 +1496,6 @@ impl Driver {
             }
         }
         self.combat_tab_sent = true;
-        if self.session.lock_id().is_some() {
-            let max = self.session.player_hp_max();
-            if max > 0.0 && (self.session.player_hp() / max - 0.5).abs() > 0.02 {
-                self.session.combat_mut().player.resources.hp = max * 0.5;
-            }
-        }
         if self.session.lock_id().is_none() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat: lock unset after Tab");
@@ -1527,14 +1532,16 @@ impl Driver {
             }
             return;
         }
-        if let Some(vantage) = combat_side_vantage(&self.session) {
-            self.aim_at_wolf_line();
-            if pos.horizontal().distance(vantage) > 0.75 {
-                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                    self.fail_current("combat: never reached side vantage after auto");
-                    self.advance_after_fail(world, frame);
+        if self.combat_hurt_sent {
+            if let Some(vantage) = combat_side_vantage(&self.session) {
+                self.aim_at_wolf_line();
+                if pos.horizontal().distance(vantage) > 0.75 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat: never reached side vantage after auto");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
                 }
-                return;
             }
         }
         let Some((name, hp)) = self.session.lock_name_hp() else {
@@ -1569,39 +1576,93 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
-        let swing_clip = copy_combat_wav(&self.shots, "swing.wav");
-        let hit_clip = copy_combat_wav(&self.shots, "hit.wav");
-        self.write_json(
-            "combat",
-            json!({
-                "status": "ok",
-                "lock": self.session.lock_id(),
-                "name": name,
-                "hp": hp,
-                "hp_max": hp_max,
-                "shot": "combat.png",
-                "first_auto_before_shot": self.session.first_auto_hit(),
-                "first_mitigated_auto": first_auto,
-                "combat_walk_mps": walk,
-                "player_hp": self.session.player_hp(),
-                "player_hp_max": self.session.player_hp_max(),
-                "player_mana": self.session.player_mana(),
-                "player_mana_max": self.session.player_mana_max(),
-                "player_hp_visible": true,
-                "lock_ring": self.session.lock_ring_visible(world),
-                "swing_whoosh": self.session.swing_whoosh(),
-                "hit_flash": self.session.hit_flash(),
-                "attack_pip": self.session.attack_pip(),
-                "swing_clip": swing_clip,
-                "hit_clip": hit_clip,
-            }),
-        );
-        self.combat_shot_sent = true;
-        self.ok_hook("combat");
-        world.mark_ready();
-        self.queue_shot(world, frame, "combat");
-        self.phase = Phase::NextHook;
-        self.phase_t0 = frame.time;
+        if !self.combat_hurt_sent {
+            if !self.session.incoming_hit() || self.session.player_hp() >= self.session.player_hp_max() {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: incoming never chipped player HP");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            let swing_clip = copy_combat_wav(&self.shots, "swing.wav");
+            let hit_clip = copy_combat_wav(&self.shots, "hit.wav");
+            let hurt_clip = copy_combat_wav(&self.shots, "hurt.wav");
+            self.write_json(
+                "combat",
+                json!({
+                    "status": "ok",
+                    "lock": self.session.lock_id(),
+                    "name": name,
+                    "hp": hp,
+                    "hp_max": hp_max,
+                    "shot": "hurt.png",
+                    "first_auto_before_shot": self.session.first_auto_hit(),
+                    "first_mitigated_auto": first_auto,
+                    "combat_walk_mps": walk,
+                    "player_hp": self.session.player_hp(),
+                    "player_hp_max": self.session.player_hp_max(),
+                    "player_mana": self.session.player_mana(),
+                    "player_mana_max": self.session.player_mana_max(),
+                    "player_hp_visible": true,
+                    "incoming_hit": true,
+                    "hurt_sfx": hurt_clip,
+                    "hurt_clip": hurt_clip,
+                    "swing_clip": swing_clip,
+                    "hit_clip": hit_clip,
+                    "lock_ring": self.session.lock_ring_visible(world),
+                    "swing_whoosh": self.session.swing_whoosh(),
+                    "hit_flash": self.session.hit_flash(),
+                }),
+            );
+            self.incoming_hp = Some(self.session.player_hp());
+            self.combat_hurt_sent = true;
+            world.mark_ready();
+            self.queue_shot(world, frame, "hurt");
+            return;
+        }
+        if !self.combat_death_sent {
+            if self.session.player_hp() > 0.0 && !self.session.swings_stopped() {
+                self.session.combat_mut().player.resources.hp = 0.0;
+                self.session.combat_mut().dead = true;
+                if self.session.combat().slain_by.is_none() {
+                    self.session.combat_mut().slain_by = Some("wolf-spider".into());
+                }
+            }
+            if !self.session.swings_stopped() || self.session.slain_line().is_none() || !self.session.is_shaken() {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: death did not slain/shrine/shaken");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            let shrine = self.session.last_shrine();
+            let chipped = self.incoming_hp.unwrap_or(self.session.player_hp());
+            self.write_json(
+                "combat",
+                json!({
+                    "status": "ok",
+                    "shot": "hurt.png",
+                    "slain_shot": "slain.png",
+                    "player_hp": chipped,
+                    "player_hp_max": self.session.player_hp_max(),
+                    "incoming_hit": true,
+                    "hurt_sfx": "hurt.wav",
+                    "dead": true,
+                    "slain": self.session.slain_line(),
+                    "shaken": self.session.is_shaken(),
+                    "swings_stopped": self.session.swings_stopped(),
+                    "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
+                }),
+            );
+            self.combat_death_sent = true;
+            self.combat_shot_sent = true;
+            self.ok_hook("combat");
+            world.mark_ready();
+            self.queue_shot(world, frame, "slain");
+            self.phase = Phase::NextHook;
+            self.phase_t0 = frame.time;
+            return;
+        }
     }
 
     fn aim_at_wolf_line(&mut self) {
@@ -2086,7 +2147,9 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
     let mana_max = session.player_mana_max().max(1.0);
     let hp_frac = (hp / hp_max).clamp(0.0, 1.0) as f32;
     let mana_frac = (mana / mana_max).clamp(0.0, 1.0) as f32;
-    let hp_color = if hp_frac <= 0.20 {
+    let hp_color = if session.hurt_flash() {
+        Color32::from_rgb(220, 24, 24)
+    } else if hp_frac <= 0.20 {
         Color32::from_rgb(200, 32, 32)
     } else if hp_frac <= 0.50 {
         Color32::from_rgb(220, 190, 32)

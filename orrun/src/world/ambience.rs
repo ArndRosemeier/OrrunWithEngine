@@ -46,6 +46,7 @@ const RIVER_CLIP: &str = "river.wav";
 const OCEAN_CLIP: &str = "ocean.wav";
 const COMBAT_HIT_CLIP: &str = "combat/hit.wav";
 const COMBAT_SWING_CLIP: &str = "combat/swing.wav";
+const COMBAT_HURT_CLIP: &str = "combat/hurt.wav";
 const COMBAT_PEAK: f32 = 0.45;
 
 #[derive(Debug, Error)]
@@ -80,6 +81,7 @@ pub struct Ambience {
     last_forest: Option<usize>,
     combat_hit: ClipId,
     combat_swing: ClipId,
+    combat_hurt: ClipId,
 }
 
 impl Ambience {
@@ -107,6 +109,7 @@ impl Ambience {
         ];
         let combat_hit = load_clip(&mut audio, COMBAT_HIT_CLIP)?;
         let combat_swing = load_clip(&mut audio, COMBAT_SWING_CLIP)?;
+        let combat_hurt = load_clip(&mut audio, COMBAT_HURT_CLIP)?;
         Ok(Self {
             audio,
             village,
@@ -119,6 +122,7 @@ impl Ambience {
             last_forest: None,
             combat_hit,
             combat_swing,
+            combat_hurt,
         })
     }
 
@@ -153,11 +157,23 @@ impl Ambience {
         Ok(())
     }
 
+    pub fn play_hurt(&mut self) -> Result<(), AmbienceError> {
+        self.audio.play(
+            self.combat_hurt,
+            Play {
+                looped: false,
+                volume: COMBAT_PEAK,
+            },
+        )?;
+        Ok(())
+    }
+
     fn play_pending_combat(&mut self, session: &mut WorldSession) -> Result<(), AmbienceError> {
         for sfx in session.take_combat_sfx() {
             match sfx {
                 CombatSfx::Swing => self.play_swing()?,
                 CombatSfx::Hit => self.play_hit()?,
+                CombatSfx::Hurt => self.play_hurt()?,
             }
         }
         Ok(())

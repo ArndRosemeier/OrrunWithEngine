@@ -48,6 +48,7 @@ const FLASH: Color = Color {
 pub enum CombatSfx {
     Swing,
     Hit,
+    Hurt,
 }
 
 struct MeshAnchor {
@@ -81,6 +82,8 @@ pub struct CombatLayer {
     flinch: Option<Flinch>,
     flash: Option<EntityId>,
     flash_t: f32,
+    incoming_hit: bool,
+    hurt_flash_s: f64,
 }
 
 impl CombatLayer {
@@ -102,6 +105,8 @@ impl CombatLayer {
             flinch: None,
             flash: None,
             flash_t: 0.0,
+            incoming_hit: false,
+            hurt_flash_s: 0.0,
         }
     }
 
@@ -123,6 +128,14 @@ impl CombatLayer {
 
     pub fn hit_flash(&self) -> bool {
         self.hit_flash
+    }
+
+    pub fn incoming_hit(&self) -> bool {
+        self.incoming_hit
+    }
+
+    pub fn hurt_flash(&self) -> bool {
+        self.hurt_flash_s > 0.0
     }
 
     pub fn hit_flash_latched(&self) -> bool {
@@ -149,6 +162,8 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = false;
         self.flinch = None;
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
@@ -267,10 +282,9 @@ impl CombatLayer {
         combat.lock = None;
         combat.cycle.clear();
         combat.auto_cd = crate::combat::MELEE_SWING_S;
-        // Line along facing: first at 2.0 m (inside 2.8 melee), then +0.4 m.
+        // First at 1.5 m so wolf reach (1.8 m) connects. Then +0.12 m, still in reach.
         for i in 0..3 {
-            let dist = 2.0 + f64::from(i) * 0.4;
-            // Combat sheet id is wolf-spider; catalog has wolf, not spider.
+            let dist = 1.5 + f64::from(i) * 0.12;
             combat.hostiles.push(WorldHostile {
                 idx: i,
                 x: player_x + fx * dist,
@@ -284,6 +298,10 @@ impl CombatLayer {
                 root_s: 0.0,
                 name: sheet.name.clone(),
                 entity: None,
+                damage: sheet.damage,
+                swing_s: sheet.swing_s,
+                swing_cd: sheet.swing_s,
+                reach_m: sheet.reach_m,
             });
         }
         *combat = keep_player(combat);
@@ -342,6 +360,9 @@ impl CombatLayer {
         if self.attack_pip_s > 0.0 {
             self.attack_pip_s = (self.attack_pip_s - dt).max(0.0);
         }
+        if self.hurt_flash_s > 0.0 {
+            self.hurt_flash_s = (self.hurt_flash_s - dt).max(0.0);
+        }
         let mut just = None;
         self.accum_s += dt;
         while self.accum_s + 1e-12 >= TICK {
@@ -360,6 +381,11 @@ impl CombatLayer {
                 self.pending_sfx.push(CombatSfx::Hit);
                 self.pending_flinch = true;
                 just = Some(dealt);
+            }
+            if combat.tick_incoming(player_x, player_z, TICK).is_some() {
+                self.incoming_hit = true;
+                self.hurt_flash_s = 0.15;
+                self.pending_sfx.push(CombatSfx::Hurt);
             }
         }
         just

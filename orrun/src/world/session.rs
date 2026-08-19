@@ -434,6 +434,26 @@ impl WorldSession {
         self.combat_layer.attack_pip()
     }
 
+    pub fn incoming_hit(&self) -> bool {
+        self.combat_layer.incoming_hit()
+    }
+
+    pub fn hurt_flash(&self) -> bool {
+        self.combat_layer.hurt_flash()
+    }
+
+    pub fn slain_line(&self) -> Option<String> {
+        self.combat.slain_by.as_ref().map(|n| format!("slain by {n}"))
+    }
+
+    pub fn swings_stopped(&self) -> bool {
+        self.combat.dead
+    }
+
+    pub fn is_shaken(&self) -> bool {
+        self.combat.player.shaken.as_ref().is_some_and(|s| s.remaining_s > 0.0)
+    }
+
     pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
         self.combat_layer.take_combat_sfx()
     }
@@ -452,6 +472,25 @@ impl WorldSession {
 
     pub fn first_auto_hit(&self) -> Option<i32> {
         self.combat_layer.first_auto()
+    }
+
+    fn resolve_death(&mut self) {
+        let place = self.last_shrine().or_else(|| {
+            self.spawn.map(|s| {
+                GlobalPlace::at(s.position()).with_yaw_deg(s.heading().degrees())
+            })
+        });
+        if let Some(place) = place {
+            if let Some(player) = self.player.as_mut() {
+                player.position = place.position;
+                player.yaw_degrees = place.yaw_degrees;
+            }
+        }
+        self.combat.player.shaken = Some(crate::combat::Shaken::from_death());
+        self.combat.player.resources.hp = self.combat.player.resources.hp_max;
+        self.combat.player.resources.mana = self.combat.player.resources.mana_max;
+        self.combat.lock = None;
+        self.combat.auto_cd = 999.0;
     }
 
     pub fn last_shrine(&self) -> Option<GlobalPlace> {
@@ -1059,6 +1098,11 @@ impl WorldSession {
             }
             let pose = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
             self.spawn = Some(pose);
+            if self.last_shrine.is_none() {
+                self.last_shrine = Some(
+                    GlobalPlace::at(pose.position()).with_yaw_deg(pose.heading().degrees()),
+                );
+            }
             self.player = Some(Player {
                 position: pose.position(),
                 yaw_degrees: pose.heading().degrees(),
@@ -1322,6 +1366,9 @@ impl WorldSession {
                     .unwrap_or(py)
             };
             self.combat_layer.present(world, &self.combat, ground_y, input.dt)?;
+            if self.combat.dead && self.combat.player.resources.hp <= 0.0 {
+                self.resolve_death();
+            }
             if let Some(d) = self.dungeons.as_ref() {
                 if let Some(place) = d.shrine() {
                     self.last_shrine = Some(place);

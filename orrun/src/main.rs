@@ -1696,7 +1696,9 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     } else {
                         0.0
                     };
-                    let hp_color = if hp_frac <= 0.20 {
+                    let hp_color = if session.hurt_flash() {
+                        Color32::from_rgb(220, 24, 24)
+                    } else if hp_frac <= 0.20 {
                         Color32::from_rgb(200, 32, 32)
                     } else if hp_frac <= 0.50 {
                         Color32::from_rgb(220, 190, 32)
@@ -1708,6 +1710,22 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                             .fill(hp_color)
                             .desired_width(160.0),
                     );
+                    if session.hurt_flash() {
+                        let (flash_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(160.0, 6.0), Sense::hover());
+                        ui.painter().rect_filled(
+                            flash_rect,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(220, 24, 24, 180),
+                        );
+                    }
+                    if let Some(slain) = session.slain_line() {
+                        ui.label(
+                            egui::RichText::new(slain)
+                                .size(16.0)
+                                .color(Color32::from_rgb(230, 70, 70)),
+                        );
+                    }
                     ui.add(
                         egui::ProgressBar::new(mana_frac)
                             .fill(Color32::from_rgb(48, 120, 210))
