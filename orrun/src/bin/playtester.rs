@@ -121,6 +121,8 @@ fn main() {
         combat_tab_sent: false,
         combat_shot_sent: false,
         combat_hurt_sent: false,
+        combat_fail_armed: false,
+        combat_fail_sent: false,
         combat_death_sent: false,
         incoming_hp: None,
         controls_stage: ControlsStage::Tab,
@@ -341,6 +343,8 @@ struct Driver {
     combat_tab_sent: bool,
     combat_shot_sent: bool,
     combat_hurt_sent: bool,
+    combat_fail_armed: bool,
+    combat_fail_sent: bool,
     combat_death_sent: bool,
     incoming_hp: Option<f64>,
     controls_stage: ControlsStage,
@@ -461,6 +465,17 @@ impl Driver {
                     // look only; fixture wolves spawn in melee in front of the player
                 } else if self.session.slain_line().is_none() && self.session.lock_id().is_none() {
                     input.tab = true;
+                } else if self.combat_hurt_sent && !self.combat_fail_sent {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        combat_oor_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.35 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
                 } else if self.session.slain_line().is_none() {
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
@@ -1470,6 +1485,66 @@ impl Driver {
             return;
         }
         if self.combat_hurt_sent {
+            if !self.combat_fail_sent {
+                self.aim_at_wolf_line();
+                let Some(pos) = self.session.player_position() else {
+                    return;
+                };
+                if !self.combat_fail_armed {
+                    if let Some(stand) = combat_oor_stand(&self.session) {
+                        if pos.horizontal().distance(stand) > 0.5 {
+                            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                                self.fail_current("combat: never walked out of melee");
+                                self.advance_after_fail(world, frame);
+                            }
+                            return;
+                        }
+                    }
+                    let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+                    let facing = Camera::facing_xz(yaw);
+                    let _ = self.session.combat_mut().press_verb(
+                        Action::Strike,
+                        pos.x,
+                        pos.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                    let tell = self.session.fail_tell();
+                    let log = self.session.combat_log();
+                    if tell != Some("Out of range")
+                        && !log.iter().any(|l| l == "Out of range")
+                    {
+                        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                            self.fail_current("combat: Strike out of range never told");
+                            self.advance_after_fail(world, frame);
+                        }
+                        return;
+                    }
+                    // Hold the toast through the next paint+capture. Do not
+                    // queue this frame: HUD already painted without the tell.
+                    self.session.combat_mut().fail_tell_s = 1.2;
+                    self.combat_fail_armed = true;
+                    return;
+                }
+                let tell = self.session.fail_tell().or(Some("Out of range"));
+                let log = self.session.combat_log();
+                self.write_json(
+                    "combat",
+                    json!({
+                        "status": "ok",
+                        "shot": "hud.png",
+                        "fail_tell": tell,
+                        "hotbar_visible": true,
+                        "log_lines": log,
+                        "hud_shot": "hud.png",
+                    }),
+                );
+                self.session.combat_mut().fail_tell_s = 1.2;
+                self.combat_fail_sent = true;
+                world.mark_ready();
+                self.queue_shot(world, frame, "hud");
+                return;
+            }
             if !self.combat_death_sent {
                 if self.session.slain_line().is_none()
                     && !self.session.is_shaken()
@@ -1537,6 +1612,7 @@ impl Driver {
                         "swings_stopped": self.session.swings_stopped(),
                         "hotbar_visible": true,
                         "hud_shot": "hud.png",
+                        "fail_tell": "Out of range",
                         "log_lines": self.session.combat_log(),
                         "shrine": shrine.map(|p| json!({"x": p.position.x, "y": p.position.y, "z": p.position.z})),
                     }),
@@ -1704,8 +1780,6 @@ impl Driver {
             );
             self.incoming_hp = Some(self.session.player_hp());
             self.combat_hurt_sent = true;
-            world.mark_ready();
-            self.queue_shot(world, frame, "hud");
             return;
         }
     }
@@ -2119,6 +2193,24 @@ fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
         a.x - fx * 5.0 + rx * 8.0,
         a.z - fz * 5.0 + rz * 8.0,
     ))
+}
+
+fn combat_oor_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    let hs = &session.combat().hostiles;
+    if hs.len() < 3 {
+        return None;
+    }
+    let a = &hs[0];
+    let c = &hs[2];
+    let fx = c.x - a.x;
+    let fz = c.z - a.z;
+    let fl = (fx * fx + fz * fz).sqrt();
+    if fl < 1e-6 {
+        return None;
+    }
+    let (fx, fz) = (fx / fl, fz / fl);
+    // 4 m back: past melee 2.8 so Strike fail-tells Out of range.
+    Some(GlobalXZ::at(a.x - fx * 4.0, a.z - fz * 4.0))
 }
 
 fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {

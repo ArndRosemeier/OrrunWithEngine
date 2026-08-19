@@ -38,7 +38,52 @@ impl WorldCombat {
         self.cds.insert(k, v);
     }
 
-    /// Apply a live verb. Rank / mana / CD / range failures are silent no-ops.
+    fn note_fail(&mut self, line: &'static str) {
+        self.log.push(line);
+        self.fail_tell = Some(line);
+        self.fail_tell_s = 1.2;
+    }
+
+    pub fn fail_tell(&self) -> Option<&'static str> {
+        if self.fail_tell_s > 0.0 {
+            self.fail_tell
+        } else {
+            None
+        }
+    }
+
+    fn lock_in_range(
+        &mut self,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+        range: f64,
+        melee: bool,
+    ) -> Option<i32> {
+        let Some(lock) = self.lock else {
+            self.note_fail("No target");
+            return None;
+        };
+        let Some(h) = self.hostiles.iter().find(|h| h.idx == lock && h.alive) else {
+            self.note_fail("No target");
+            return None;
+        };
+        if melee {
+            if !super::types::melee_auto_legal(
+                player_x, player_z, facing_x, facing_z, h.x, h.z,
+            ) {
+                self.note_fail("Out of range");
+                return None;
+            }
+        } else if !self.target_in_range(player_x, player_z, lock, range) {
+            self.note_fail("Out of range");
+            return None;
+        }
+        Some(lock)
+    }
+
+    /// Apply a live verb. No-lock / out-of-range push a combat-log fail tell.
     /// Returns whether the verb started (armed, cast begun, or potion drunk).
     pub fn press_verb(
         &mut self,
@@ -69,33 +114,55 @@ impl WorldCombat {
         }
         match verb {
             CombatVerb::Strike => {
+                if self
+                    .lock_in_range(player_x, player_z, facing_x, facing_z, MELEE_REACH_M, true)
+                    .is_none()
+                {
+                    return false;
+                }
                 self.strike_armed = true;
                 self.set_cd("strike", STRIKE_CD_S);
                 true
             }
-            CombatVerb::Bash => self.start_cast("bash", BASH_ANIM_S, 0, self.lock),
+            CombatVerb::Bash => {
+                let Some(lock) =
+                    self.lock_in_range(player_x, player_z, facing_x, facing_z, MELEE_REACH_M, true)
+                else {
+                    return false;
+                };
+                self.start_cast("bash", BASH_ANIM_S, 0, Some(lock))
+            }
             CombatVerb::AimedShot => {
                 if self.player.arrows <= 0 {
                     return false;
                 }
-                self.start_cast("aimed", AIMED_DRAW_S, 0, self.lock)
+                let Some(lock) = self.lock_in_range(
+                    player_x, player_z, facing_x, facing_z, BOW_FALLOFF_END_M, false,
+                ) else {
+                    return false;
+                };
+                self.start_cast("aimed", AIMED_DRAW_S, 0, Some(lock))
             }
             CombatVerb::Pin => {
                 if self.player.arrows <= 0 {
                     return false;
                 }
-                self.start_cast("pin", BOW_DRAW_S, 0, self.lock)
+                let Some(lock) = self.lock_in_range(
+                    player_x, player_z, facing_x, facing_z, BOW_FALLOFF_END_M, false,
+                ) else {
+                    return false;
+                };
+                self.start_cast("pin", BOW_DRAW_S, 0, Some(lock))
             }
             CombatVerb::Ember => {
                 if self.player.resources.mana < f64::from(EMBER_MANA) {
                     return false;
                 }
-                let Some(lock) = self.lock else {
+                let Some(lock) = self.lock_in_range(
+                    player_x, player_z, facing_x, facing_z, EMBER_RANGE_M, false,
+                ) else {
                     return false;
                 };
-                if !self.target_in_range(player_x, player_z, lock, EMBER_RANGE_M) {
-                    return false;
-                }
                 let started = self.start_cast("ember", EMBER_CAST_S, EMBER_MANA, Some(lock));
                 if started {
                     self.ember_started = true;
@@ -106,7 +173,12 @@ impl WorldCombat {
                 if self.player.resources.mana < f64::from(BIND_MANA) {
                     return false;
                 }
-                self.start_cast("bind", BIND_CAST_S, BIND_MANA, self.lock)
+                let Some(lock) = self.lock_in_range(
+                    player_x, player_z, facing_x, facing_z, BIND_RANGE_M, false,
+                ) else {
+                    return false;
+                };
+                self.start_cast("bind", BIND_CAST_S, BIND_MANA, Some(lock))
             }
             CombatVerb::Mend => {
                 if self.player.resources.mana < f64::from(MEND_MANA) {
@@ -202,6 +274,12 @@ impl WorldCombat {
         }
         if self.slain_hold_s > 0.0 {
             self.slain_hold_s = (self.slain_hold_s - dt).max(0.0);
+        }
+        if self.fail_tell_s > 0.0 {
+            self.fail_tell_s = (self.fail_tell_s - dt).max(0.0);
+            if self.fail_tell_s <= 0.0 {
+                self.fail_tell = None;
+            }
         }
         if let Some(shaken) = &mut self.player.shaken {
             shaken.remaining_s = (shaken.remaining_s - dt).max(0.0);

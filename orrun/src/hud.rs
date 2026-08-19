@@ -156,8 +156,27 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
+pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
+    let Some(line) = combat.fail_tell() else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    egui::Area::new(egui::Id::new("fail_toast"))
+        .fixed_pos(egui::pos2(screen.width() * 0.5 - 90.0, screen.height() * 0.38))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(line)
+                    .size(28.0)
+                    .color(Color32::from_rgb(240, 200, 80)),
+            );
+        });
+}
+
 pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
     draw_target_frame(ctx, combat);
     draw_hotbar(ctx, combat, binds);
     draw_combat_log(ctx, combat);
+    draw_fail_toast(ctx, combat);
 }

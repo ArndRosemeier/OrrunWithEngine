@@ -256,6 +256,8 @@ pub struct WorldCombat {
     pub slain_hold_s: f64,
     pub last_incoming: Option<IncomingHit>,
     pub log: CombatLog,
+    pub fail_tell: Option<&'static str>,
+    pub fail_tell_s: f64,
 }
 
 impl WorldCombat {
@@ -286,6 +288,8 @@ impl WorldCombat {
             slain_hold_s: 0.0,
             last_incoming: None,
             log: CombatLog::new(),
+            fail_tell: None,
+            fail_tell_s: 0.0,
         }
     }
 

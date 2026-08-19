@@ -458,6 +458,10 @@ impl WorldSession {
         self.combat.log.lines().map(str::to_string).collect()
     }
 
+    pub fn fail_tell(&self) -> Option<&'static str> {
+        self.combat.fail_tell()
+    }
+
     pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
         self.combat_layer.take_combat_sfx()
     }
@@ -1297,6 +1301,9 @@ impl WorldSession {
             );
             if started && verb == crate::controls::Action::Potion {
                 self.combat_layer.log_potion(&mut self.combat);
+            }
+            if started && verb == crate::controls::Action::Ward {
+                self.combat_layer.log_ward(&mut self.combat);
             }
         }
         player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);

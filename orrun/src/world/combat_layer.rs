@@ -157,6 +157,10 @@ impl CombatLayer {
         combat.log.push(format!("You drink a potion for {heal}"));
     }
 
+    pub fn log_ward(&self, combat: &mut WorldCombat) {
+        combat.log.push("You Ward");
+    }
+
     pub fn rearm(&mut self) {
         self.fixture = false;
         self.first_auto = None;
@@ -773,6 +777,8 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.slain_hold_s = combat.slain_hold_s;
     out.last_incoming = combat.last_incoming.clone();
     out.log = combat.log.clone();
+    out.fail_tell = combat.fail_tell;
+    out.fail_tell_s = combat.fail_tell_s;
     out
 }
 
@@ -1011,5 +1017,43 @@ mod tests {
             lines.iter().any(|l| l.starts_with("You Ember wolf-spider for ")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn ember_without_lock_tells_no_target() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = None;
+        assert!(!combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
+        assert!(!combat.ember_started);
+        assert_eq!(combat.fail_tell(), Some("No target"));
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(lines.iter().any(|l| l == "No target"), "{lines:?}");
+    }
+
+    #[test]
+    fn strike_past_melee_tells_out_of_range() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        assert!(!combat.press_verb(crate::combat::CombatVerb::Strike, -4.0, 0.0, 1.0, 0.0));
+        assert!(!combat.strike_armed);
+        assert_eq!(combat.fail_tell(), Some("Out of range"));
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(lines.iter().any(|l| l == "Out of range"), "{lines:?}");
+    }
+
+    #[test]
+    fn ward_success_pushes_you_ward() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.player.stats.ranks.arcane = 7;
+        let layer = CombatLayer::install();
+        assert!(combat.press_verb(crate::combat::CombatVerb::Ward, 0.0, 0.0, 1.0, 0.0));
+        assert!(combat.ward > 0.0);
+        layer.log_ward(&mut combat);
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(lines.iter().any(|l| l == "You Ward"), "{lines:?}");
     }
 }
