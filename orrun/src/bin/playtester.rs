@@ -1472,12 +1472,20 @@ impl Driver {
             }
             return;
         }
-        if self.session.first_auto_hit().is_none() {
-            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: first auto never landed");
-                self.advance_after_fail(world, frame);
+        match self.session.first_auto_hit() {
+            None => {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: first auto never landed");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
             }
-            return;
+            Some(11) => {}
+            Some(got) => {
+                self.fail_current(&format!("combat: first auto want 11, got {got}"));
+                self.advance_after_fail(world, frame);
+                return;
+            }
         }
         if !self.session.lock_ring_visible(world) {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -1551,7 +1559,7 @@ impl Driver {
                 "player_hp_max": self.session.player_hp_max(),
                 "player_mana": self.session.player_mana(),
                 "player_mana_max": self.session.player_mana_max(),
-                "player_hp_visible": true,
+                "player_hp_visible": self.session.player_hp_visible(),
                 "lock_ring": self.session.lock_ring_visible(world),
                 "swing_whoosh": self.session.swing_whoosh(),
                 "hit_flash": self.session.hit_flash(),

@@ -425,6 +425,11 @@ impl WorldSession {
         self.combat.player.resources.mana_max
     }
 
+    /// Player HP/mana bars are always drawn in world_hud.
+    pub fn player_hp_visible(&self) -> bool {
+        true
+    }
+
     pub fn attack_pip(&self) -> bool {
         self.combat_layer.attack_pip()
     }
