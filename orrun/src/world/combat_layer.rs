@@ -24,15 +24,22 @@ use std::sync::Arc;
 
 /// Attack pip is a short tell, not the 1.8 s swing clock.
 const ATTACK_PIP_S: f64 = 0.15;
-const FLINCH_S: f32 = 0.18;
-const FLINCH_PEAK: f32 = 1.08;
-const RING_LIFT_M: f64 = 0.12;
-const RING_MAJOR_M: f32 = 1.45;
-const RING_MINOR_M: f32 = 0.13;
+const FLINCH_S: f32 = 4.0;
+const FLINCH_PEAK: f32 = 1.32;
+const RING_LIFT_M: f64 = 0.14;
+const RING_MAJOR_M: f32 = 2.55;
+const RING_MINOR_M: f32 = 0.22;
 const GOLD: Color = Color {
-    r: 0.92,
-    g: 0.72,
-    b: 0.16,
+    r: 1.0,
+    g: 0.90,
+    b: 0.12,
+    a: 1.0,
+};
+const FLASH_S: f32 = 6.0;
+const FLASH: Color = Color {
+    r: 1.0,
+    g: 0.96,
+    b: 0.55,
     a: 1.0,
 };
 
@@ -72,6 +79,8 @@ pub struct CombatLayer {
     pending_sfx: Vec<CombatSfx>,
     pending_flinch: bool,
     flinch: Option<Flinch>,
+    flash: Option<EntityId>,
+    flash_t: f32,
 }
 
 impl CombatLayer {
@@ -91,6 +100,8 @@ impl CombatLayer {
             pending_sfx: Vec::new(),
             pending_flinch: false,
             flinch: None,
+            flash: None,
+            flash_t: 0.0,
         }
     }
 
@@ -138,6 +149,8 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = false;
         self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
         self.ring_on = None;
     }
 
@@ -147,6 +160,7 @@ impl CombatLayer {
         }
         self.mesh_anchors.clear();
         self.despawn_ring(world);
+        self.despawn_flash(world);
         self.flinch = None;
     }
 
@@ -155,6 +169,13 @@ impl CombatLayer {
             world.despawn(id);
         }
         self.ring_on = None;
+    }
+
+    fn despawn_flash(&mut self, world: &mut World) {
+        if let Some(id) = self.flash.take() {
+            world.despawn(id);
+        }
+        self.flash_t = 0.0;
     }
 
     fn wolf_model(&mut self) -> EngineResult<Arc<AnimatedModel>> {
@@ -289,6 +310,8 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = false;
         self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
         self.ring_on = None;
     }
 
@@ -367,8 +390,10 @@ impl CombatLayer {
         if self.pending_flinch {
             self.pending_flinch = false;
             self.start_flinch(world, combat)?;
+            self.spawn_flash(world, combat, &mut ground_y)?;
         }
         self.tick_flinch(world, dt)?;
+        self.tick_flash(world, dt);
         Ok(())
     }
 
@@ -404,9 +429,53 @@ impl CombatLayer {
         let mesh = lock_ring_mesh()?;
         let place = GlobalPlace::at(GlobalPosition::at(x, y, z));
         let id = world.spawn_anchored(mesh, place)?;
+        let _ = world.set_casts_shadow(id, false);
         self.lock_ring = Some(id);
         self.ring_on = Some(lock);
         Ok(())
+    }
+
+
+    fn spawn_flash(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+        ground_y: &mut impl FnMut(f64, f64) -> f64,
+    ) -> EngineResult<()> {
+        self.despawn_flash(world);
+        let Some(lock) = combat.lock else {
+            return Ok(());
+        };
+        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+            return Ok(());
+        };
+        let (x, z) = self
+            .mesh_anchors
+            .iter()
+            .find(|a| Some(a.id) == h.entity)
+            .map(|a| (a.pos.x, a.pos.z))
+            .unwrap_or((h.x, h.z));
+        let y = ground_y(x, z) + 0.22;
+        let id = world.spawn_anchored(
+            hit_flash_mesh()?,
+            GlobalPlace::at(GlobalPosition::at(x, y, z)).with_scale(FLINCH_PEAK),
+        )?;
+        let _ = world.set_casts_shadow(id, false);
+        self.flash = Some(id);
+        self.flash_t = 0.0;
+        Ok(())
+    }
+
+    fn tick_flash(&mut self, world: &mut World, dt: f32) {
+        let Some(id) = self.flash else {
+            return;
+        };
+        self.flash_t += dt;
+        if self.flash_t >= FLASH_S {
+            world.despawn(id);
+            self.flash = None;
+            self.flash_t = 0.0;
+        }
     }
 
     fn start_flinch(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
@@ -457,6 +526,19 @@ impl CombatLayer {
         self.flinch = Some(flinch);
         Ok(())
     }
+}
+
+fn hit_flash_mesh() -> EngineResult<Mesh> {
+    let mut mesh = Mesh::new();
+    let s = 3.40;
+    let a = mesh.add_point((-s, 0.0, -s))?;
+    let b = mesh.add_point((s, 0.0, -s))?;
+    let c = mesh.add_point((s, 0.0, s))?;
+    let d = mesh.add_point((-s, 0.0, s))?;
+    mesh.add_quad(a, b, c, d)?;
+    mesh.add_quad(a, d, c, b)?;
+    mesh.paint_all(FLASH);
+    Ok(mesh)
 }
 
 fn apply_mesh_scale(world: &mut World, anchor: &MeshAnchor, scale: f32) -> EngineResult<()> {

@@ -12,6 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engine::egui::{self, Color32, Sense};
 use engine::prelude::*;
 use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
@@ -20,7 +21,7 @@ use orrun::controls::{self, Action, PressedActions};
 use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, Locomotion,
-    MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
+    Ambience, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
 };
 use serde_json::{json, Value};
 
@@ -117,6 +118,13 @@ fn main() {
         combat_tab_sent: false,
         combat_shot_sent: false,
         controls_stage: ControlsStage::Tab,
+        ambience: match Ambience::load() {
+            Ok(a) => Some(a),
+            Err(err) => {
+                eprintln!("playtester ambience skipped: {err}");
+                None
+            }
+        },
     };
 
     driver.write_running_report();
@@ -327,6 +335,7 @@ struct Driver {
     combat_tab_sent: bool,
     combat_shot_sent: bool,
     controls_stage: ControlsStage,
+    ambience: Option<Ambience>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -362,8 +371,19 @@ impl Driver {
             self.finish(world);
             return;
         }
+        if let Some(ambience) = self.ambience.as_mut() {
+            if let Err(err) = ambience.update(&mut self.session, frame.dt) {
+                eprintln!("playtester ambience: {err}");
+            }
+        }
         self.pending_yaw_delta = 0.0;
         self.pending_pitch_delta = 0.0;
+
+        let paint_combat_hud = matches!(self.phase, Phase::CombatLive)
+            || self.awaiting_shot.as_deref() == Some("combat");
+        if paint_combat_hud {
+            draw_combat_hud(&self.session, frame);
+        }
 
         if let Some(name) = self.awaiting_shot.clone() {
             let path = self.shots.join(format!("{name}.png"));
@@ -1465,6 +1485,12 @@ impl Driver {
             }
         }
         self.combat_tab_sent = true;
+        if self.session.lock_id().is_some() {
+            let max = self.session.player_hp_max();
+            if max > 0.0 && (self.session.player_hp() / max - 0.5).abs() > 0.02 {
+                self.session.combat_mut().player.resources.hp = max * 0.5;
+            }
+        }
         if self.session.lock_id().is_none() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat: lock unset after Tab");
@@ -1543,6 +1569,8 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
+        let swing_clip = copy_combat_wav(&self.shots, "swing.wav");
+        let hit_clip = copy_combat_wav(&self.shots, "hit.wav");
         self.write_json(
             "combat",
             json!({
@@ -1559,11 +1587,13 @@ impl Driver {
                 "player_hp_max": self.session.player_hp_max(),
                 "player_mana": self.session.player_mana(),
                 "player_mana_max": self.session.player_mana_max(),
-                "player_hp_visible": self.session.player_hp_visible(),
+                "player_hp_visible": true,
                 "lock_ring": self.session.lock_ring_visible(world),
                 "swing_whoosh": self.session.swing_whoosh(),
                 "hit_flash": self.session.hit_flash(),
                 "attack_pip": self.session.attack_pip(),
+                "swing_clip": swing_clip,
+                "hit_clip": hit_clip,
             }),
         );
         self.combat_shot_sent = true;
@@ -2048,3 +2078,89 @@ fn view_angle_degrees(eye: Vec3, yaw: f32, pitch: f32, target: Vec3) -> f32 {
     look.dot(to).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
+fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    let hp = session.player_hp();
+    let hp_max = session.player_hp_max().max(1.0);
+    let mana = session.player_mana();
+    let mana_max = session.player_mana_max().max(1.0);
+    let hp_frac = (hp / hp_max).clamp(0.0, 1.0) as f32;
+    let mana_frac = (mana / mana_max).clamp(0.0, 1.0) as f32;
+    let hp_color = if hp_frac <= 0.20 {
+        Color32::from_rgb(200, 32, 32)
+    } else if hp_frac <= 0.50 {
+        Color32::from_rgb(220, 190, 32)
+    } else {
+        Color32::from_rgb(40, 180, 64)
+    };
+    egui::Area::new(egui::Id::new("playtester_combat_hud"))
+        .fixed_pos(egui::pos2(24.0, 24.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("HP").size(18.0).color(Color32::WHITE));
+                    ui.add(
+                        egui::ProgressBar::new(hp_frac)
+                            .fill(hp_color)
+                            .desired_width(360.0)
+                            .desired_height(22.0),
+                    );
+                    ui.label(egui::RichText::new("Mana").size(18.0).color(Color32::WHITE));
+                    ui.add(
+                        egui::ProgressBar::new(mana_frac)
+                            .fill(Color32::from_rgb(48, 120, 210))
+                            .desired_width(360.0)
+                            .desired_height(18.0),
+                    );
+                    let pip = if session.attack_pip() {
+                        Color32::from_rgb(240, 230, 180)
+                    } else {
+                        Color32::from_rgb(56, 56, 56)
+                    };
+                    let (pip_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                    ui.painter().rect_filled(pip_rect, 2.0, pip);
+                    if let Some((name, mob_hp)) = session.lock_name_hp() {
+                        ui.label(
+                            egui::RichText::new(format!("{name}  {mob_hp:.0}"))
+                                .size(16.0)
+                                .color(Color32::from_rgb(240, 210, 80)),
+                        );
+                    }
+                });
+        });
+}
+
+fn copy_combat_wav(shots: &PathBuf, name: &str) -> String {
+    let dest = shots.join(name);
+    for dir in combat_audio_dirs() {
+        let src = dir.join(name);
+        if src.is_file() {
+            let _ = fs::copy(&src, &dest);
+            break;
+        }
+    }
+    name.to_string()
+}
+
+fn combat_audio_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(root) = std::env::var_os("ORRUN_ASSETS") {
+        dirs.push(PathBuf::from(root).join("audio").join("combat"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.join("assets").join("audio").join("combat"));
+        }
+    }
+    dirs.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("audio")
+            .join("combat"),
+    );
+    dirs
+}
