@@ -2,104 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use crate::controls::RankGate;
 
 use super::math::*;
 use super::types::WorldCombat;
-use super::Ranks;
 
-/// Player-triggered combat actions (not auto-attack).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CombatVerb {
-    Strike,
-    Bash,
-    AimedShot,
-    Pin,
-    Ember,
-    Bind,
-    Mend,
-    Ward,
-    Potion,
-}
-
-impl CombatVerb {
-    pub const ALL: [Self; 9] = [
-        Self::Strike,
-        Self::Bash,
-        Self::AimedShot,
-        Self::Pin,
-        Self::Ember,
-        Self::Bind,
-        Self::Mend,
-        Self::Ward,
-        Self::Potion,
-    ];
-
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Strike => "strike",
-            Self::Bash => "bash",
-            Self::AimedShot => "aimed",
-            Self::Pin => "pin",
-            Self::Ember => "ember",
-            Self::Bind => "bind",
-            Self::Mend => "mend",
-            Self::Ward => "ward",
-            Self::Potion => "potion",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Strike => "Strike",
-            Self::Bash => "Bash",
-            Self::AimedShot => "Aimed Shot",
-            Self::Pin => "Pin",
-            Self::Ember => "Ember",
-            Self::Bind => "Bind",
-            Self::Mend => "Mend",
-            Self::Ward => "Ward",
-            Self::Potion => "Potion",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Some(match id {
-            "strike" => Self::Strike,
-            "bash" => Self::Bash,
-            "aimed" | "aimed_shot" => Self::AimedShot,
-            "pin" => Self::Pin,
-            "ember" => Self::Ember,
-            "bind" => Self::Bind,
-            "mend" => Self::Mend,
-            "ward" => Self::Ward,
-            "potion" => Self::Potion,
-            _ => return None,
-        })
-    }
-
-    /// Rank-gate: the key is a no-op until this rank is known.
-    pub fn rank_ok(self, ranks: Ranks) -> bool {
-        match self {
-            Self::Strike => ranks.martial >= 1,
-            Self::Bash => ranks.martial >= 3,
-            Self::AimedShot => ranks.hunt >= 1,
-            Self::Pin => ranks.hunt >= 3,
-            Self::Ember => ranks.arcane >= 1,
-            Self::Bind => ranks.arcane >= 5,
-            Self::Mend => ranks.arcane >= 3,
-            Self::Ward => ranks.arcane >= 7,
-            Self::Potion => true,
-        }
-    }
-}
-
-impl std::fmt::Display for CombatVerb {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
+pub use crate::controls::Action as CombatVerb;
 
 pub fn empty_cds() -> BTreeMap<&'static str, f64> {
     let mut cds = BTreeMap::new();
@@ -129,7 +37,12 @@ impl WorldCombat {
         facing_z: f64,
     ) -> bool {
         let _ = (facing_x, facing_z);
-        if !verb.rank_ok(self.player.stats.ranks) {
+        let ranks = self.player.stats.ranks;
+        if !verb.rank_ok(ranks.martial, ranks.hunt, ranks.arcane) {
+            self.last_rank_gate = Some(RankGate {
+                action: verb,
+                blocked: true,
+            });
             return false;
         }
         if verb != CombatVerb::Potion {
@@ -198,6 +111,21 @@ impl WorldCombat {
                 self.ward_t = WARD_DUR_S;
                 self.gcd = WARD_GCD_S;
                 self.set_cd("ward", WARD_CD_S);
+                true
+            }
+            CombatVerb::Mark => {
+                self.mark_t = MARK_DUR_S;
+                self.set_cd("mark", MARK_CD_S);
+                true
+            }
+            CombatVerb::SecondWind => {
+                if self.second_wind_used {
+                    return false;
+                }
+                let heal = SECOND_WIND_PCT * self.player.resources.hp_max;
+                self.player.resources.hp =
+                    self.player.resources.hp_max.min(self.player.resources.hp + heal);
+                self.second_wind_used = true;
                 true
             }
             CombatVerb::Potion => {
@@ -269,6 +197,9 @@ impl WorldCombat {
                 self.ward = 0.0;
             }
         }
+        if self.mark_t > 0.0 {
+            self.mark_t = (self.mark_t - dt).max(0.0);
+        }
         for h in &mut self.hostiles {
             h.stun_s = (h.stun_s - dt).max(0.0);
             h.slow_s = (h.slow_s - dt).max(0.0);
@@ -333,7 +264,10 @@ impl WorldCombat {
                     self.hostiles[hi].x,
                     self.hostiles[hi].z,
                 );
-                let raw = self.player.stats.bow_hit(kind == "aimed", d);
+                let mut raw = self.player.stats.bow_hit(kind == "aimed", d);
+                if self.mark_t > 0.0 {
+                    raw = trunc(f64::from(raw) * MARK_MULT);
+                }
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
                 self.hostiles[hi].hp -= f64::from(dealt);
                 if kind == "pin" {
@@ -364,7 +298,10 @@ impl WorldCombat {
                 if d > EMBER_RANGE_M {
                     return;
                 }
-                let raw = self.player.stats.ember();
+                let mut raw = self.player.stats.ember();
+                if self.mark_t > 0.0 {
+                    raw = trunc(f64::from(raw) * MARK_MULT);
+                }
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
                 self.hostiles[hi].hp -= f64::from(dealt);
                 if self.hostiles[hi].hp <= 0.0 {
@@ -391,6 +328,7 @@ fn cd_for(kind: &str) -> f64 {
         "mend" => MEND_CD_S,
         "ward" => WARD_CD_S,
         "potion" => POTION_CD_S,
+        "mark" => MARK_CD_S,
         _ => 0.0,
     }
 }

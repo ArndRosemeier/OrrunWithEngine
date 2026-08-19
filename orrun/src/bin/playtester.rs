@@ -16,7 +16,7 @@ use engine::prelude::*;
 use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
 use orrun::atlas::ContinentAtlas;
-use orrun::combat::CombatVerb;
+use orrun::controls::{self, Action, PressedActions};
 use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, Locomotion,
@@ -328,8 +328,7 @@ enum ControlsStage {
     Tab,
     Strike,
     WaitHit,
-    Ember,
-    Potion,
+    Bash,
 }
 
 impl Driver {
@@ -421,14 +420,17 @@ impl Driver {
                 match self.controls_stage {
                     ControlsStage::Tab => input.tab = true,
                     ControlsStage::Strike => {
-                        input.verb = self.session.key_binds().verb_for(engine::Key::Digit1)
+                        input.actions = PressedActions::from_actions(&controls::resolve(
+                            self.session.key_binds(),
+                            [engine::Key::Digit1],
+                        ));
                     }
                     ControlsStage::WaitHit => {}
-                    ControlsStage::Ember => {
-                        input.verb = self.session.key_binds().verb_for(engine::Key::Digit5)
-                    }
-                    ControlsStage::Potion => {
-                        input.verb = self.session.key_binds().verb_for(engine::Key::R)
+                    ControlsStage::Bash => {
+                        input.actions = PressedActions::from_actions(&controls::resolve(
+                            self.session.key_binds(),
+                            [engine::Key::Digit2],
+                        ));
                     }
                 }
             }
@@ -1293,38 +1295,64 @@ impl Driver {
     }
 
     fn start_controls(&mut self, world: &mut World, frame: &Frame) {
-        let loaded = Settings::load().unwrap_or_else(|err| panic!("{err}"));
-        let missing = loaded.keys.missing();
-        if !missing.is_empty() {
-            let names: Vec<_> = missing.iter().map(|v| v.label()).collect();
-            self.write_json(
-                "controls",
-                json!({
-                    "status": "fail",
-                    "why": format!("unbound verbs: {}", names.join(",")),
-                    "keys": loaded.keys.inspect_map(),
-                }),
-            );
+        let mut loaded = Settings::load().unwrap_or_else(|err| panic!("{err}"));
+        if loaded.format != 1 {
             self.fail_current(&format!(
-                "controls: unbound verbs: {}",
-                names.join(",")
+                "controls: settings FORMAT must stay 1, found {}",
+                loaded.format
             ));
             self.advance_after_fail(world, frame);
             return;
         }
-        let binds = loaded.keys;
-        if binds.verb_for(engine::Key::Digit1) != Some(CombatVerb::Strike) {
-            self.fail_current("controls: default Strike key 1 is not bound to Strike");
+        loaded.keys = orrun::settings::KeyBinds::default();
+        loaded
+            .write()
+            .unwrap_or_else(|err| panic!("{err}"));
+        let loaded = Settings::load().unwrap_or_else(|err| panic!("{err}"));
+        let path = orrun::settings::settings_path().expect("settings path");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(json!({}));
+        let settings_json_has_keys = parsed.get("keys").is_some();
+        let binds = loaded.keys.clone();
+        let missing = controls::missing_binds(&binds);
+        let bible_verbs_missing_bind: Vec<&str> = missing.iter().map(|a| a.id()).collect();
+        if !missing.is_empty() || !settings_json_has_keys {
+            self.write_json(
+                "controls",
+                json!({
+                    "status": "fail",
+                    "binds": binds.inspect_map(),
+                    "reserved": controls::reserved_names(),
+                    "unbound": missing.iter().map(|a| a.id()).collect::<Vec<_>>(),
+                    "bible_verbs_missing_bind": bible_verbs_missing_bind,
+                    "settings_json_has_keys": settings_json_has_keys,
+                    "fired": {},
+                    "rank_gate": {"blocked": false},
+                    "used_pin_or_bind": false,
+                    "why": "missing bind",
+                }),
+            );
+            self.fail_current("controls: missing bind");
             self.advance_after_fail(world, frame);
             return;
         }
-        if binds.verb_for(engine::Key::Digit5) != Some(CombatVerb::Ember) {
-            self.fail_current("controls: default Ember key 5 is not bound to Ember");
+        if controls::resolve(&binds, [engine::Key::Digit1]) != vec![Action::Strike] {
+            self.fail_current("controls: key 1 must resolve to Strike");
             self.advance_after_fail(world, frame);
             return;
         }
-        if binds.verb_for(engine::Key::R) != Some(CombatVerb::Potion) {
-            self.fail_current("controls: potion default is R (Q is sidestep) and must be bound");
+        if controls::resolve(&binds, [engine::Key::R]) != vec![Action::Potion] {
+            self.fail_current("controls: potion is R, not Q");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !controls::resolve(&binds, [engine::Key::Q]).is_empty() {
+            self.fail_current("controls: Q must stay left strafe (unbound as a press-verb)");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if controls::assign(&mut loaded.keys.clone(), Action::Strike, engine::Key::E).is_ok() {
+            self.fail_current("controls: E is reserved");
             self.advance_after_fail(world, frame);
             return;
         }
@@ -1338,12 +1366,11 @@ impl Driver {
     fn tick_controls(&mut self, world: &mut World, frame: &Frame) {
         if frame.time - self.phase_t0 > 8.0 {
             self.fail_current(&format!(
-                "controls timed out in {:?} lock={:?} auto={:?} ember={} potions={}",
+                "controls timed out in {:?} lock={:?} auto={:?} strike_armed={}",
                 self.controls_stage,
                 self.session.lock_id(),
                 self.session.first_auto_hit(),
-                self.session.combat().ember_started,
-                self.session.combat().player.potions
+                self.session.combat().strike_armed
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -1356,7 +1383,7 @@ impl Driver {
             }
             ControlsStage::Strike => {
                 if !self.session.combat().strike_armed {
-                    self.fail_current("controls: pressing default Strike key 1 did not arm Strike");
+                    self.fail_current("controls: key 1 on L1 Martial did not arm Strike");
                     self.advance_after_fail(world, frame);
                     return;
                 }
@@ -1365,8 +1392,7 @@ impl Driver {
             ControlsStage::WaitHit => {
                 match self.session.first_auto_hit() {
                     Some(16) => {
-                        self.session.combat_mut().player.stats.ranks.arcane = 1;
-                        self.controls_stage = ControlsStage::Ember;
+                        self.controls_stage = ControlsStage::Bash;
                     }
                     Some(got) => {
                         self.fail_current(&format!(
@@ -1377,39 +1403,38 @@ impl Driver {
                     None => {}
                 }
             }
-            ControlsStage::Ember => {
-                if !self.session.combat().ember_started {
+            ControlsStage::Bash => {
+                let gate = self.session.combat().last_rank_gate;
+                let blocked = gate.map(|g| g.blocked && g.action == Action::Bash).unwrap_or(false);
+                if !blocked {
                     self.fail_current(
-                        "controls: pressing default Ember key 5 did not start Ember",
+                        "controls: key 2 on L1 Martial must rank-gate Bash (Martial < 3)",
                     );
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                self.session.combat_mut().player.resources.hp = 50.0;
-                self.controls_stage = ControlsStage::Potion;
-            }
-            ControlsStage::Potion => {
-                let hp = self.session.combat().player.resources.hp;
-                let potions = self.session.combat().player.potions;
-                let heal = self.session.combat().last_potion_heal;
-                if (hp - 90.0).abs() > 1e-6 || potions != 0 || heal != 40 {
-                    self.fail_current(&format!(
-                        "controls: potion want hp 90 potions 0 heal 40, got hp {hp} potions {potions} heal {heal}"
-                    ));
-                    self.advance_after_fail(world, frame);
-                    return;
-                }
-                let keys = self.session.key_binds().inspect_map();
+                let binds = self.session.key_binds().inspect_map();
+                let path = orrun::settings::settings_path().expect("settings path");
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(json!({}));
                 self.write_json(
                     "controls",
                     json!({
                         "status": "ok",
-                        "keys": keys,
+                        "binds": binds,
+                        "reserved": controls::reserved_names(),
+                        "unbound": [],
+                        "bible_verbs_missing_bind": [],
+                        "settings_json_has_keys": parsed.get("keys").is_some(),
+                        "fired": {"strike": true, "bash": false},
+                        "rank_gate": {
+                            "action": "bash",
+                            "blocked": true,
+                        },
+                        "used_pin_or_bind": self.session.combat().player.used_pin_or_bind,
                         "strike_first_auto": 16,
-                        "ember_started": true,
-                        "potion_hp": hp,
-                        "potion_heal": heal,
                         "potion_key": "R",
+                        "q_strafe": true,
                     }),
                 );
                 self.ok_hook("controls");

@@ -36,7 +36,7 @@ use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
 use orrun::save::{SaveError, SavedStand};
-use orrun::combat::CombatVerb;
+use orrun::controls::{is_reserved, Action};
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell,
@@ -1424,7 +1424,7 @@ struct SettingsUi {
     /// Atlas edge length for the running session (fixed at launch).
     active_continent_size: usize,
     /// Combat verb waiting for the next key-down. Esc cancels listen.
-    listening: Option<CombatVerb>,
+    listening: Option<Action>,
 }
 
 fn apply_instance_submit_hotkeys(world: &mut World, frame: &Frame) {
@@ -1454,48 +1454,6 @@ fn apply_hitch_log(world: &mut World, on: bool, replace: bool) {
     }
 }
 
-fn engine_key_from_egui(key: egui::Key) -> Option<Key> {
-    Some(match key {
-        egui::Key::A => Key::A,
-        egui::Key::B => Key::B,
-        egui::Key::C => Key::C,
-        egui::Key::D => Key::D,
-        egui::Key::E => Key::E,
-        egui::Key::F => Key::F,
-        egui::Key::G => Key::G,
-        egui::Key::H => Key::H,
-        egui::Key::I => Key::I,
-        egui::Key::J => Key::J,
-        egui::Key::K => Key::K,
-        egui::Key::L => Key::L,
-        egui::Key::M => Key::M,
-        egui::Key::N => Key::N,
-        egui::Key::O => Key::O,
-        egui::Key::P => Key::P,
-        egui::Key::Q => Key::Q,
-        egui::Key::R => Key::R,
-        egui::Key::S => Key::S,
-        egui::Key::T => Key::T,
-        egui::Key::U => Key::U,
-        egui::Key::V => Key::V,
-        egui::Key::W => Key::W,
-        egui::Key::X => Key::X,
-        egui::Key::Y => Key::Y,
-        egui::Key::Z => Key::Z,
-        egui::Key::Num0 => Key::Digit0,
-        egui::Key::Num1 => Key::Digit1,
-        egui::Key::Num2 => Key::Digit2,
-        egui::Key::Num3 => Key::Digit3,
-        egui::Key::Num4 => Key::Digit4,
-        egui::Key::Num5 => Key::Digit5,
-        egui::Key::Num6 => Key::Digit6,
-        egui::Key::Num7 => Key::Digit7,
-        egui::Key::Num8 => Key::Digit8,
-        egui::Key::Num9 => Key::Digit9,
-        _ => return None,
-    })
-}
-
 fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     if !ui_state.open {
@@ -1506,40 +1464,15 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
         ui_state.listening = None;
     }
     if let Some(action) = ui_state.listening {
-        let mut cancel = false;
-        let mut bind_key = None;
-        ctx.input(|i| {
-            for ev in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                } = ev
-                {
-                    if *key == egui::Key::Escape {
-                        cancel = true;
-                    } else if *key == egui::Key::E {
-                        // Do not steal E (door interact).
-                    } else if let Some(k) = engine_key_from_egui(*key) {
-                        bind_key = Some(k);
-                    }
-                }
+        if let Some(k) = frame.input.last_key_down() {
+            if !is_reserved(k) {
+                ui_state.prefs.keys.assign(action, k);
+                ui_state
+                    .prefs
+                    .write()
+                    .unwrap_or_else(|err| panic!("{err}"));
+                ui_state.listening = None;
             }
-        });
-        ctx.input_mut(|i| {
-            i.events
-                .retain(|e| !matches!(e, egui::Event::Key { .. }));
-        });
-        if cancel {
-            ui_state.listening = None;
-        } else if let Some(k) = bind_key {
-            ui_state.prefs.keys.assign(action, k);
-            ui_state
-                .prefs
-                .write()
-                .unwrap_or_else(|err| panic!("{err}"));
-            ui_state.listening = None;
         }
     }
     egui::Area::new(egui::Id::new("settings_btn"))
@@ -1640,7 +1573,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
                 .size(13.0)
                 .color(Color32::from_rgb(180, 188, 196)),
         );
-        for verb in CombatVerb::ALL {
+        for verb in Action::ALL {
             let bound = ui_state.prefs.keys.display(verb);
             let listening = ui_state.listening == Some(verb);
             let label = if listening {

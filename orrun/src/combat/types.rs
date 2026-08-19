@@ -232,6 +232,9 @@ pub struct WorldCombat {
     pub cast_target: Option<i32>,
     pub ward: f64,
     pub ward_t: f64,
+    pub mark_t: f64,
+    pub second_wind_used: bool,
+    pub last_rank_gate: Option<crate::controls::RankGate>,
 }
 
 impl WorldCombat {
@@ -254,6 +257,9 @@ impl WorldCombat {
             cast_target: None,
             ward: 0.0,
             ward_t: 0.0,
+            mark_t: 0.0,
+            second_wind_used: false,
+            last_rank_gate: None,
         }
     }
 
@@ -323,9 +329,12 @@ impl WorldCombat {
             return None;
         }
         let strike = self.strike_armed;
-        let raw = self.player.stats.melee_hit(strike);
+        let mut raw = self.player.stats.melee_hit(strike);
         if strike {
             self.strike_armed = false;
+        }
+        if self.mark_t > 0.0 {
+            raw = crate::combat::math::trunc(f64::from(raw) * crate::combat::math::MARK_MULT);
         }
         let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
         self.last_auto_dealt = dealt;

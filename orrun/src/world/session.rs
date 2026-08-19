@@ -22,7 +22,7 @@ use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, Frame, Haze, Sky, World};
 use engine::{Key, MouseButton, SpaceId};
 
-use crate::combat::CombatVerb;
+use crate::controls::PressedActions;
 use crate::settings::KeyBinds;
 use glam::{Vec2, Vec3};
 use thiserror::Error;
@@ -148,8 +148,8 @@ pub struct WalkInput {
     pub tab: bool,
     /// Shift. Combat walk 4.5 / sprint 7. Not fly.
     pub sprint: bool,
-    /// Combat verb that fired this frame from the current binds.
-    pub verb: Option<CombatVerb>,
+    /// Combat actions resolved from the current binds this frame.
+    pub actions: PressedActions,
 }
 
 impl WalkInput {
@@ -166,7 +166,7 @@ impl WalkInput {
         skip_travel: false,
         tab: false,
         sprint: false,
-        verb: None,
+        actions: PressedActions::NONE,
     };
 
     /// Read one frame of first-person controls.
@@ -241,7 +241,7 @@ impl WalkInput {
             skip_travel: keys.pressed(Key::Space),
             tab: keys.pressed(Key::Tab),
             sprint,
-            verb: binds.verb_pressed(keys),
+            actions: crate::controls::resolve_pressed(binds, keys),
         }
     }
 }
@@ -672,10 +672,11 @@ impl WorldSession {
             .map(|p| (p.yaw_degrees, p.pitch_degrees, p.mode))
             .unwrap_or((0.0, 0.0, Locomotion::Walk));
         let looking = world.pointer_lock();
-        self.step(
-            world,
-            WalkInput::from_frame(frame, yaw, pitch, mode, looking, &self.key_binds),
-        )
+        let mut input = WalkInput::from_frame(frame, yaw, pitch, mode, looking, &self.key_binds);
+        if world.bind_listen() {
+            input.actions = crate::controls::PressedActions::NONE;
+        }
+        self.step(world, input)
     }
 
     /// Advance the session with explicit intent (also the headless path).
@@ -1163,7 +1164,7 @@ impl WorldSession {
                 self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
             }
         }
-        if let Some(verb) = input.verb {
+        for verb in input.actions.iter() {
             let facing = Camera::facing_xz(player.yaw_degrees);
             self.combat.press_verb(
                 verb,

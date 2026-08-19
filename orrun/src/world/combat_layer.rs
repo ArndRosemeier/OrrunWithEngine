@@ -91,6 +91,9 @@ impl CombatLayer {
         combat.cast_target = None;
         combat.ward = 0.0;
         combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
@@ -154,6 +157,9 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.cast_target = combat.cast_target;
     out.ward = combat.ward;
     out.ward_t = combat.ward_t;
+    out.mark_t = combat.mark_t;
+    out.second_wind_used = combat.second_wind_used;
+    out.last_rank_gate = combat.last_rank_gate;
     out
 }
 
@@ -195,13 +201,20 @@ mod tests {
     }
 
     #[test]
-    fn ember_is_noop_without_arcane_rank() {
+    fn ember_is_create_and_bind_is_rank_gated() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
         combat.lock = Some(0);
-        assert!(!combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(!combat.ember_started);
+        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
+        assert!(combat.ember_started);
+        combat.cast_kind = None;
+        combat.gcd = 0.0;
+        combat.busy = 0.0;
+        assert!(!combat.press_verb(crate::combat::CombatVerb::Bind, 0.0, 0.0, 1.0, 0.0));
+        let gate = combat.last_rank_gate.expect("bind rank miss is fail-loud");
+        assert!(gate.blocked);
+        assert_eq!(gate.action, crate::combat::CombatVerb::Bind);
     }
 
     #[test]
@@ -215,6 +228,19 @@ mod tests {
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
         assert!(combat.ember_started);
         assert!(combat.player.resources.mana < mana_before);
+    }
+
+    #[test]
+    fn bash_is_blocked_on_l1_martial() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        assert!(!combat.press_verb(crate::combat::CombatVerb::Bash, 0.0, 0.0, 1.0, 0.0));
+        let gate = combat.last_rank_gate.expect("rank miss is fail-loud");
+        assert!(gate.blocked);
+        assert_eq!(gate.action, crate::combat::CombatVerb::Bash);
+        assert_ne!(combat.cast_kind, Some("bash"));
     }
 
     #[test]
