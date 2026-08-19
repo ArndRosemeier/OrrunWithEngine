@@ -862,7 +862,6 @@ fn main() {
             SessionState::Travel => draw_travel(viewer, session, frame),
             SessionState::World => {
                 draw_world_hud(session, world, frame);
-                draw_lock_tell(session, frame);
             }
         }
         draw_settings(&mut settings_ui, world, frame);
@@ -1675,30 +1674,15 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                                 .color(Color32::from_rgb(210, 168, 128)),
                         );
                     }
-                });
-        });
-}
-
-/// Name + HP while a combat hostile is Tab-locked. Nothing when lock is None.
-fn draw_lock_tell(session: &WorldSession, frame: &Frame) {
-    let Some(id) = session.lock_id() else {
-        return;
-    };
-    let Some(hostile) = session.combat().hostiles.iter().find(|h| h.idx == id) else {
-        return;
-    };
-    let name = "Wolf";
-    let text = format!("{name}  {:.0}/{:.0}", hostile.hp, hostile.max_hp);
-    let ctx = frame.ui.ctx().clone();
-    egui::Area::new(egui::Id::new("lock_tell"))
-        .anchor(Align2::CENTER_TOP, [0.0, 12.0])
-        .order(egui::Order::Foreground)
-        .interactable(false)
-        .show(&ctx, |ui| {
-            egui::Frame::popup(ui.style())
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(text).size(14.0));
+                    if let Some(id) = session.lock_id() {
+                        if let Some(hostile) = session.combat().hostiles.iter().find(|h| h.idx == id) {
+                            ui.label(egui::RichText::new(format!(
+                                "wolf-spider  {:.0}/{:.0}",
+                                hostile.hp,
+                                hostile.max_hp,
+                            )).size(14.0));
+                        }
+                    }
                 });
         });
 }
