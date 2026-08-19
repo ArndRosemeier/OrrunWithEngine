@@ -1,0 +1,402 @@
+//! Live combat verbs. Same numbers as the sim — do not invent a second formula set.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use super::math::*;
+use super::types::WorldCombat;
+use super::Ranks;
+
+/// Player-triggered combat actions (not auto-attack).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombatVerb {
+    Strike,
+    Bash,
+    AimedShot,
+    Pin,
+    Ember,
+    Bind,
+    Mend,
+    Ward,
+    Potion,
+}
+
+impl CombatVerb {
+    pub const ALL: [Self; 9] = [
+        Self::Strike,
+        Self::Bash,
+        Self::AimedShot,
+        Self::Pin,
+        Self::Ember,
+        Self::Bind,
+        Self::Mend,
+        Self::Ward,
+        Self::Potion,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Strike => "strike",
+            Self::Bash => "bash",
+            Self::AimedShot => "aimed",
+            Self::Pin => "pin",
+            Self::Ember => "ember",
+            Self::Bind => "bind",
+            Self::Mend => "mend",
+            Self::Ward => "ward",
+            Self::Potion => "potion",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Strike => "Strike",
+            Self::Bash => "Bash",
+            Self::AimedShot => "Aimed Shot",
+            Self::Pin => "Pin",
+            Self::Ember => "Ember",
+            Self::Bind => "Bind",
+            Self::Mend => "Mend",
+            Self::Ward => "Ward",
+            Self::Potion => "Potion",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "strike" => Self::Strike,
+            "bash" => Self::Bash,
+            "aimed" | "aimed_shot" => Self::AimedShot,
+            "pin" => Self::Pin,
+            "ember" => Self::Ember,
+            "bind" => Self::Bind,
+            "mend" => Self::Mend,
+            "ward" => Self::Ward,
+            "potion" => Self::Potion,
+            _ => return None,
+        })
+    }
+
+    /// Rank-gate: the key is a no-op until this rank is known.
+    pub fn rank_ok(self, ranks: Ranks) -> bool {
+        match self {
+            Self::Strike => ranks.martial >= 1,
+            Self::Bash => ranks.martial >= 3,
+            Self::AimedShot => ranks.hunt >= 1,
+            Self::Pin => ranks.hunt >= 3,
+            Self::Ember => ranks.arcane >= 1,
+            Self::Bind => ranks.arcane >= 5,
+            Self::Mend => ranks.arcane >= 3,
+            Self::Ward => ranks.arcane >= 7,
+            Self::Potion => true,
+        }
+    }
+}
+
+impl std::fmt::Display for CombatVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+pub fn empty_cds() -> BTreeMap<&'static str, f64> {
+    let mut cds = BTreeMap::new();
+    for v in CombatVerb::ALL {
+        cds.insert(v.id(), 0.0);
+    }
+    cds
+}
+
+impl WorldCombat {
+    fn cd(&self, k: &str) -> f64 {
+        *self.cds.get(k).unwrap_or(&0.0)
+    }
+
+    fn set_cd(&mut self, k: &'static str, v: f64) {
+        self.cds.insert(k, v);
+    }
+
+    /// Apply a live verb. Rank / mana / CD / range failures are silent no-ops.
+    /// Returns whether the verb started (armed, cast begun, or potion drunk).
+    pub fn press_verb(
+        &mut self,
+        verb: CombatVerb,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) -> bool {
+        let _ = (facing_x, facing_z);
+        if !verb.rank_ok(self.player.stats.ranks) {
+            return false;
+        }
+        if verb != CombatVerb::Potion {
+            if self.cast_kind.is_some() || self.gcd > 0.0 {
+                return false;
+            }
+        }
+        if self.cd(verb.id()) > 0.0 {
+            return false;
+        }
+        match verb {
+            CombatVerb::Strike => {
+                self.strike_armed = true;
+                self.set_cd("strike", STRIKE_CD_S);
+                true
+            }
+            CombatVerb::Bash => self.start_cast("bash", BASH_ANIM_S, 0, self.lock),
+            CombatVerb::AimedShot => {
+                if self.player.arrows <= 0 {
+                    return false;
+                }
+                self.start_cast("aimed", AIMED_DRAW_S, 0, self.lock)
+            }
+            CombatVerb::Pin => {
+                if self.player.arrows <= 0 {
+                    return false;
+                }
+                self.start_cast("pin", BOW_DRAW_S, 0, self.lock)
+            }
+            CombatVerb::Ember => {
+                if self.player.resources.mana < f64::from(EMBER_MANA) {
+                    return false;
+                }
+                let Some(lock) = self.lock else {
+                    return false;
+                };
+                if !self.target_in_range(player_x, player_z, lock, EMBER_RANGE_M) {
+                    return false;
+                }
+                let started = self.start_cast("ember", EMBER_CAST_S, EMBER_MANA, Some(lock));
+                if started {
+                    self.ember_started = true;
+                }
+                started
+            }
+            CombatVerb::Bind => {
+                if self.player.resources.mana < f64::from(BIND_MANA) {
+                    return false;
+                }
+                self.start_cast("bind", BIND_CAST_S, BIND_MANA, self.lock)
+            }
+            CombatVerb::Mend => {
+                if self.player.resources.mana < f64::from(MEND_MANA) {
+                    return false;
+                }
+                self.start_cast("mend", MEND_CAST_S, MEND_MANA, None)
+            }
+            CombatVerb::Ward => {
+                if self.player.resources.mana < f64::from(WARD_MANA) {
+                    return false;
+                }
+                if !self.spend_mana(WARD_MANA) {
+                    return false;
+                }
+                self.ward = f64::from(self.player.stats.ward());
+                self.ward_t = WARD_DUR_S;
+                self.gcd = WARD_GCD_S;
+                self.set_cd("ward", WARD_CD_S);
+                true
+            }
+            CombatVerb::Potion => {
+                if self.player.potions <= 0 {
+                    return false;
+                }
+                let before = self.player.resources.hp;
+                if !self.player.drink_potion() {
+                    return false;
+                }
+                self.last_potion_heal = trunc(self.player.resources.hp - before);
+                self.set_cd("potion", POTION_CD_S);
+                true
+            }
+        }
+    }
+
+    fn start_cast(
+        &mut self,
+        kind: &'static str,
+        time: f64,
+        mana: i32,
+        target: Option<i32>,
+    ) -> bool {
+        if time < 0.0 {
+            return false;
+        }
+        if mana > 0 && !self.spend_mana(mana) {
+            return false;
+        }
+        self.cast_kind = Some(kind);
+        self.cast_t = time;
+        self.cast_target = target;
+        self.busy = time;
+        self.set_cd(kind, cd_for(kind));
+        true
+    }
+
+    fn spend_mana(&mut self, amount: i32) -> bool {
+        let need = f64::from(amount);
+        if self.player.resources.mana < need {
+            return false;
+        }
+        self.player.resources.mana -= need;
+        true
+    }
+
+    fn target_in_range(&self, player_x: f64, player_z: f64, idx: i32, range: f64) -> bool {
+        self.hostiles.iter().any(|h| {
+            h.idx == idx
+                && h.alive
+                && dist(player_x, player_z, h.x, h.z) <= range
+        })
+    }
+
+    /// Tick CDs, casts, and CC. Same 0.1 s clock as auto.
+    pub fn tick_verbs(&mut self, player_x: f64, player_z: f64, dt: f64) {
+        if dt <= 0.0 {
+            return;
+        }
+        for v in self.cds.values_mut() {
+            *v = (*v - dt).max(0.0);
+        }
+        self.gcd = (self.gcd - dt).max(0.0);
+        self.busy = (self.busy - dt).max(0.0);
+        if self.ward_t > 0.0 {
+            self.ward_t = (self.ward_t - dt).max(0.0);
+            if self.ward_t <= 0.0 {
+                self.ward = 0.0;
+            }
+        }
+        for h in &mut self.hostiles {
+            h.stun_s = (h.stun_s - dt).max(0.0);
+            h.slow_s = (h.slow_s - dt).max(0.0);
+            h.root_s = (h.root_s - dt).max(0.0);
+        }
+        if self.cast_kind.is_some() {
+            self.cast_t -= dt;
+            if self.cast_t <= 0.0 {
+                self.finish_cast(player_x, player_z);
+            }
+        }
+        if self.in_combat() {
+            self.player.resources.regen_combat(dt);
+        } else {
+            self.player.resources.regen_ooc(dt);
+        }
+    }
+
+    fn finish_cast(&mut self, player_x: f64, player_z: f64) {
+        let kind = self.cast_kind.take().unwrap_or("");
+        let target = self.cast_target.take();
+        self.cast_t = 0.0;
+        self.busy = 0.0;
+        match kind {
+            "bash" => {
+                if let Some(idx) = target.or(self.lock) {
+                    if let Some(h) = self.hostiles.iter_mut().find(|h| h.idx == idx && h.alive) {
+                        h.stun_s = h.stun_s.max(BASH_STUN_S);
+                    }
+                }
+            }
+            "mend" => {
+                let heal = f64::from(self.player.stats.mend());
+                self.player.resources.hp =
+                    self.player.resources.hp_max.min(self.player.resources.hp + heal);
+            }
+            "bind" => {
+                if let Some(idx) = target.or(self.lock) {
+                    if self.target_in_range(player_x, player_z, idx, BIND_RANGE_M) {
+                        if let Some(h) = self.hostiles.iter_mut().find(|h| h.idx == idx && h.alive)
+                        {
+                            h.root_s = BIND_ROOT_S;
+                            self.player.used_pin_or_bind = true;
+                        }
+                    }
+                }
+            }
+            "aimed" | "pin" => {
+                let Some(idx) = target.or(self.lock) else {
+                    return;
+                };
+                let Some(hi) = self.hostiles.iter().position(|h| h.idx == idx && h.alive) else {
+                    return;
+                };
+                if self.player.arrows <= 0 {
+                    return;
+                }
+                self.player.arrows -= 1;
+                let d = dist(
+                    player_x,
+                    player_z,
+                    self.hostiles[hi].x,
+                    self.hostiles[hi].z,
+                );
+                let raw = self.player.stats.bow_hit(kind == "aimed", d);
+                let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
+                self.hostiles[hi].hp -= f64::from(dealt);
+                if kind == "pin" {
+                    self.hostiles[hi].slow_s = PIN_DUR_S;
+                    self.player.used_pin_or_bind = true;
+                }
+                if self.hostiles[hi].hp <= 0.0 {
+                    self.hostiles[hi].hp = 0.0;
+                    self.hostiles[hi].alive = false;
+                    if self.lock == Some(idx) {
+                        self.lock = None;
+                    }
+                }
+            }
+            "ember" => {
+                let Some(idx) = target.or(self.lock) else {
+                    return;
+                };
+                let Some(hi) = self.hostiles.iter().position(|h| h.idx == idx && h.alive) else {
+                    return;
+                };
+                let d = dist(
+                    player_x,
+                    player_z,
+                    self.hostiles[hi].x,
+                    self.hostiles[hi].z,
+                );
+                if d > EMBER_RANGE_M {
+                    return;
+                }
+                let raw = self.player.stats.ember();
+                let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
+                self.hostiles[hi].hp -= f64::from(dealt);
+                if self.hostiles[hi].hp <= 0.0 {
+                    self.hostiles[hi].hp = 0.0;
+                    self.hostiles[hi].alive = false;
+                    if self.lock == Some(idx) {
+                        self.lock = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn cd_for(kind: &str) -> f64 {
+    match kind {
+        "strike" => STRIKE_CD_S,
+        "bash" => BASH_CD_S,
+        "aimed" => AIMED_CD_S,
+        "pin" => PIN_CD_S,
+        "ember" => EMBER_CD_S,
+        "bind" => BIND_CD_S,
+        "mend" => MEND_CD_S,
+        "ward" => WARD_CD_S,
+        "potion" => POTION_CD_S,
+        _ => 0.0,
+    }
+}
+
+fn dist(ax: f64, az: f64, bx: f64, bz: f64) -> f64 {
+    let dx = bx - ax;
+    let dz = bz - az;
+    (dx * dx + dz * dz).sqrt()
+}

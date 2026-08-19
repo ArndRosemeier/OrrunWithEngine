@@ -7,6 +7,7 @@ pub mod math;
 pub mod sheets;
 pub mod sim;
 pub mod types;
+pub mod verbs;
 
 pub use math::{
     mitigation, skill_rider, Attrs, Discipline, Ranks, BOW_DRAW_S, HEAR_AGGRO_M, LEASH_M,
@@ -24,6 +25,7 @@ pub use types::{
     melee_auto_legal, tab_candidates, Aggro, CombatResources, LivePlayer, Shaken, TargetLock,
     WorldCombat, WorldHostile,
 };
+pub use verbs::CombatVerb;
 
 /// Published L1 Martial vs 1 wolf fixture used by playtester `combat`.
 pub fn fixture_l1_martial_wolf() -> Result<serde_json::Value, String> {

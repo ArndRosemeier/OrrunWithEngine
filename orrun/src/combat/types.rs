@@ -208,6 +208,9 @@ pub struct WorldHostile {
     pub max_hp: f64,
     pub armor: i32,
     pub alive: bool,
+    pub stun_s: f64,
+    pub slow_s: f64,
+    pub root_s: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -218,6 +221,17 @@ pub struct WorldCombat {
     pub auto_cd: f64,
     pub last_auto_dealt: i32,
     pub hostiles: Vec<WorldHostile>,
+    pub strike_armed: bool,
+    pub ember_started: bool,
+    pub last_potion_heal: i32,
+    pub busy: f64,
+    pub gcd: f64,
+    pub cds: std::collections::BTreeMap<&'static str, f64>,
+    pub cast_kind: Option<&'static str>,
+    pub cast_t: f64,
+    pub cast_target: Option<i32>,
+    pub ward: f64,
+    pub ward_t: f64,
 }
 
 impl WorldCombat {
@@ -229,6 +243,17 @@ impl WorldCombat {
             auto_cd: MELEE_SWING_S,
             last_auto_dealt: 0,
             hostiles: Vec::new(),
+            strike_armed: false,
+            ember_started: false,
+            last_potion_heal: 0,
+            busy: 0.0,
+            gcd: 0.0,
+            cds: super::verbs::empty_cds(),
+            cast_kind: None,
+            cast_t: 0.0,
+            cast_target: None,
+            ward: 0.0,
+            ward_t: 0.0,
         }
     }
 
@@ -290,11 +315,18 @@ impl WorldCombat {
         if !melee_auto_legal(player_x, player_z, facing_x, facing_z, h.x, h.z) {
             return None;
         }
+        if self.cast_kind.is_some() || self.busy > 0.0 {
+            return None;
+        }
         self.auto_cd -= dt;
         if self.auto_cd > 0.0 {
             return None;
         }
-        let raw = self.player.stats.melee_hit(false);
+        let strike = self.strike_armed;
+        let raw = self.player.stats.melee_hit(strike);
+        if strike {
+            self.strike_armed = false;
+        }
         let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
         self.last_auto_dealt = dealt;
         self.hostiles[hi].hp -= f64::from(dealt);

@@ -1,4 +1,4 @@
-//! v0 playtest harness: standing, dungeon_fill, bind.
+//! v0 playtest harness: standing, dungeon_fill, bind, combat, controls.
 //!
 //! Driven through [`WorldSession::step`] with explicit [`WalkInput`]. Never
 //! captures the pointer, never treats E as interact, never steals Escape.
@@ -6,7 +6,7 @@
 //! not as an absolute setLook.
 //!
 //! Usage:
-//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind`
+//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls`
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +16,8 @@ use engine::prelude::*;
 use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
 use orrun::atlas::ContinentAtlas;
+use orrun::combat::CombatVerb;
+use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, Locomotion,
     MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
@@ -57,6 +59,7 @@ fn main() {
         "standing.json",
         "dungeon_fill.json",
         "combat.json",
+        "controls.json",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -109,6 +112,7 @@ fn main() {
         request,
         sea,
         combat_tab_sent: false,
+        controls_stage: ControlsStage::Tab,
     };
 
     driver.write_running_report();
@@ -278,6 +282,7 @@ enum Phase {
     BindForceWalk,
     BindWrite,
     CombatLive,
+    ControlsLive,
     NextHook,
     Done,
 }
@@ -315,6 +320,16 @@ struct Driver {
     request: WorldEntryRequest,
     sea: f32,
     combat_tab_sent: bool,
+    controls_stage: ControlsStage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlsStage {
+    Tab,
+    Strike,
+    WaitHit,
+    Ember,
+    Potion,
 }
 
 impl Driver {
@@ -402,6 +417,21 @@ impl Driver {
                     input.tab = true;
                 }
             }
+            Phase::ControlsLive => {
+                match self.controls_stage {
+                    ControlsStage::Tab => input.tab = true,
+                    ControlsStage::Strike => {
+                        input.verb = self.session.key_binds().verb_for(engine::Key::Digit1)
+                    }
+                    ControlsStage::WaitHit => {}
+                    ControlsStage::Ember => {
+                        input.verb = self.session.key_binds().verb_for(engine::Key::Digit5)
+                    }
+                    ControlsStage::Potion => {
+                        input.verb = self.session.key_binds().verb_for(engine::Key::R)
+                    }
+                }
+            }
             Phase::BindForceWalk => {
                 if self.session.locomotion() == Some(Locomotion::Fly) {
                     input.toggle_fly = true;
@@ -472,6 +502,7 @@ impl Driver {
             Phase::BindForceWalk => self.tick_force_walk(world, frame),
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
+            Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::NextHook => {
                 self.hook_i += 1;
                 self.start_current_hook(world, frame);
@@ -495,6 +526,7 @@ impl Driver {
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
             "combat" => self.start_combat(world, frame),
+            "controls" => self.start_controls(world, frame),
             "faction_overlay" => {
                 self.write_json(&name, json!({ "status": "absent" }));
                 self.reports
@@ -1260,7 +1292,134 @@ impl Driver {
         }
     }
 
-        fn write_json(&self, name: &str, value: Value) {
+    fn start_controls(&mut self, world: &mut World, frame: &Frame) {
+        let loaded = Settings::load().unwrap_or_else(|err| panic!("{err}"));
+        let missing = loaded.keys.missing();
+        if !missing.is_empty() {
+            let names: Vec<_> = missing.iter().map(|v| v.label()).collect();
+            self.write_json(
+                "controls",
+                json!({
+                    "status": "fail",
+                    "why": format!("unbound verbs: {}", names.join(",")),
+                    "keys": loaded.keys.inspect_map(),
+                }),
+            );
+            self.fail_current(&format!(
+                "controls: unbound verbs: {}",
+                names.join(",")
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        let binds = loaded.keys;
+        if binds.verb_for(engine::Key::Digit1) != Some(CombatVerb::Strike) {
+            self.fail_current("controls: default Strike key 1 is not bound to Strike");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if binds.verb_for(engine::Key::Digit5) != Some(CombatVerb::Ember) {
+            self.fail_current("controls: default Ember key 5 is not bound to Ember");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if binds.verb_for(engine::Key::R) != Some(CombatVerb::Potion) {
+            self.fail_current("controls: potion default is R (Q is sidestep) and must be bound");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.session.set_key_binds(binds);
+        self.session.rearm_combat_fixtures();
+        self.controls_stage = ControlsStage::Tab;
+        self.phase = Phase::ControlsLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_controls(&mut self, world: &mut World, frame: &Frame) {
+        if frame.time - self.phase_t0 > 8.0 {
+            self.fail_current(&format!(
+                "controls timed out in {:?} lock={:?} auto={:?} ember={} potions={}",
+                self.controls_stage,
+                self.session.lock_id(),
+                self.session.first_auto_hit(),
+                self.session.combat().ember_started,
+                self.session.combat().player.potions
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        match self.controls_stage {
+            ControlsStage::Tab => {
+                if self.session.lock_id().is_some() {
+                    self.controls_stage = ControlsStage::Strike;
+                }
+            }
+            ControlsStage::Strike => {
+                if !self.session.combat().strike_armed {
+                    self.fail_current("controls: pressing default Strike key 1 did not arm Strike");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.controls_stage = ControlsStage::WaitHit;
+            }
+            ControlsStage::WaitHit => {
+                match self.session.first_auto_hit() {
+                    Some(16) => {
+                        self.session.combat_mut().player.stats.ranks.arcane = 1;
+                        self.controls_stage = ControlsStage::Ember;
+                    }
+                    Some(got) => {
+                        self.fail_current(&format!(
+                            "controls: Strike next swing want mitigated 16, got {got}"
+                        ));
+                        self.advance_after_fail(world, frame);
+                    }
+                    None => {}
+                }
+            }
+            ControlsStage::Ember => {
+                if !self.session.combat().ember_started {
+                    self.fail_current(
+                        "controls: pressing default Ember key 5 did not start Ember",
+                    );
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.session.combat_mut().player.resources.hp = 50.0;
+                self.controls_stage = ControlsStage::Potion;
+            }
+            ControlsStage::Potion => {
+                let hp = self.session.combat().player.resources.hp;
+                let potions = self.session.combat().player.potions;
+                let heal = self.session.combat().last_potion_heal;
+                if (hp - 90.0).abs() > 1e-6 || potions != 0 || heal != 40 {
+                    self.fail_current(&format!(
+                        "controls: potion want hp 90 potions 0 heal 40, got hp {hp} potions {potions} heal {heal}"
+                    ));
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                let keys = self.session.key_binds().inspect_map();
+                self.write_json(
+                    "controls",
+                    json!({
+                        "status": "ok",
+                        "keys": keys,
+                        "strike_first_auto": 16,
+                        "ember_started": true,
+                        "potion_hp": hp,
+                        "potion_heal": heal,
+                        "potion_key": "R",
+                    }),
+                );
+                self.ok_hook("controls");
+                self.phase = Phase::NextHook;
+                self.phase_t0 = frame.time;
+            }
+        }
+    }
+
+    fn write_json(&self, name: &str, value: Value) {
         let path = self.shots.join(format!("{name}.json"));
         fs::write(
             &path,

@@ -74,9 +74,23 @@ impl CombatLayer {
                 max_hp: f64::from(sheet.hp),
                 armor: sheet.armor,
                 alive: true,
+                stun_s: 0.0,
+                slow_s: 0.0,
+                root_s: 0.0,
             });
         }
         *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
@@ -109,6 +123,7 @@ impl CombatLayer {
         self.accum_s += dt;
         while self.accum_s + 1e-12 >= TICK {
             self.accum_s -= TICK;
+            combat.tick_verbs(player_x, player_z, TICK);
             if let Some(dealt) =
                 combat.tick_melee_auto(player_x, player_z, facing_x, facing_z, TICK)
             {
@@ -128,6 +143,17 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.cycle = combat.cycle.clone();
     out.auto_cd = combat.auto_cd;
     out.last_auto_dealt = combat.last_auto_dealt;
+    out.strike_armed = combat.strike_armed;
+    out.ember_started = combat.ember_started;
+    out.last_potion_heal = combat.last_potion_heal;
+    out.busy = combat.busy;
+    out.gcd = combat.gcd;
+    out.cds = combat.cds.clone();
+    out.cast_kind = combat.cast_kind;
+    out.cast_t = combat.cast_t;
+    out.cast_target = combat.cast_target;
+    out.ward = combat.ward;
+    out.ward_t = combat.ward_t;
     out
 }
 
@@ -155,5 +181,49 @@ mod tests {
     #[test]
     fn combat_walk_is_4_5_not_10() {
         assert!((CombatLayer::install().walk_mps() - 4.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn strike_next_swing_is_one_point_five() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        assert!(combat.press_verb(crate::combat::CombatVerb::Strike, 0.0, 0.0, 1.0, 0.0));
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
+        assert_eq!(layer.first_auto(), Some(16));
+    }
+
+    #[test]
+    fn ember_is_noop_without_arcane_rank() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        assert!(!combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
+        assert!(!combat.ember_started);
+    }
+
+    #[test]
+    fn ember_starts_when_arcane_known() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        combat.player.stats.ranks.arcane = 1;
+        let mana_before = combat.player.resources.mana;
+        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
+        assert!(combat.ember_started);
+        assert!(combat.player.resources.mana < mana_before);
+    }
+
+    #[test]
+    fn potion_heals_forty() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.player.resources.hp = 50.0;
+        assert!(combat.press_verb(crate::combat::CombatVerb::Potion, 0.0, 0.0, 1.0, 0.0));
+        assert_eq!(combat.player.resources.hp, 90.0);
+        assert_eq!(combat.player.potions, 0);
+        assert_eq!(combat.last_potion_heal, 40);
     }
 }

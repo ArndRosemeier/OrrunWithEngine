@@ -21,6 +21,9 @@ use engine::place::GlobalPlace;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, Frame, Haze, Sky, World};
 use engine::{Key, MouseButton, SpaceId};
+
+use crate::combat::CombatVerb;
+use crate::settings::KeyBinds;
 use glam::{Vec2, Vec3};
 use thiserror::Error;
 
@@ -145,6 +148,8 @@ pub struct WalkInput {
     pub tab: bool,
     /// Shift. Combat walk 4.5 / sprint 7. Not fly.
     pub sprint: bool,
+    /// Combat verb that fired this frame from the current binds.
+    pub verb: Option<CombatVerb>,
 }
 
 impl WalkInput {
@@ -161,6 +166,7 @@ impl WalkInput {
         skip_travel: false,
         tab: false,
         sprint: false,
+        verb: None,
     };
 
     /// Read one frame of first-person controls.
@@ -180,6 +186,7 @@ impl WalkInput {
         pitch_degrees: f32,
         mode: Locomotion,
         mouse_look: bool,
+        binds: &KeyBinds,
     ) -> Self {
         let keys = &frame.input;
         let interact = keys.pressed(Key::E);
@@ -234,6 +241,7 @@ impl WalkInput {
             skip_travel: keys.pressed(Key::Space),
             tab: keys.pressed(Key::Tab),
             sprint,
+            verb: binds.verb_pressed(keys),
         }
     }
 }
@@ -325,6 +333,7 @@ pub struct WorldSession {
     combat: crate::combat::WorldCombat,
     combat_layer: super::combat_layer::CombatLayer,
     last_shrine: Option<GlobalPlace>,
+    key_binds: KeyBinds,
 }
 
 impl WorldSession {
@@ -354,6 +363,7 @@ impl WorldSession {
             combat: crate::combat::WorldCombat::specialist(1, crate::combat::Discipline::Martial),
             combat_layer: super::combat_layer::CombatLayer::install(),
             last_shrine: None,
+            key_binds: KeyBinds::default(),
         }
     }
 
@@ -400,6 +410,14 @@ impl WorldSession {
     /// Next world tick reseats the L1 wolf line on the current facing.
     pub fn rearm_combat_fixtures(&mut self) {
         self.combat_layer.rearm();
+    }
+
+    pub fn key_binds(&self) -> &KeyBinds {
+        &self.key_binds
+    }
+
+    pub fn set_key_binds(&mut self, binds: KeyBinds) {
+        self.key_binds = binds;
     }
 
     pub fn apply_save(&mut self, stand: &crate::save::SavedStand) {
@@ -656,7 +674,7 @@ impl WorldSession {
         let looking = world.pointer_lock();
         self.step(
             world,
-            WalkInput::from_frame(frame, yaw, pitch, mode, looking),
+            WalkInput::from_frame(frame, yaw, pitch, mode, looking, &self.key_binds),
         )
     }
 
@@ -1144,6 +1162,16 @@ impl WorldSession {
             } else if input.capture_look && world.pointer_lock() {
                 self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
             }
+        }
+        if let Some(verb) = input.verb {
+            let facing = Camera::facing_xz(player.yaw_degrees);
+            self.combat.press_verb(
+                verb,
+                player.position.x,
+                player.position.z,
+                facing.x as f64,
+                facing.z as f64,
+            );
         }
         player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);
         player.pitch_degrees = (player.pitch_degrees + input.pitch_delta_degrees)
