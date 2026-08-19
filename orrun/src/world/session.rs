@@ -1177,12 +1177,15 @@ impl WorldSession {
                             .unwrap_or(player.position.y)
                     })
                     .collect();
-                self.combat_layer.spawn_wolf_meshes(
+                if let Err(err) = self.combat_layer.spawn_wolf_meshes(
                     world,
                     &mut self.combat,
                     &feet,
                     player.yaw_degrees,
-                )?;
+                ) {
+                    self.combat_layer.rearm();
+                    return Err(err.into());
+                }
             }
         }
         if input.tab || (input.capture_look && world.pointer_lock()) {

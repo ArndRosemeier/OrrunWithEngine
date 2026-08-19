@@ -17,7 +17,7 @@ use engine::error::{EngineError, EngineResult};
 use engine::place::Place;
 use engine::space::GlobalPosition;
 use engine::world::{EntityId, World};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Live hostiles + 0.1 s combat clock in front of the player.

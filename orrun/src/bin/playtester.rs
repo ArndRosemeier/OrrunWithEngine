@@ -419,7 +419,14 @@ impl Driver {
                 }
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
-            Phase::CombatLive | Phase::CombatBodyLive => {
+            Phase::CombatLive => {
+                // Tab only after world/horizon/mesh are ready, so the shot
+                // is before the 1.8s first auto.
+                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
+                }
+            }
+            Phase::CombatBodyLive => {
                 if !self.combat_tab_sent {
                     input.tab = true;
                 }
@@ -1251,12 +1258,12 @@ impl Driver {
         if !self.combat_tab_sent {
             self.combat_tab_sent = true;
         }
-        self.aim_pitch(HORIZON_PITCH);
+        self.aim_at_wolf_body();
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-        if !pitch_near(pitch, HORIZON_PITCH) {
+        if !self.looking_at_wolf_body() {
             if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current(&format!(
-                    "combat_body: horizon look failed, pitch={pitch} (want {HORIZON_PITCH}, not floor)"
+                    "combat_body: eye-height look at wolf body failed, pitch={pitch} (not floor)"
                 ));
                 self.advance_after_fail(world, frame);
             }
@@ -1269,6 +1276,13 @@ impl Driver {
             }
             return;
         };
+        if lock_name != "Wolf" || lock_hp <= 0.0 {
+            self.fail_current(&format!(
+                "combat_body: lock want name Wolf + HP>0, got {lock_name} hp={lock_hp}"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
         let mesh_visible = self.session.fixture_mesh_visible(world);
         if !mesh_visible {
             if frame.time - self.phase_t0 > 8.0 {
@@ -1291,8 +1305,9 @@ impl Driver {
                 "mesh_visible": true,
                 "mesh": "fauna/wolf/wolf.gltf",
                 "mesh_note": "catalog has wolf, not spider",
-                "horizon": true,
+                "horizon": false,
                 "look_down": false,
+                "eye_height_body": true,
                 "shot": "combat_body.png",
             }),
         );
@@ -1301,6 +1316,45 @@ impl Driver {
         self.queue_shot(world, frame, "combat_body");
         self.phase = Phase::NextHook;
         self.phase_t0 = frame.time;
+    }
+
+
+    fn aim_at_wolf_body(&mut self) {
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let lock = self.session.lock_id();
+        let Some(h) = self
+            .session
+            .combat()
+            .hostiles
+            .iter()
+            .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
+            .or_else(|| self.session.combat().hostiles.first())
+        else {
+            return;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let target = Vec3::new(h.x as f32, pos.y as f32 + 0.7, h.z as f32);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
+    }
+
+    fn looking_at_wolf_body(&self) -> bool {
+        let Some(pos) = self.session.player_position() else {
+            return false;
+        };
+        let Some(h) = self.session.combat().hostiles.first() else {
+            return false;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let target = Vec3::new(h.x as f32, pos.y as f32 + 0.7, h.z as f32);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        view_angle_degrees(eye, yaw, pitch, target) < 18.0 && pitch > -55.0
     }
 
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
@@ -1350,87 +1404,113 @@ impl Driver {
     }
 
     fn tick_combat_live(&mut self, world: &mut World, frame: &Frame) {
-        if !self.combat_tab_sent {
-            self.combat_tab_sent = true;
-            return;
-        }
-        if !self.combat_shot_sent {
-            if self.session.lock_id().is_none() {
-                if frame.time - self.phase_t0 > 5.0 {
-                    self.fail_current("combat: lock unset after Tab");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            }
-            let Some((name, hp)) = self.session.lock_name_hp() else {
-                if frame.time - self.phase_t0 > 5.0 {
-                    self.fail_current("combat: lock name/hp unset after Tab");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            };
-            let name = name.to_string();
-            self.aim_pitch(HORIZON_PITCH);
-            let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-            if !pitch_near(pitch, HORIZON_PITCH) {
-                if frame.time - self.phase_t0 > 5.0 {
-                    self.fail_current("combat: horizon look failed before combat.png");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            }
-            if !self.session.fixture_mesh_visible(world) {
-                if frame.time - self.phase_t0 > 5.0 {
-                    self.fail_current("combat: wolf meshes not visible");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            }
-            if self.session.first_auto_hit().is_some() {
-                self.fail_current("combat: first auto landed before combat.png");
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: never reached World");
                 self.advance_after_fail(world, frame);
-                return;
             }
-            let hp_max = self
-                .session
-                .combat()
-                .hostiles
-                .iter()
-                .find(|h| Some(h.idx) == self.session.lock_id())
-                .map(|h| h.max_hp)
-                .unwrap_or(hp);
-            self.write_json(
-                "combat",
-                json!({
-                    "status": "ok",
-                    "lock": self.session.lock_id(),
-                    "name": name,
-                    "hp": hp,
-                    "hp_max": hp_max,
-                    "shot": "combat.png",
-                    "first_auto_before_shot": self.session.first_auto_hit(),
-                }),
-            );
-            self.combat_shot_sent = true;
-            world.mark_ready();
-            self.queue_shot(world, frame, "combat");
             return;
         }
-        let walk = self.session.combat_walk_speed();
-        let live = self.session.first_auto_hit();
-        if live == Some(11) && (walk - 4.5).abs() <= 1e-4 {
-            // combat.json was written at screenshot time (lock + wolf-spider 70/70).
-            self.ok_hook("combat");
-            self.phase = Phase::NextHook;
-            self.phase_t0 = frame.time;
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
             return;
         }
-        if frame.time - self.phase_t0 > 5.0 {
+        // Horizon into the first wolf is a snout close-up. Look at the back
+        // body from a slight side offset so all three sit in frame.
+        let Some(back) = self.session.combat().hostiles.last() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: no fixture hostiles");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let fx = (back.x - pos.x) as f32;
+        let fz = (back.z - pos.z) as f32;
+        let target = Vec3::new(
+            back.x as f32 - fz * 0.35,
+            pos.y as f32 + 0.45,
+            back.z as f32 + fx * 0.35,
+        );
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
+        if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "combat: line look failed, pitch={pitch} yaw={yaw}"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: wolf meshes not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        // Ready to lock. Next input frames send Tab until lock_id is set.
+        self.combat_tab_sent = true;
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: lock unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.session.first_auto_hit().is_some() {
+            self.fail_current("combat: first auto landed before combat.png");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > 5.0 {
+                self.fail_current("combat: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let hp_max = self
+            .session
+            .combat()
+            .hostiles
+            .iter()
+            .find(|h| Some(h.idx) == self.session.lock_id())
+            .map(|h| h.max_hp)
+            .unwrap_or(hp);
+        if name != "wolf-spider" || (hp - 70.0).abs() > 0.01 || (hp_max - 70.0).abs() > 0.01 {
             self.fail_current(&format!(
-                "live lock+auto want first mitigated 11, got {live:?}; walk {walk}"
+                "combat: want wolf-spider 70/70 before auto, got {name} {hp}/{hp_max}"
             ));
             self.advance_after_fail(world, frame);
+            return;
         }
+        self.write_json(
+            "combat",
+            json!({
+                "status": "ok",
+                "lock": self.session.lock_id(),
+                "name": name,
+                "hp": hp,
+                "hp_max": hp_max,
+                "shot": "combat.png",
+                "first_auto_before_shot": self.session.first_auto_hit(),
+            }),
+        );
+        self.ok_hook("combat");
+        world.mark_ready();
+        self.queue_shot(world, frame, "combat");
+        self.phase = Phase::NextHook;
     }
 
     fn start_controls(&mut self, world: &mut World, frame: &Frame) {
