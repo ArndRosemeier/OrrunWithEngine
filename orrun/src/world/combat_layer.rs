@@ -86,9 +86,15 @@ impl CombatLayer {
         }
         let model = self.wolf_model()?;
         let yaw = player_yaw_deg + 180.0;
+        // wolf.gltf is ~5.5 m long. Origin at the combat point puts the
+        // camera inside the snout. Keep hit XZ; sit the mesh behind it.
+        let away = player_yaw_deg.to_radians();
+        let ax = away.sin() as f64;
+        let az = away.cos() as f64;
+        const MESH_BEHIND_M: f64 = 2.55;
         for (i, h) in combat.hostiles.iter_mut().enumerate() {
             let y = feet_y.get(i).copied().unwrap_or(0.0);
-            let pos = GlobalPosition::at(h.x, y, h.z);
+            let pos = GlobalPosition::at(h.x + ax * MESH_BEHIND_M, y, h.z + az * MESH_BEHIND_M);
             let render = world.to_render(pos)?;
             let place = Place::at(render.x, render.y, render.z)?
                 .yaw_deg(yaw)?
@@ -96,6 +102,7 @@ impl CombatLayer {
             let id = world.spawn_animated_shared(model.clone(), place)?;
             world.play_animation(id, "Idle")?;
             world.set_animation_speed(id, 0.65)?;
+            h.name = "Wolf".into();
             h.entity = Some(id);
             self.mesh_ids.push(id);
         }
@@ -155,7 +162,7 @@ impl CombatLayer {
                 stun_s: 0.0,
                 slow_s: 0.0,
                 root_s: 0.0,
-                name: "Wolf".into(),
+                name: sheet.name.clone(),
                 entity: None,
             });
         }
@@ -394,12 +401,12 @@ mod tests {
     }
 
     #[test]
-    fn fixture_lock_name_is_wolf_and_mesh_is_catalog_wolf() {
+    fn fixture_lock_name_is_wolf_spider_and_mesh_is_catalog_wolf() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
         assert_eq!(combat.hostiles.len(), 3);
-        assert!(combat.hostiles.iter().all(|h| h.name == "Wolf"));
+        assert!(combat.hostiles.iter().all(|h| h.name == "wolf-spider"));
         let catalog = FaunaCatalog::load().expect("fauna catalog");
         let spec = catalog.spec("wolf");
         assert_eq!(spec.source, "wolf/wolf.gltf");

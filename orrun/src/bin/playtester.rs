@@ -420,9 +420,18 @@ impl Driver {
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
             Phase::CombatLive => {
-                // Tab only after world/horizon/mesh are ready, so the shot
-                // is before the 1.8s first auto.
-                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                if !self.combat_tab_sent {
+                    if let (Some(pos), Some(vantage)) = (
+                        self.session.player_position(),
+                        combat_side_vantage(&self.session),
+                    ) {
+                        if pos.horizontal().distance(vantage) > 0.75 {
+                            input = walk_toward(pos.horizontal(), vantage, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                } else if self.session.lock_id().is_none() {
                     input.tab = true;
                 }
             }
@@ -1276,7 +1285,7 @@ impl Driver {
             }
             return;
         };
-        if lock_name != "Wolf" || lock_hp <= 0.0 {
+        if lock_name != "wolf-spider" || lock_hp <= 0.0 {
             self.fail_current(&format!(
                 "combat_body: lock want name Wolf + HP>0, got {lock_name} hp={lock_hp}"
             ));
@@ -1421,40 +1430,36 @@ impl Driver {
             }
             return;
         }
-        // Horizon into the first wolf is a snout close-up. Look at the back
-        // body from a slight side offset so all three sit in frame.
-        let Some(back) = self.session.combat().hostiles.last() else {
+        if !self.session.fixture_mesh_visible(world) {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: no fixture hostiles");
-                self.advance_after_fail(world, frame);
-            }
-            return;
-        };
-        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
-        let fx = (back.x - pos.x) as f32;
-        let fz = (back.z - pos.z) as f32;
-        let target = Vec3::new(
-            back.x as f32 - fz * 0.35,
-            pos.y as f32 + 0.45,
-            back.z as f32 + fx * 0.35,
-        );
-        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
-        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
-        self.pending_yaw_delta = dyaw;
-        self.pending_pitch_delta = dpitch;
-        if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
-            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current(&format!(
-                    "combat: line look failed, pitch={pitch} yaw={yaw}"
-                ));
+                self.fail_current("combat: wolf meshes not visible");
                 self.advance_after_fail(world, frame);
             }
             return;
         }
-        if !self.session.fixture_mesh_visible(world) {
+        let Some(vantage) = combat_side_vantage(&self.session) else {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: wolf meshes not visible");
+                self.fail_current("combat: no wolf line for vantage");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        self.aim_at_wolf_line();
+        if pos.horizontal().distance(vantage) > 0.75 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: never reached side vantage");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((eye, target)) = wolf_line_look(&self.session) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: never looked at wolf line");
                 self.advance_after_fail(world, frame);
             }
             return;
@@ -1511,6 +1516,17 @@ impl Driver {
         world.mark_ready();
         self.queue_shot(world, frame, "combat");
         self.phase = Phase::NextHook;
+    }
+
+    fn aim_at_wolf_line(&mut self) {
+        let Some((eye, target)) = wolf_line_look(&self.session) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn start_controls(&mut self, world: &mut World, frame: &Frame) {
@@ -1887,6 +1903,47 @@ fn locomotion_name(mode: Option<Locomotion>) -> &'static str {
         Some(Locomotion::Fly) => "fly",
         None => "none",
     }
+}
+
+
+fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
+    let hs = &session.combat().hostiles;
+    if hs.len() < 3 {
+        return None;
+    }
+    let a = &hs[0];
+    let c = &hs[2];
+    let fx = c.x - a.x;
+    let fz = c.z - a.z;
+    let fl = (fx * fx + fz * fz).sqrt();
+    if fl < 1e-6 {
+        return None;
+    }
+    let (fx, fz) = (fx / fl, fz / fl);
+    let (rx, rz) = (-fz, fx);
+    // Off the line: back toward the spawn side, then 8 m to the right so the
+    // 5.5 m wolf bodies are fully in frame instead of filling the near plane.
+    Some(GlobalXZ::at(
+        a.x - fx * 5.0 + rx * 8.0,
+        a.z - fz * 5.0 + rz * 8.0,
+    ))
+}
+
+fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
+    let pos = session.player_position()?;
+    let hs = &session.combat().hostiles;
+    if hs.is_empty() {
+        return None;
+    }
+    let n = hs.len() as f64;
+    let mid_x = hs.iter().map(|h| h.x).sum::<f64>() / n;
+    let mid_z = hs.iter().map(|h| h.z).sum::<f64>() / n;
+    let ground = session
+        .contact_height(GlobalXZ::at(mid_x, mid_z))
+        .unwrap_or(pos.y as f32);
+    let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+    let target = Vec3::new(mid_x as f32, ground + 0.85, mid_z as f32);
+    Some((eye, target))
 }
 
 fn shortest_delta(from: f32, to: f32) -> f32 {

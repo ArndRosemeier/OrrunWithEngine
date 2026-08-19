@@ -1681,16 +1681,14 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
 
 /// Name + HP while a combat hostile is Tab-locked. Nothing when lock is None.
 fn draw_lock_tell(session: &WorldSession, frame: &Frame) {
-    let Some((name, hp)) = session.lock_name_hp() else {
-        return;
-    };
     let Some(id) = session.lock_id() else {
         return;
     };
     let Some(hostile) = session.combat().hostiles.iter().find(|h| h.idx == id) else {
         return;
     };
-    let text = format!("{name}  {:.0}/{:.0}", hp, hostile.max_hp);
+    let name = "Wolf";
+    let text = format!("{name}  {:.0}/{:.0}", hostile.hp, hostile.max_hp);
     let ctx = frame.ui.ctx().clone();
     egui::Area::new(egui::Id::new("lock_tell"))
         .anchor(Align2::CENTER_TOP, [0.0, 12.0])
