@@ -372,7 +372,26 @@ impl CombatLayer {
         self.accum_s += dt;
         while self.accum_s + 1e-12 >= TICK {
             self.accum_s -= TICK;
+            let pending_cast = combat.cast_kind;
+            let lock_id = combat.lock;
+            let lock_hp = lock_id.and_then(|id| {
+                combat
+                    .hostiles
+                    .iter()
+                    .find(|h| h.idx == id)
+                    .map(|h| (h.name.clone(), h.hp, h.root_s, h.slow_s))
+            });
+            let player_hp = combat.player.resources.hp;
+            let ward = combat.ward;
             combat.tick_verbs(player_x, player_z, TICK);
+            log_finished_cast(
+                combat,
+                pending_cast,
+                lock_id,
+                lock_hp,
+                player_hp,
+                ward,
+            );
             let strike = combat.strike_armed;
             if let Some(dealt) =
                 combat.tick_melee_auto(player_x, player_z, facing_x, facing_z, TICK)
@@ -659,6 +678,74 @@ fn lock_ring_mesh() -> EngineResult<Mesh> {
     Ok(mesh)
 }
 
+
+fn log_finished_cast(
+    combat: &mut WorldCombat,
+    kind: Option<&str>,
+    lock_id: Option<i32>,
+    before: Option<(String, f64, f64, f64)>,
+    player_hp: f64,
+    ward: f64,
+) {
+    let Some(kind) = kind else {
+        return;
+    };
+    let name = before
+        .as_ref()
+        .map(|(n, _, _, _)| n.clone())
+        .or_else(|| {
+            lock_id.and_then(|id| {
+                combat
+                    .hostiles
+                    .iter()
+                    .find(|h| h.idx == id)
+                    .map(|h| h.name.clone())
+            })
+        })
+        .unwrap_or_else(|| "wolf-spider".into());
+    match kind {
+        "aimed" | "pin" | "ember" => {
+            if let Some((_, hp0, _, _)) = before {
+                if let Some(h) = lock_id.and_then(|id| combat.hostiles.iter().find(|h| h.idx == id))
+                {
+                    let dealt = (hp0 - h.hp).round() as i32;
+                    if dealt > 0 {
+                        let verb = match kind {
+                            "aimed" => "Aimed Shot",
+                            "pin" => "Pin",
+                            "ember" => "Ember",
+                            _ => kind,
+                        };
+                        combat.log.push(format!("You {verb} {name} for {dealt}"));
+                    }
+                }
+            }
+        }
+        "bind" => {
+            if let Some((_, _, root0, _)) = before {
+                if let Some(h) = lock_id.and_then(|id| combat.hostiles.iter().find(|h| h.idx == id))
+                {
+                    if h.root_s > root0 {
+                        combat.log.push(format!("You Bind {name}"));
+                    }
+                }
+            }
+        }
+        "mend" => {
+            let heal = (combat.player.resources.hp - player_hp).round() as i32;
+            if heal > 0 {
+                combat.log.push(format!("You Mend for {heal}"));
+            }
+        }
+        "ward" => {
+            if combat.ward > ward {
+                combat.log.push("You Ward");
+            }
+        }
+        _ => {}
+    }
+}
+
 fn keep_player(combat: &WorldCombat) -> WorldCombat {
     let mut out = WorldCombat::specialist(combat.player.stats.level, combat.player.stats.discipline);
     out.player = combat.player.clone();
@@ -909,5 +996,20 @@ mod tests {
         );
         layer.log_potion(&mut combat);
         assert!(combat.log.lines().any(|l| l.starts_with("You drink a potion for ")));
+    }
+
+    #[test]
+    fn ember_cast_pushes_log_line() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.5);
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(
+            lines.iter().any(|l| l.starts_with("You Ember wolf-spider for ")),
+            "{lines:?}"
+        );
     }
 }

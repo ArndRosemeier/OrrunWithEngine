@@ -1675,15 +1675,6 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                                 .color(Color32::from_rgb(210, 168, 128)),
                         );
                     }
-                    if let Some(id) = session.lock_id() {
-                        if let Some(hostile) = session.combat().hostiles.iter().find(|h| h.idx == id) {
-                            ui.label(egui::RichText::new(format!(
-                                "wolf-spider  {:.0}/{:.0}",
-                                hostile.hp,
-                                hostile.max_hp,
-                            )).size(14.0));
-                        }
-                    }
                     // Player HP / mana + attack pip stay in this same world_hud popup.
                     let combat = session.combat();
                     let res = &combat.player.resources;
@@ -1750,6 +1741,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     ui.painter().rect_filled(pip_rect, 2.0, pip);
                 });
         });
+    hud::draw_target_frame(&ctx, session.combat());
     hud::draw_hotbar(&ctx, session.combat(), session.key_binds());
     hud::draw_combat_log(&ctx, session.combat());
 }

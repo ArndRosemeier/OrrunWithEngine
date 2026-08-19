@@ -2238,12 +2238,6 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                                 .size(20.0)
                                 .color(Color32::from_rgb(230, 70, 70)),
                         );
-                    } else if let Some((name, mob_hp)) = session.lock_name_hp() {
-                        ui.label(
-                            egui::RichText::new(format!("{name}  {mob_hp:.0}"))
-                                .size(16.0)
-                                .color(Color32::from_rgb(240, 210, 80)),
-                        );
                     }
                     if session.is_shaken() {
                         ui.label(

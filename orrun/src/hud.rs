@@ -107,7 +107,57 @@ pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
+
+pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
+    if combat.dead {
+        return;
+    }
+    let Some(id) = combat.lock else {
+        return;
+    };
+    let Some(h) = combat
+        .hostiles
+        .iter()
+        .find(|h| h.idx == id && h.alive)
+    else {
+        return;
+    };
+    let max = h.max_hp.max(1.0);
+    let frac = (h.hp / max).clamp(0.0, 1.0) as f32;
+    let fill = if frac <= 0.20 {
+        Color32::from_rgb(200, 32, 32)
+    } else if frac <= 0.50 {
+        Color32::from_rgb(220, 190, 32)
+    } else {
+        Color32::from_rgb(40, 180, 64)
+    };
+    let screen = ctx.screen_rect();
+    let x = (screen.width() * 0.5 - 110.0).max(12.0);
+    egui::Area::new(egui::Id::new("target_frame"))
+        .fixed_pos(egui::pos2(x, 20.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(&h.name)
+                            .size(16.0)
+                            .color(Color32::from_rgb(240, 210, 80)),
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .fill(fill)
+                            .desired_width(200.0)
+                            .desired_height(16.0),
+                    );
+                });
+        });
+}
+
 pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
+    draw_target_frame(ctx, combat);
     draw_hotbar(ctx, combat, binds);
     draw_combat_log(ctx, combat);
 }
