@@ -1,7 +1,9 @@
 //! Where the player was standing when they last closed the game.
 //!
-//! FORMAT 2 also keeps combat vitals and the last hatch-mouth shrine. The
-//! continent itself stays a pure function of the seed.
+//! FORMAT 2 also keeps combat vitals and the last hatch-mouth shrine. FORMAT 1
+//! (and any older stand that still has seed/size/x/z/yaw) still loads: combat
+//! fields take create defaults and the next write is FORMAT 2. The continent
+//! itself stays a pure function of the seed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,8 +16,9 @@ use thiserror::Error;
 use crate::combat::{Attrs, Ranks};
 use crate::world::Heading;
 
-/// Shape of the file on disk. A file written by another shape is an error, not
-/// a guess at what its fields used to mean.
+/// Shape written on disk. Older stands that still have seed/size/x/z/yaw are
+/// migrated in memory; the next write is this format. A newer format, or JSON
+/// that is not a stand, is an error.
 pub const FORMAT: u32 = 2;
 
 #[derive(Debug, Error)]
@@ -38,7 +41,7 @@ pub enum SaveError {
         source: serde_json::Error,
     },
 
-    #[error("save {path} is format {found}, this build writes {FORMAT}; delete it to start over")]
+    #[error("save {path} is format {found}, this build writes {FORMAT}")]
     Format { path: PathBuf, found: u32 },
 
     #[error("save {path} holds seed {seed} size {size}, which is not the world being played")]
@@ -138,16 +141,7 @@ impl SavedStand {
                 })
             }
         };
-        let stand: Self = serde_json::from_str(&text).map_err(|source| SaveError::Unreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if stand.format != FORMAT {
-            return Err(SaveError::Format {
-                path: path.to_path_buf(),
-                found: stand.format,
-            });
-        }
+        let stand = parse_stand(path, &text)?;
         if stand.seed != seed || stand.size != size {
             return Err(SaveError::OtherWorld {
                 path: path.to_path_buf(),
@@ -179,6 +173,59 @@ impl SavedStand {
         })?;
         Ok(())
     }
+}
+
+fn parse_stand(path: &Path, text: &str) -> Result<SavedStand, SaveError> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|source| SaveError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let found = value
+        .get("format")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n as u32);
+    if found == Some(FORMAT) {
+        return serde_json::from_value(value).map_err(|source| SaveError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    if let Some(found) = found {
+        if found > FORMAT {
+            return Err(SaveError::Format {
+                path: path.to_path_buf(),
+                found,
+            });
+        }
+    }
+    migrate_old_stand(&value).ok_or_else(|| {
+        let source = serde_json::from_value::<SavedStand>(value)
+            .expect_err("a stand missing seed/size/x/z/yaw cannot be FORMAT 2");
+        SaveError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+/// FORMAT 1, or any older object that still has the stand pose.
+fn migrate_old_stand(value: &serde_json::Value) -> Option<SavedStand> {
+    let seed = i32::try_from(value.get("seed")?.as_i64()?).ok()?;
+    let size = usize::try_from(value.get("size")?.as_u64()?).ok()?;
+    let x = value.get("x")?.as_f64()?;
+    let z = value.get("z")?.as_f64()?;
+    let yaw_degrees = value.get("yaw_degrees")?.as_f64()? as f32;
+    let heading = Heading::from_degrees(yaw_degrees).ok()?;
+    let mut stand = SavedStand::new(seed, size, GlobalXZ::at(x, z), heading);
+    if let Some(raw) = value.get("last_shrine") {
+        if raw.is_null() {
+            stand.last_shrine = None;
+        } else if let Ok(shrine) = serde_json::from_value(raw.clone()) {
+            stand.last_shrine = Some(shrine);
+        }
+    }
+    Some(stand)
 }
 
 /// One file per world, so switching seeds does not forget where you were.
@@ -314,5 +361,108 @@ mod tests {
         assert_ne!(a, c);
         assert!(a.starts_with(&dir));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    const FORMAT_1_STAND: &str = r#"{
+  "format": 1,
+  "seed": 20260809,
+  "size": 1000,
+  "x": 373721.42083633796,
+  "z": 484743.6172915158,
+  "yaw_degrees": 61.441334
+}"#;
+
+    #[test]
+    fn format_1_stand_migrates_to_create_defaults_and_writes_format_2() {
+        let dir = isolated_dir();
+        let path = dir.join("stand-20260809-1000.json");
+        fs::write(&path, FORMAT_1_STAND).expect("write format 1");
+        let stand = SavedStand::read_at(&path, 20260809, 1000)
+            .expect("format 1 must load")
+            .expect("present");
+        let parsed: serde_json::Value = serde_json::from_str(FORMAT_1_STAND).expect("fixture");
+        assert_eq!(stand.x, parsed["x"].as_f64().expect("x"));
+        assert_eq!(stand.z, parsed["z"].as_f64().expect("z"));
+        assert_eq!(
+            stand.yaw_degrees,
+            parsed["yaw_degrees"].as_f64().expect("yaw") as f32
+        );
+        assert_eq!(stand.seed, 20260809);
+        assert_eq!(stand.size, 1000);
+        assert_eq!(stand.format, FORMAT);
+        assert_eq!(stand.level, 1);
+        assert_eq!(stand.xp, 0);
+        assert_eq!(stand.hp, 100.0);
+        assert_eq!(stand.mana, 50.0);
+        assert_eq!(stand.attrs, Attrs::default());
+        assert_eq!(
+            stand.ranks,
+            Ranks {
+                martial: 1,
+                hunt: 0,
+                arcane: 0,
+            }
+        );
+        assert_eq!(stand.shaken_until, 0.0);
+        assert_eq!(stand.last_shrine, None);
+
+        let out = dir.join("migrated.json");
+        stand.write_at(&out).expect("write migrated");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&out).expect("read written"))
+                .expect("written json");
+        assert_eq!(written["format"], 2);
+        assert_eq!(written["x"], parsed["x"]);
+        assert_eq!(written["z"], parsed["z"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn older_stand_without_format_field_still_migrates() {
+        let dir = isolated_dir();
+        let path = dir.join("stand-7-64.json");
+        fs::write(
+            &path,
+            r#"{"seed":7,"size":64,"x":1.5,"z":2.25,"yaw_degrees":90.0}"#,
+        )
+        .expect("write older stand");
+        let stand = SavedStand::read_at(&path, 7, 64)
+            .expect("older stand must load")
+            .expect("present");
+        assert_eq!(stand.x, 1.5);
+        assert_eq!(stand.z, 2.25);
+        assert_eq!(stand.yaw_degrees, 90.0);
+        assert_eq!(stand.format, FORMAT);
+        assert_eq!(stand.hp, 100.0);
+        assert_eq!(stand.mana, 50.0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn garbage_json_is_still_unreadable() {
+        let dir = isolated_dir();
+        let path = dir.join("stand-1-1.json");
+        fs::write(&path, "{not json").expect("write garbage");
+        let err = SavedStand::read_at(&path, 1, 1).expect_err("garbage fails");
+        assert!(matches!(err, SaveError::Unreadable { .. }), "{err}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remembered_appdata_format_1_stand_keeps_pose() {
+        let path = PathBuf::from(r"C:\Users\windo\AppData\Roaming\Orrun\stand-20260809-1000.json");
+        if !path.is_file() {
+            return;
+        }
+        let stand = SavedStand::read_at(&path, 20260809, 1000)
+            .expect("remembered stand must be migratable")
+            .expect("present");
+        let parsed: serde_json::Value = serde_json::from_str(FORMAT_1_STAND).expect("fixture");
+        assert_eq!(stand.x, parsed["x"].as_f64().expect("x"));
+        assert_eq!(stand.z, parsed["z"].as_f64().expect("z"));
+        assert_eq!(
+            stand.yaw_degrees,
+            parsed["yaw_degrees"].as_f64().expect("yaw") as f32
+        );
     }
 }

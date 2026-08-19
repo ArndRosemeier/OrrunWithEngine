@@ -35,7 +35,7 @@ use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
-use orrun::save::SavedStand;
+use orrun::save::{SaveError, SavedStand};
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell,
@@ -671,9 +671,19 @@ fn opening_entry(
 fn main() {
     let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
     let (seed, size) = parse_args(prefs.continent_size());
-    // Read before the window opens: a broken save should say so instead of
-    // quietly dropping the player back on the map.
-    let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
+    // Read before the window opens. FORMAT 1 migrates. Garbage JSON is
+    // skipped with a warning; other save errors still fail loud.
+    let remembered = match SavedStand::read(seed, size) {
+        Ok(stand) => stand,
+        Err(SaveError::Unreadable { path, source }) => {
+            eprintln!(
+                "warning: save {} is not readable Orrun state ({source}); starting without it",
+                path.display()
+            );
+            None
+        }
+        Err(err) => panic!("{err}"),
+    };
 
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
