@@ -163,7 +163,7 @@ impl CombatLayer {
                 stun_s: 0.0,
                 slow_s: 0.0,
                 root_s: 0.0,
-                name: "Wolf".into(),
+                name: sheet.name.clone(),
                 entity: None,
             });
         }

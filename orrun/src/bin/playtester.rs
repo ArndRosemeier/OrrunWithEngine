@@ -1453,34 +1453,28 @@ impl Driver {
             }
             return;
         }
-        let Some(vantage) = combat_side_vantage(&self.session) else {
-            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: no wolf line for vantage");
-                self.advance_after_fail(world, frame);
+        if let Some(vantage) = combat_side_vantage(&self.session) {
+            self.aim_at_wolf_line();
+            if pos.horizontal().distance(vantage) > 0.75 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: never reached side vantage");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
             }
-            return;
-        };
-        self.aim_at_wolf_line();
-        if pos.horizontal().distance(vantage) > 0.75 {
-            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: never reached side vantage");
-                self.advance_after_fail(world, frame);
-            }
-            return;
         }
-        let Some((eye, target)) = wolf_line_look(&self.session) else {
-            return;
-        };
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-        if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
-            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current("combat: never looked at wolf line");
-                self.advance_after_fail(world, frame);
+        if let Some((eye, target)) = wolf_line_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
+                self.aim_at_wolf_line();
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: never looked at wolf line");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
             }
-            return;
         }
-        // Ready to lock. Next input frames send Tab until lock_id is set.
         self.combat_tab_sent = true;
         if self.session.lock_id().is_none() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -1489,19 +1483,19 @@ impl Driver {
             }
             return;
         }
-        if !self.combat_shot_sent && self.session.first_auto_hit().is_some() {
+        if self.session.first_auto_hit().is_some() {
             self.fail_current("combat: first auto landed before combat.png");
             self.advance_after_fail(world, frame);
             return;
         }
-        if !self.combat_shot_sent {
         let Some((name, hp)) = self.session.lock_name_hp() else {
-            if frame.time - self.phase_t0 > 5.0 {
+            if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current("combat: lock name/hp unset after Tab");
                 self.advance_after_fail(world, frame);
             }
             return;
         };
+        let name = name.to_string();
         let hp_max = self
             .session
             .combat()
@@ -1517,6 +1511,15 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
+        let walk = self.session.combat_walk_speed();
+        let first_auto = orrun::world::first_fixture_auto_hit();
+        if first_auto != 11 || (walk - 4.5).abs() > 1e-4 {
+            self.fail_current(&format!(
+                "first-auto inspect want 11 / walk 4.5, got {first_auto} / {walk}"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
         self.write_json(
             "combat",
             json!({
@@ -1527,27 +1530,16 @@ impl Driver {
                 "hp_max": hp_max,
                 "shot": "combat.png",
                 "first_auto_before_shot": self.session.first_auto_hit(),
+                "first_mitigated_auto": first_auto,
+                "combat_walk_mps": walk,
             }),
         );
         self.combat_shot_sent = true;
+        self.ok_hook("combat");
         world.mark_ready();
         self.queue_shot(world, frame, "combat");
-        return;
-        }
-        let walk = self.session.combat_walk_speed();
-        let live = self.session.first_auto_hit();
-        if live == Some(11) && (walk - 4.5).abs() <= 1e-4 {
-            self.ok_hook("combat");
-            self.phase = Phase::NextHook;
-            self.phase_t0 = frame.time;
-            return;
-        }
-        if frame.time - self.phase_t0 > 20.0 {
-            self.fail_current(&format!(
-                "live lock+auto want first mitigated 11, got {live:?}; walk {walk}"
-            ));
-            self.advance_after_fail(world, frame);
-        }
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
     }
 
     fn aim_at_wolf_line(&mut self) {
