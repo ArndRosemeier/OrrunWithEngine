@@ -1,4 +1,4 @@
-//! Live combat layer. Not FaunaLayer — fixture hostiles, combat clock, lock+auto.
+//! Live combat layer. Not FaunaLayer ? fixture hostiles, combat clock, lock+auto.
 //!
 //! Uses `orrun::combat` types and the same melee_raw / mitigation as the sim.
 //! Frame dt is not 0.1; this accumulates to [`crate::combat::TICK`] before a
@@ -13,12 +13,48 @@ use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::combat::Discipline;
 use crate::world::fauna::FaunaCatalog;
 use engine::anim::AnimatedModel;
+use engine::color::Color;
 use engine::error::{EngineError, EngineResult};
-use engine::place::Place;
+use engine::mesh::Mesh;
+use engine::place::{GlobalPlace, Place};
 use engine::space::GlobalPosition;
 use engine::world::{EntityId, World};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Attack pip is a short tell, not the 1.8 s swing clock.
+const ATTACK_PIP_S: f64 = 0.15;
+const FLINCH_S: f32 = 0.18;
+const FLINCH_PEAK: f32 = 1.08;
+const RING_LIFT_M: f64 = 0.12;
+const RING_MAJOR_M: f32 = 1.45;
+const RING_MINOR_M: f32 = 0.13;
+const GOLD: Color = Color {
+    r: 0.92,
+    g: 0.72,
+    b: 0.16,
+    a: 1.0,
+};
+
+/// One-shot combat voices queued on a live auto that deals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CombatSfx {
+    Swing,
+    Hit,
+}
+
+struct MeshAnchor {
+    id: EntityId,
+    pos: GlobalPosition,
+    yaw: f32,
+}
+
+struct Flinch {
+    id: EntityId,
+    pos: GlobalPosition,
+    yaw: f32,
+    t: f32,
+}
 
 /// Live hostiles + 0.1 s combat clock in front of the player.
 pub struct CombatLayer {
@@ -26,7 +62,16 @@ pub struct CombatLayer {
     fixture: bool,
     first_auto: Option<i32>,
     mesh_ids: Vec<EntityId>,
+    mesh_anchors: Vec<MeshAnchor>,
     wolf_model: Option<Arc<AnimatedModel>>,
+    lock_ring: Option<EntityId>,
+    ring_on: Option<i32>,
+    attack_pip_s: f64,
+    swing_whoosh: bool,
+    hit_flash: bool,
+    pending_sfx: Vec<CombatSfx>,
+    pending_flinch: bool,
+    flinch: Option<Flinch>,
 }
 
 impl CombatLayer {
@@ -36,7 +81,16 @@ impl CombatLayer {
             fixture: false,
             first_auto: None,
             mesh_ids: Vec::new(),
+            mesh_anchors: Vec::new(),
             wolf_model: None,
+            lock_ring: None,
+            ring_on: None,
+            attack_pip_s: 0.0,
+            swing_whoosh: false,
+            hit_flash: false,
+            pending_sfx: Vec::new(),
+            pending_flinch: false,
+            flinch: None,
         }
     }
 
@@ -48,16 +102,59 @@ impl CombatLayer {
         self.first_auto
     }
 
+    pub fn attack_pip(&self) -> bool {
+        self.attack_pip_s > 0.0
+    }
+
+    pub fn swing_whoosh(&self) -> bool {
+        self.swing_whoosh
+    }
+
+    pub fn hit_flash(&self) -> bool {
+        self.hit_flash
+    }
+
+    pub fn hit_flash_latched(&self) -> bool {
+        self.hit_flash
+    }
+
+    pub fn lock_ring_visible(&self, world: &World) -> bool {
+        self.lock_ring
+            .map(|id| world.entity(id).is_ok())
+            .unwrap_or(false)
+    }
+
+    pub fn take_combat_sfx(&mut self) -> Vec<CombatSfx> {
+        std::mem::take(&mut self.pending_sfx)
+    }
+
     pub fn rearm(&mut self) {
         self.fixture = false;
         self.first_auto = None;
         self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.ring_on = None;
     }
 
     pub fn despawn_meshes(&mut self, world: &mut World) {
         for id in self.mesh_ids.drain(..) {
             world.despawn(id);
         }
+        self.mesh_anchors.clear();
+        self.despawn_ring(world);
+        self.flinch = None;
+    }
+
+    fn despawn_ring(&mut self, world: &mut World) {
+        if let Some(id) = self.lock_ring.take() {
+            world.despawn(id);
+        }
+        self.ring_on = None;
     }
 
     fn wolf_model(&mut self) -> EngineResult<Arc<AnimatedModel>> {
@@ -106,6 +203,7 @@ impl CombatLayer {
             }
             h.entity = Some(id);
             self.mesh_ids.push(id);
+            self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
         }
         Ok(())
     }
@@ -185,6 +283,13 @@ impl CombatLayer {
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.ring_on = None;
     }
 
     /// Soft lock + auto. Does not touch camera, Esc, or E.
@@ -207,10 +312,14 @@ impl CombatLayer {
         facing_x: f64,
         facing_z: f64,
         dt: f64,
-    ) {
+    ) -> Option<i32> {
         if dt <= 0.0 {
-            return;
+            return None;
         }
+        if self.attack_pip_s > 0.0 {
+            self.attack_pip_s = (self.attack_pip_s - dt).max(0.0);
+        }
+        let mut just = None;
         self.accum_s += dt;
         while self.accum_s + 1e-12 >= TICK {
             self.accum_s -= TICK;
@@ -221,9 +330,197 @@ impl CombatLayer {
                 if self.first_auto.is_none() {
                     self.first_auto = Some(dealt);
                 }
+                self.attack_pip_s = ATTACK_PIP_S;
+                self.swing_whoosh = true;
+                self.hit_flash = true;
+                self.pending_sfx.push(CombatSfx::Swing);
+                self.pending_sfx.push(CombatSfx::Hit);
+                self.pending_flinch = true;
+                just = Some(dealt);
             }
         }
+        just
     }
+
+    /// Session hook: ring + flinch after the combat clock. `player_y` is the
+    /// fallback ground when the caller has no column yet.
+    pub fn sync_tells(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+        player_y: f64,
+        dt: f64,
+        _just: Option<i32>,
+    ) -> EngineResult<()> {
+        self.present(world, combat, |_, _| player_y, dt as f32)
+    }
+
+    /// Lock ring + hit flinch. Call after [`Self::tick`] with the live world.
+    pub fn present(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+        mut ground_y: impl FnMut(f64, f64) -> f64,
+        dt: f32,
+    ) -> EngineResult<()> {
+        self.sync_lock_ring(world, combat, &mut ground_y)?;
+        if self.pending_flinch {
+            self.pending_flinch = false;
+            self.start_flinch(world, combat)?;
+        }
+        self.tick_flinch(world, dt)?;
+        Ok(())
+    }
+
+    fn sync_lock_ring(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+        ground_y: &mut impl FnMut(f64, f64) -> f64,
+    ) -> EngineResult<()> {
+        let want = combat.lock.filter(|_| self.fixture);
+        let still = want == self.ring_on
+            && self
+                .lock_ring
+                .map(|id| world.entity(id).is_ok())
+                .unwrap_or(false);
+        if still {
+            return Ok(());
+        }
+        self.despawn_ring(world);
+        let Some(lock) = want else {
+            return Ok(());
+        };
+        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock && h.alive) else {
+            return Ok(());
+        };
+        let (x, z) = self
+            .mesh_anchors
+            .iter()
+            .find(|a| Some(a.id) == h.entity)
+            .map(|a| (a.pos.x, a.pos.z))
+            .unwrap_or((h.x, h.z));
+        let y = ground_y(x, z) + RING_LIFT_M;
+        let mesh = lock_ring_mesh()?;
+        let place = GlobalPlace::at(GlobalPosition::at(x, y, z));
+        let id = world.spawn_anchored(mesh, place)?;
+        self.lock_ring = Some(id);
+        self.ring_on = Some(lock);
+        Ok(())
+    }
+
+    fn start_flinch(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
+        let Some(lock) = combat.lock else {
+            return Ok(());
+        };
+        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+            return Ok(());
+        };
+        let Some(entity) = h.entity else {
+            return Ok(());
+        };
+        let Some(anchor) = self.mesh_anchors.iter().find(|a| a.id == entity) else {
+            return Ok(());
+        };
+        apply_mesh_scale(world, anchor, FLINCH_PEAK)?;
+        self.flinch = Some(Flinch {
+            id: anchor.id,
+            pos: anchor.pos,
+            yaw: anchor.yaw,
+            t: 0.0,
+        });
+        Ok(())
+    }
+
+    fn tick_flinch(&mut self, world: &mut World, dt: f32) -> EngineResult<()> {
+        let Some(mut flinch) = self.flinch.take() else {
+            return Ok(());
+        };
+        flinch.t += dt;
+        if flinch.t >= FLINCH_S {
+            let anchor = MeshAnchor {
+                id: flinch.id,
+                pos: flinch.pos,
+                yaw: flinch.yaw,
+            };
+            apply_mesh_scale(world, &anchor, 1.0)?;
+            return Ok(());
+        }
+        let fade = (1.0 - flinch.t / FLINCH_S).clamp(0.0, 1.0);
+        let scale = 1.0 + (FLINCH_PEAK - 1.0) * fade;
+        let anchor = MeshAnchor {
+            id: flinch.id,
+            pos: flinch.pos,
+            yaw: flinch.yaw,
+        };
+        apply_mesh_scale(world, &anchor, scale)?;
+        self.flinch = Some(flinch);
+        Ok(())
+    }
+}
+
+fn apply_mesh_scale(world: &mut World, anchor: &MeshAnchor, scale: f32) -> EngineResult<()> {
+    let render = world.to_render(anchor.pos)?;
+    let place = Place::at(render.x, render.y, render.z)?
+        .yaw_deg(anchor.yaw)?
+        .scale(scale)?;
+    // Wolf may have been despawned on rearm; a missing body is not a hard fail.
+    let _ = world.set_place(anchor.id, place);
+    Ok(())
+}
+
+fn lock_ring_mesh() -> EngineResult<Mesh> {
+    let mut mesh = Mesh::new();
+    let major = RING_MAJOR_M;
+    let minor = RING_MINOR_M;
+    const SEG_U: usize = 28;
+    const SEG_V: usize = 8;
+    let mut ids: Vec<engine::mesh::PointId> = Vec::with_capacity(SEG_U * SEG_V);
+    for i in 0..SEG_U {
+        let u = (i as f32 / SEG_U as f32) * std::f32::consts::TAU;
+        let cu = u.cos();
+        let su = u.sin();
+        for j in 0..SEG_V {
+            let v = (j as f32 / SEG_V as f32) * std::f32::consts::TAU;
+            let cv = v.cos();
+            let sv = v.sin();
+            // Torus in XZ, hole facing +Y.
+            let x = (major + minor * cv) * cu;
+            let y = minor * sv;
+            let z = (major + minor * cv) * su;
+            ids.push(mesh.add_point((x, y, z))?);
+        }
+    }
+    for i in 0..SEG_U {
+        let i1 = (i + 1) % SEG_U;
+        for j in 0..SEG_V {
+            let j1 = (j + 1) % SEG_V;
+            let a = ids[i * SEG_V + j];
+            let b = ids[i1 * SEG_V + j];
+            let c = ids[i1 * SEG_V + j1];
+            let d = ids[i * SEG_V + j1];
+            mesh.add_quad(a, b, c, d)?;
+        }
+    }
+    // Flat two-sided annulus so the tell reads from above as well as the side.
+    let inner = major - minor * 0.35;
+    let outer = major + minor * 0.85;
+    const SEG_A: usize = 28;
+    let mut inner_ids = Vec::with_capacity(SEG_A);
+    let mut outer_ids = Vec::with_capacity(SEG_A);
+    for i in 0..SEG_A {
+        let a = (i as f32 / SEG_A as f32) * std::f32::consts::TAU;
+        let (s, c) = (a.sin(), a.cos());
+        inner_ids.push(mesh.add_point((inner * c, 0.02, inner * s))?);
+        outer_ids.push(mesh.add_point((outer * c, 0.02, outer * s))?);
+    }
+    for i in 0..SEG_A {
+        let i1 = (i + 1) % SEG_A;
+        mesh.add_quad(inner_ids[i], outer_ids[i], outer_ids[i1], inner_ids[i1])?;
+        mesh.add_quad(inner_ids[i1], outer_ids[i1], outer_ids[i], inner_ids[i])?;
+    }
+    mesh.paint_all(GOLD);
+    Ok(mesh)
 }
 
 fn keep_player(combat: &WorldCombat) -> WorldCombat {
@@ -337,6 +634,31 @@ mod tests {
     }
 
     #[test]
+    fn first_auto_latches_swing_hit_and_opens_pip() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        combat.lock = Some(0);
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.7);
+        assert!(layer.first_auto().is_none());
+        assert!(!layer.swing_whoosh());
+        assert!(!layer.hit_flash());
+        assert!(!layer.attack_pip());
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
+        assert_eq!(layer.first_auto(), Some(11));
+        assert!(layer.swing_whoosh());
+        assert!(layer.hit_flash());
+        assert!(layer.attack_pip());
+        let sfx = layer.take_combat_sfx();
+        assert!(sfx.contains(&CombatSfx::Swing));
+        assert!(sfx.contains(&CombatSfx::Hit));
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
+        assert!(!layer.attack_pip());
+        assert!(layer.swing_whoosh());
+        assert!(layer.hit_flash());
+    }
+
+    #[test]
     fn strike_next_swing_is_one_point_five() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
@@ -413,5 +735,12 @@ mod tests {
         assert_eq!(spec.source, "wolf/wolf.gltf");
         let model = load_wolf_model().expect("wolf.gltf via AnimatedModel");
         assert!(model.find_clip(&spec.anim_idle).is_some());
+    }
+
+    #[test]
+    fn lock_ring_mesh_is_gold_and_nonempty() {
+        let mesh = lock_ring_mesh().expect("ring mesh");
+        assert!(mesh.point_count() > 32);
+        assert!(mesh.face_count() > 32);
     }
 }

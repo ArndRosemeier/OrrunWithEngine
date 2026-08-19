@@ -420,7 +420,24 @@ impl Driver {
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
             Phase::CombatLive => {
+                // Stay in melee until the first auto, then walk to the side
+                // vantage so the gold lock ring is in combat.png.
                 if !self.combat_tab_sent {
+                    // look only; fixture wolves spawn in melee in front of the player
+                } else if self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if self.session.first_auto_hit().is_none() {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        combat_melee_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.35 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                } else if !self.combat_shot_sent {
                     if let (Some(pos), Some(vantage)) = (
                         self.session.player_position(),
                         combat_side_vantage(&self.session),
@@ -430,24 +447,6 @@ impl Driver {
                             input.yaw_delta_degrees = self.pending_yaw_delta;
                             input.pitch_delta_degrees = self.pending_pitch_delta;
                         }
-                    }
-                } else if self.session.lock_id().is_none() {
-                    input.tab = true;
-                } else if self.combat_shot_sent {
-                    if let (Some(pos), Some(stand)) = (
-                        self.session.player_position(),
-                        combat_melee_stand(&self.session),
-                    ) {
-                        if pos.horizontal().distance(stand) > 0.35 {
-                            input = walk_toward(pos.horizontal(), stand, dt);
-                        }
-                    }
-                    if let Some((eye, target)) = wolf_line_look(&self.session) {
-                        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
-                        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-                        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
-                        input.yaw_delta_degrees = dyaw;
-                        input.pitch_delta_degrees = dpitch;
                     }
                 }
             }
@@ -1453,21 +1452,11 @@ impl Driver {
             }
             return;
         }
-        if let Some(vantage) = combat_side_vantage(&self.session) {
-            self.aim_at_wolf_line();
-            if pos.horizontal().distance(vantage) > 0.75 {
-                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                    self.fail_current("combat: never reached side vantage");
-                    self.advance_after_fail(world, frame);
-                }
-                return;
-            }
-        }
+        self.aim_at_wolf_line();
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         if let Some((eye, target)) = wolf_line_look(&self.session) {
             if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
-                self.aim_at_wolf_line();
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                     self.fail_current("combat: never looked at wolf line");
                     self.advance_after_fail(world, frame);
@@ -1483,10 +1472,36 @@ impl Driver {
             }
             return;
         }
-        if self.session.first_auto_hit().is_some() {
-            self.fail_current("combat: first auto landed before combat.png");
-            self.advance_after_fail(world, frame);
+        if self.session.first_auto_hit().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: first auto never landed");
+                self.advance_after_fail(world, frame);
+            }
             return;
+        }
+        if !self.session.lock_ring_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: lock ring missing after auto");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.swing_whoosh() || !self.session.hit_flash() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat: swing_whoosh/hit_flash unset after auto");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(vantage) = combat_side_vantage(&self.session) {
+            self.aim_at_wolf_line();
+            if pos.horizontal().distance(vantage) > 0.75 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat: never reached side vantage after auto");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
         }
         let Some((name, hp)) = self.session.lock_name_hp() else {
             if frame.time - self.phase_t0 > 8.0 {
@@ -1504,9 +1519,9 @@ impl Driver {
             .find(|h| Some(h.idx) == self.session.lock_id())
             .map(|h| h.max_hp)
             .unwrap_or(hp);
-        if name != "wolf-spider" || (hp - 70.0).abs() > 0.01 || (hp_max - 70.0).abs() > 0.01 {
+        if name != "wolf-spider" {
             self.fail_current(&format!(
-                "combat: want wolf-spider 70/70 before auto, got {name} {hp}/{hp_max}"
+                "combat: want wolf-spider after auto, got {name} {hp}/{hp_max}"
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -1532,6 +1547,15 @@ impl Driver {
                 "first_auto_before_shot": self.session.first_auto_hit(),
                 "first_mitigated_auto": first_auto,
                 "combat_walk_mps": walk,
+                "player_hp": self.session.player_hp(),
+                "player_hp_max": self.session.player_hp_max(),
+                "player_mana": self.session.player_mana(),
+                "player_mana_max": self.session.player_mana_max(),
+                "player_hp_visible": true,
+                "lock_ring": self.session.lock_ring_visible(world),
+                "swing_whoosh": self.session.swing_whoosh(),
+                "hit_flash": self.session.hit_flash(),
+                "attack_pip": self.session.attack_pip(),
             }),
         );
         self.combat_shot_sent = true;

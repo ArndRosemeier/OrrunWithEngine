@@ -36,7 +36,7 @@ mod tests;
 pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use chunk_mesh::TerrainChunkBuilder;
-pub use combat_layer::{first_fixture_auto_hit, CombatLayer};
+pub use combat_layer::{first_fixture_auto_hit, CombatLayer, CombatSfx};
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,

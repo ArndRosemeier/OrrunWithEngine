@@ -409,6 +409,42 @@ impl WorldSession {
         self.combat_layer.mesh_visible(world)
     }
 
+    pub fn player_hp(&self) -> f64 {
+        self.combat.player.resources.hp
+    }
+
+    pub fn player_hp_max(&self) -> f64 {
+        self.combat.player.resources.hp_max
+    }
+
+    pub fn player_mana(&self) -> f64 {
+        self.combat.player.resources.mana
+    }
+
+    pub fn player_mana_max(&self) -> f64 {
+        self.combat.player.resources.mana_max
+    }
+
+    pub fn attack_pip(&self) -> bool {
+        self.combat_layer.attack_pip()
+    }
+
+    pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
+        self.combat_layer.take_combat_sfx()
+    }
+
+    pub fn swing_whoosh(&self) -> bool {
+        self.combat_layer.swing_whoosh()
+    }
+
+    pub fn hit_flash(&self) -> bool {
+        self.combat_layer.hit_flash()
+    }
+
+    pub fn lock_ring_visible(&self, world: &World) -> bool {
+        self.combat_layer.lock_ring_visible(world)
+    }
+
     pub fn first_auto_hit(&self) -> Option<i32> {
         self.combat_layer.first_auto()
     }
@@ -1257,6 +1293,30 @@ impl WorldSession {
                 facing.z as f64,
                 f64::from(input.dt),
             );
+            let py = player.position.y;
+            let feet: Vec<(f64, f64, f64)> = self
+                .combat
+                .hostiles
+                .iter()
+                .map(|h| {
+                    let y = self
+                        .contact_height(GlobalXZ::at(h.x, h.z))
+                        .map(|g| (g + FOOT_CLEARANCE_M) as f64)
+                        .unwrap_or(py);
+                    (h.x, h.z, y)
+                })
+                .collect();
+            let ground_y = move |x: f64, z: f64| {
+                feet.iter()
+                    .min_by(|a, b| {
+                        let da = (a.0 - x).hypot(a.1 - z);
+                        let db = (b.0 - x).hypot(b.1 - z);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|k| k.2)
+                    .unwrap_or(py)
+            };
+            self.combat_layer.present(world, &self.combat, ground_y, input.dt)?;
             if let Some(d) = self.dungeons.as_ref() {
                 if let Some(place) = d.shrine() {
                     self.last_shrine = Some(place);

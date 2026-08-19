@@ -1683,6 +1683,45 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                             )).size(14.0));
                         }
                     }
+                    // Player HP / mana + attack pip stay in this same world_hud popup.
+                    let combat = session.combat();
+                    let res = &combat.player.resources;
+                    let hp_frac = if res.hp_max > 0.0 {
+                        (res.hp / res.hp_max).clamp(0.0, 1.0) as f32
+                    } else {
+                        0.0
+                    };
+                    let mana_frac = if res.mana_max > 0.0 {
+                        (res.mana / res.mana_max).clamp(0.0, 1.0) as f32
+                    } else {
+                        0.0
+                    };
+                    let hp_color = if hp_frac <= 0.20 {
+                        Color32::from_rgb(200, 32, 32)
+                    } else if hp_frac <= 0.50 {
+                        Color32::from_rgb(220, 190, 32)
+                    } else {
+                        Color32::from_rgb(40, 180, 64)
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(hp_frac)
+                            .fill(hp_color)
+                            .desired_width(160.0),
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(mana_frac)
+                            .fill(Color32::from_rgb(48, 120, 210))
+                            .desired_width(160.0),
+                    );
+                    let pip_on = session.attack_pip();
+                    let pip = if pip_on {
+                        Color32::from_rgb(240, 230, 180)
+                    } else {
+                        Color32::from_rgb(56, 56, 56)
+                    };
+                    let (pip_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+                    ui.painter().rect_filled(pip_rect, 2.0, pip);
                 });
         });
 }

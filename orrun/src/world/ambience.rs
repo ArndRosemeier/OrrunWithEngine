@@ -13,6 +13,7 @@ use glam::Vec2;
 use rand::Rng;
 use thiserror::Error;
 
+use super::combat_layer::CombatSfx;
 use super::scatter::{canopy_noise, Fall, GroundCover};
 use super::session::WorldSession;
 use super::settlement::HamletStand;
@@ -43,6 +44,9 @@ const VILLAGE_CLIP: &str = "village_theme.wav";
 const FOREST_CLIPS: [&str; 3] = ["forest_01.wav", "forest_02.wav", "forest_03.wav"];
 const RIVER_CLIP: &str = "river.wav";
 const OCEAN_CLIP: &str = "ocean.wav";
+const COMBAT_HIT_CLIP: &str = "combat/hit.wav";
+const COMBAT_SWING_CLIP: &str = "combat/swing.wav";
+const COMBAT_PEAK: f32 = 0.45;
 
 #[derive(Debug, Error)]
 pub enum AmbienceError {
@@ -74,6 +78,8 @@ pub struct Ambience {
     forest_clips: [ClipId; 3],
     forest: ForestBed,
     last_forest: Option<usize>,
+    combat_hit: ClipId,
+    combat_swing: ClipId,
 }
 
 impl Ambience {
@@ -99,6 +105,8 @@ impl Ambience {
             load_clip(&mut audio, FOREST_CLIPS[1])?,
             load_clip(&mut audio, FOREST_CLIPS[2])?,
         ];
+        let combat_hit = load_clip(&mut audio, COMBAT_HIT_CLIP)?;
+        let combat_swing = load_clip(&mut audio, COMBAT_SWING_CLIP)?;
         Ok(Self {
             audio,
             village,
@@ -109,6 +117,8 @@ impl Ambience {
                 wait_s: roll_range(FOREST_FIRST_WAIT_S),
             },
             last_forest: None,
+            combat_hit,
+            combat_swing,
         })
     }
 
@@ -121,7 +131,40 @@ impl Ambience {
         Ok(())
     }
 
-    pub fn update(&mut self, session: &WorldSession, dt: f32) -> Result<(), AmbienceError> {
+    pub fn play_swing(&mut self) -> Result<(), AmbienceError> {
+        self.audio.play(
+            self.combat_swing,
+            Play {
+                looped: false,
+                volume: COMBAT_PEAK,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub fn play_hit(&mut self) -> Result<(), AmbienceError> {
+        self.audio.play(
+            self.combat_hit,
+            Play {
+                looped: false,
+                volume: COMBAT_PEAK,
+            },
+        )?;
+        Ok(())
+    }
+
+    fn play_pending_combat(&mut self, session: &mut WorldSession) -> Result<(), AmbienceError> {
+        for sfx in session.take_combat_sfx() {
+            match sfx {
+                CombatSfx::Swing => self.play_swing()?,
+                CombatSfx::Hit => self.play_hit()?,
+            }
+        }
+        Ok(())
+    }
+
+    pub fn update(&mut self, session: &mut WorldSession, dt: f32) -> Result<(), AmbienceError> {
+        self.play_pending_combat(session)?;
         if session.state() != SessionState::World {
             return self.silence(dt);
         }
@@ -467,6 +510,8 @@ mod tests {
             "forest_03.wav",
             "river.wav",
             "ocean.wav",
+            "combat/hit.wav",
+            "combat/swing.wav",
         ] {
             let path = dir.join(name);
             assert!(
