@@ -20,6 +20,26 @@ pub const OPEN_OCEAN_SD: f32 = -1.0e5;
 /// Range over which coast distance is resolved exactly; it saturates past this.
 /// Covers the beach band and the whole continental-shelf ramp.
 pub const COAST_QUERY_M: f32 = 2_400.0;
+
+/// Combine a ring query with the atlas ocean bit.
+///
+/// This is the only land/ocean side decision. Terrain, spawn, and ambience
+/// all read [`HydroIndex::coast_signed`], which ends here.
+///
+/// * A ring that actually reaches the point is the meandered waterline.
+/// * No ring, or a ring that only reports a saturated "outside", falls back
+///   to the atlas cell: ocean stays ocean, everything else is inland.
+pub fn resolve_coast_signed(ring_sd: Option<f32>, atlas_ocean: bool) -> f32 {
+    match ring_sd {
+        None if atlas_ocean => OPEN_OCEAN_SD,
+        None => COAST_QUERY_M,
+        Some(sd) if !sd.is_finite() => {
+            panic!("coast ring signed distance must be finite, got {sd}")
+        }
+        Some(sd) if sd < 0.0 && !atlas_ocean && sd <= -COAST_QUERY_M + 1.0 => COAST_QUERY_M,
+        Some(sd) => sd,
+    }
+}
 /// Range over which lake distance is resolved exactly.
 pub const LAKE_QUERY_M: f32 = 400.0;
 
@@ -77,17 +97,16 @@ impl HydroIndex {
         let q = p + shore_domain_warp(p);
         let idx = hydro.cell_index(self.size, q.x, q.y);
         let ids = neighborhood(self.size, idx, &hydro.cell_coasts);
-        if ids.is_empty() {
-            // Coast stamps cover each ring's AABB (+pad). Outside every stamp is
-            // open ocean — do **not** fall back to every coast ring. That made
-            // offshore chunk bakes take multi-second hitches.
-            return OPEN_OCEAN_SD;
-        }
-        let mut best = f32::NEG_INFINITY;
-        for ci in ids {
-            best = best.max(self.coasts[ci as usize].signed_distance(q, COAST_QUERY_M));
-        }
-        best
+        let ring_sd = if ids.is_empty() {
+            None
+        } else {
+            let mut best = f32::NEG_INFINITY;
+            for ci in ids {
+                best = best.max(self.coasts[ci as usize].signed_distance(q, COAST_QUERY_M));
+            }
+            Some(best)
+        };
+        resolve_coast_signed(ring_sd, hydro.is_atlas_ocean(idx))
     }
 
     /// Governing lake near `p` with its signed ring distance (positive = inside).
@@ -150,11 +169,13 @@ impl HydroIndex {
 #[cfg(test)]
 pub fn coast_signed_full(hydro: &HydroVectors, p: Vec2) -> f32 {
     let q = p + shore_domain_warp(p);
-    let mut best = f32::NEG_INFINITY;
+    let mut best = None;
     for coast in &hydro.coasts {
-        best = best.max(signed_distance_ring(q, &coast.ring));
+        let sd = signed_distance_ring(q, &coast.ring);
+        best = Some(best.map(|b: f32| b.max(sd)).unwrap_or(sd));
     }
-    best
+    let idx = hydro.cell_index(hydro.grid_size(), q.x, q.y);
+    resolve_coast_signed(best, hydro.is_atlas_ocean(idx))
 }
 
 fn shore_domain_warp(p: Vec2) -> Vec2 {
@@ -212,5 +233,31 @@ pub fn signed_distance_ring(p: Vec2, ring: &[Vec2]) -> f32 {
         d
     } else {
         -d
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::{resolve_coast_signed, COAST_QUERY_M, OPEN_OCEAN_SD};
+
+    #[test]
+    fn empty_index_follows_the_atlas_cell() {
+        assert_eq!(resolve_coast_signed(None, true), OPEN_OCEAN_SD);
+        assert_eq!(resolve_coast_signed(None, false), COAST_QUERY_M);
+    }
+
+    #[test]
+    fn a_nearby_ring_is_the_waterline() {
+        assert_eq!(resolve_coast_signed(Some(-80.0), false), -80.0);
+        assert_eq!(resolve_coast_signed(Some(40.0), true), 40.0);
+        assert_eq!(resolve_coast_signed(Some(400.0), false), 400.0);
+    }
+
+    #[test]
+    fn a_saturated_outside_on_land_is_inland_not_ocean() {
+        assert_eq!(
+            resolve_coast_signed(Some(-COAST_QUERY_M), false),
+            COAST_QUERY_M
+        );
     }
 }

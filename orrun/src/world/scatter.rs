@@ -67,6 +67,12 @@ const BUSH_SPACING_M: f64 = 4.2;
 const BUSH_RADIUS_M: f64 = NEAR.covers_m();
 const BUSH_DENSE_RADIUS_M: f64 = 160.0;
 const BUSH_OUTER_SPACING_M: f64 = 10.0;
+const SNAG_SPACING_M: f64 = 14.0;
+const SNAG_RADIUS_M: f64 = NEAR.covers_m();
+const MUSHROOM_SPACING_M: f64 = 2.8;
+const MUSHROOM_RADIUS_M: f64 = 58.0;
+const BERRY_SPACING_M: f64 = 5.0;
+const BERRY_RADIUS_M: f64 = NEAR.covers_m();
 
 /// Cheap pine stand-ins on the medium heightfield, outside the full-mesh ring.
 const FAR_TREE_SPACING_M: f64 = 36.0;
@@ -117,6 +123,9 @@ const TREE_DRY_MARGIN: f32 = 2.0;
 /// How far from a waterline the ground still counts as a bank.
 const BANK_REACH_M: f32 = 22.0;
 
+/// Global tree occupancy scale. Each lattice cell rolls against `cover.tree`.
+const TREE_DENSITY: f32 = 0.7;
+
 /// Stand size, and its own stream out of the world seed.
 const CANOPY_NOISE_SCALE_M: f64 = 260.0;
 const CANOPY_NOISE_SALT: u64 = 0x0F0_1E5;
@@ -126,6 +135,23 @@ const SOIL_PATCH_SALT: u64 = 0x5011_7A7C;
 /// Which way a whole hillside leans, so a dry flank is a place, not speckles.
 const SOIL_DRIFT_SCALE_M: f64 = 170.0;
 const SOIL_DRIFT_SALT: u64 = 0xD81F_700D;
+
+/// Coarse cells that may host a forest glade. A wild roll both decides whether
+/// a clearing exists and how wide it is.
+const CLEARING_CELL_M: f64 = 160.0;
+const CLEARING_SALT: u64 = 0xC1EA_1216;
+const CLEARING_MIN_ROLL: f32 = 0.875;
+const CLEARING_RADIUS_MIN_M: f64 = 22.0;
+const CLEARING_RADIUS_MAX_M: f64 = 110.0;
+
+/// Which stand type belongs on a patch: conifer on dry high ground, broadleaf
+/// in humid lowlands, with hundreds of metres of drift between them.
+const SPECIES_PATCH_SCALE_M: f64 = 420.0;
+const SPECIES_PATCH_SALT: u64 = 0x5E3C_1355;
+const MUSHROOM_CLUSTER_SCALE_M: f64 = 40.0;
+const MUSHROOM_CLUSTER_SALT: u64 = 0x4D55_5348;
+const BERRY_CLUSTER_SCALE_M: f64 = 55.0;
+const BERRY_CLUSTER_SALT: u64 = 0xBE42_0001;
 
 /// Where a stand is thicker or thinner than its atlas cell says.
 ///
@@ -162,6 +188,61 @@ pub(super) fn soil_drift(seed: u64, p: GlobalXZ) -> f32 {
         + 0.5
 }
 
+/// How open a forest glade is at `p`, in `[0, 1]`. Each coarse cell rolls once;
+/// a wild roll both creates the clearing and sets its radius.
+pub(super) fn clearing_field(seed: u64, p: GlobalXZ) -> f32 {
+    let cell = CLEARING_CELL_M;
+    let cx0 = (p.x / cell).floor() as i64 - 1;
+    let cx1 = cx0 + 2;
+    let cz0 = (p.z / cell).floor() as i64 - 1;
+    let cz1 = cz0 + 2;
+    let mut best = 0.0f32;
+    for cz in cz0..=cz1 {
+        for cx in cx0..=cx1 {
+            let mut rng = CellRng::new(seed ^ CLEARING_SALT, cx, cz);
+            let wild = rng.unit();
+            if wild < CLEARING_MIN_ROLL {
+                continue;
+            }
+            let t = (wild - CLEARING_MIN_ROLL) / (1.0 - CLEARING_MIN_ROLL);
+            let radius = CLEARING_RADIUS_MIN_M
+                + (t as f64) * (CLEARING_RADIUS_MAX_M - CLEARING_RADIUS_MIN_M);
+            let center_x = (cx as f64 + 0.5) * cell + (rng.unit() as f64 - 0.5) * cell * 0.35;
+            let center_z = (cz as f64 + 0.5) * cell + (rng.unit() as f64 - 0.5) * cell * 0.35;
+            let dx = p.x - center_x;
+            let dz = p.z - center_z;
+            let dist = (dx * dx + dz * dz).sqrt();
+            if dist >= radius {
+                continue;
+            }
+            let depth = lerp(0.55, 1.0, t);
+            let edge = 1.0 - smoothstep((radius * 0.55) as f32, radius as f32, dist as f32);
+            best = best.max(depth * edge);
+        }
+    }
+    best
+}
+
+/// Regional tree-lineage bias in `[0, 1]`: 0 = broadleaf, 1 = conifer.
+pub(super) fn species_conifer_bias(
+    seed: u64,
+    p: GlobalXZ,
+    ground_m: f32,
+    humidity: f32,
+    alpine: f32,
+    sea: f32,
+) -> f32 {
+    let patch = value_noise(
+        seed ^ SPECIES_PATCH_SALT,
+        p.x / SPECIES_PATCH_SCALE_M,
+        p.z / SPECIES_PATCH_SCALE_M,
+    ) * 0.5
+        + 0.5;
+    let elevation = smoothstep(sea + 40.0, sea + 520.0, ground_m);
+    (alpine * 0.42 + elevation * 0.28 + (1.0 - humidity) * 0.22 + (1.0 - patch) * 0.18)
+        .clamp(0.0, 1.0)
+}
+
 #[derive(Debug, Error)]
 pub enum ScatterError {
     #[error("no prop assets found under {0}; run the asset generator sync")]
@@ -193,15 +274,24 @@ pub enum PropClass {
     Reed,
     /// Scrub, thickest along a bank and on open ground.
     Bush,
+    /// Fallen or broken trunks on glades and thin floor.
+    Snag,
+    /// Clustered forest-floor fungi.
+    Mushroom,
+    /// Berry patches on sunny glade edges.
+    Berry,
 }
 
 /// Every class, in the order they are scattered.
-pub const PROP_CLASSES: [PropClass; 5] = [
+pub const PROP_CLASSES: [PropClass; 8] = [
     PropClass::Grass,
     PropClass::Rock,
     PropClass::Tree,
     PropClass::Reed,
     PropClass::Bush,
+    PropClass::Snag,
+    PropClass::Mushroom,
+    PropClass::Berry,
 ];
 
 impl PropClass {
@@ -212,6 +302,9 @@ impl PropClass {
             Self::Tree => TREE_SPACING_M,
             Self::Reed => REED_SPACING_M,
             Self::Bush => BUSH_SPACING_M,
+            Self::Snag => SNAG_SPACING_M,
+            Self::Mushroom => MUSHROOM_SPACING_M,
+            Self::Berry => BERRY_SPACING_M,
         }
     }
 
@@ -222,6 +315,9 @@ impl PropClass {
             Self::Tree => TREE_RADIUS_M,
             Self::Reed => REED_RADIUS_M,
             Self::Bush => BUSH_RADIUS_M,
+            Self::Snag => SNAG_RADIUS_M,
+            Self::Mushroom => MUSHROOM_RADIUS_M,
+            Self::Berry => BERRY_RADIUS_M,
         }
     }
 
@@ -232,20 +328,26 @@ impl PropClass {
             Self::Grass => (1.0, 2.1),
             Self::Rock => (0.5, 1.6),
             // Measured: sapling 4.8 m, alpine 9.4 m, ponderosa 14.9 m, spruce
-            // 16.8 m. Floor at 1.05 so timber is not shrunk below authored size;
-            // 2.0 lets spruce reach ~34 m, which is tall timber, not redwood.
-            Self::Tree => (1.05, 2.0),
+            // 16.8 m. Floor at 1.575 keeps even saplings above knee height at
+            // spawn; 4.0 lets spruce reach ~67 m — cathedral timber, not shrubbery.
+            Self::Tree => (1.575, 4.0),
             // The clumps are authored just under two metres, which is a reed.
             Self::Reed => (0.7, 1.15),
             // The tall shrub is authored ~2 m; the low ones half that. A wide
             // range is what makes a hillside of them, not a cloned hedge.
             Self::Bush => (0.75, 1.75),
+            Self::Snag => (0.85, 1.35),
+            Self::Mushroom => (0.75, 1.25),
+            Self::Berry => (0.80, 1.20),
         }
     }
 
     /// Towns keep wilderness grass, trees, and scrub off streets and roofs.
     fn skips_urban(self) -> bool {
-        matches!(self, Self::Grass | Self::Tree | Self::Bush)
+        matches!(
+            self,
+            Self::Grass | Self::Tree | Self::Bush | Self::Snag | Self::Mushroom | Self::Berry
+        )
     }
 
     /// Whether being near water changes how much of this class belongs here,
@@ -268,6 +370,9 @@ impl PropClass {
             Self::Tree => 0.12,
             Self::Reed => 0.06,
             Self::Bush => 0.14,
+            Self::Snag => 0.10,
+            Self::Mushroom => 0.02,
+            Self::Berry => 0.04,
         }
     }
 
@@ -282,6 +387,7 @@ impl PropClass {
             // could float: a reed is two metres tall and rooted in the bottom.
             Self::Reed => (-1.2, 0.8),
             Self::Bush => (f32::NEG_INFINITY, -0.5),
+            Self::Snag | Self::Mushroom | Self::Berry => (f32::NEG_INFINITY, -0.8),
         }
     }
 
@@ -312,7 +418,9 @@ impl PropClass {
                 BUSH_SPACING_M,
                 BUSH_OUTER_SPACING_M,
             )),
-            Self::Grass | Self::Rock | Self::Reed => None,
+            Self::Grass | Self::Rock | Self::Reed | Self::Snag | Self::Mushroom | Self::Berry => {
+                None
+            }
         }
     }
 }
@@ -344,12 +452,19 @@ pub struct GroundCover {
     pub tree: f32,
     pub reed: f32,
     pub bush: f32,
+    pub snag: f32,
+    pub mushroom: f32,
+    pub berry: f32,
     /// 0 = parched, 1 = soaking.
     pub moisture: f32,
     /// 0 = lowland, 1 = at the treeline.
     pub alpine: f32,
     /// 0 = deep in the stand, 1 = open ground.
     pub openness: f32,
+    /// 0 = broadleaf stand, 1 = conifer stand.
+    pub conifer: f32,
+    /// 0 = closed canopy, 1 = deep glade.
+    pub clearing: f32,
     /// 0 = a face nothing can root on, 1 = ground that holds soil.
     pub footing: f32,
     /// 0 = out of reach of any water, 1 = at the waterline. Zero until
@@ -426,6 +541,9 @@ impl GroundCover {
             PropClass::Tree => self.tree,
             PropClass::Reed => self.reed,
             PropClass::Bush => self.bush,
+            PropClass::Snag => self.snag,
+            PropClass::Mushroom => self.mushroom,
+            PropClass::Berry => self.berry,
         }
     }
 
@@ -434,6 +552,7 @@ impl GroundCover {
     /// Deliberately does not touch hydrology — that costs an order of magnitude
     /// more, and most candidates are rejected before it would matter.
     pub fn sample(
+        seed: u64,
         surface: &ContinentalSurface,
         p: GlobalXZ,
         ground_m: f32,
@@ -461,35 +580,81 @@ impl GroundCover {
         // Green tufts and scrub on a white cap read as a mistake; stones stay.
         let rooted = thaw(snow);
 
+        let conifer = species_conifer_bias(seed, p, ground_m, humidity, alpine, sea);
+        let clearing = if canopy > 0.35 {
+            clearing_field(seed, p)
+        } else {
+            0.0
+        };
+
         // Torn canopy edges: a kilometre-wide biome cell would otherwise fade
         // into open ground as one smooth gradient, with no clearings.
-        let tree = smoothstep(0.20, 0.58, canopy * shade + canopy_noise * 0.30)
+        let mut tree = smoothstep(0.20, 0.58, canopy * shade + canopy_noise * 0.30)
             * flat
             * (1.0 - alpine)
             * (1.0 - beach)
             * rooted;
+        tree *= 1.0 - clearing * 0.92;
+        tree *= TREE_DENSITY;
 
-        let grass = (0.30 + 0.62 * humidity)
+        let patch = soil_patch(seed, p);
+        let floor_sparse = tree * smoothstep(0.10, 0.32, patch) * (1.0 - clearing * 0.65);
+
+        let mut grass = (0.30 + 0.62 * humidity)
             * shade
             * flat
             * (1.0 - 0.75 * beach)
             * (1.0 - 0.35 * alpine)
             * rooted;
+        grass *= 1.0 + clearing * 0.85;
+        grass *= 1.0 - floor_sparse * 0.55;
 
         // Stones come loose where the ground is steep, high, or bare.
-        let rock =
-            (0.05 + 0.55 * smoothstep(0.20, 0.75, slope) + 0.35 * alpine) * (1.0 - 0.6 * canopy);
+        let rock = (0.05 + 0.55 * smoothstep(0.20, 0.75, slope) + 0.35 * alpine)
+            * (1.0 - 0.6 * canopy)
+            * (1.0 + floor_sparse * 0.35);
 
-        // Scrub is the cover of open ground: it fills the gaps a wood leaves
-        // and the ground a wood never took. A floor so low that dry country
-        // reads as empty is what left whole hillsides as grass and nothing.
-        // Alpine keeps a thinner stand of low shrubs; snow takes even those.
-        let bush = (0.22 + 0.32 * humidity)
+        // Scrub fills glades and the shaded mid-canopy band under partial cover.
+        let understory = (tree * (1.0 - tree) * 4.0).min(1.0);
+        let bush_base = (0.22 + 0.32 * humidity)
             * flat
             * (1.0 - 0.85 * beach)
             * lerp(1.0, 0.48, alpine)
-            * lerp(0.40, 1.0, 1.0 - tree)
             * rooted;
+        let open_scrub = lerp(0.40, 1.0, 1.0 - tree);
+        let canopy_scrub = understory * 0.72 + 0.12;
+        let bush = bush_base
+            * open_scrub.max(canopy_scrub * smoothstep(0.12, 0.55, tree))
+            * (1.0 + clearing * 0.25);
+
+        let mushroom_cluster = value_noise(
+            seed ^ MUSHROOM_CLUSTER_SALT,
+            p.x / MUSHROOM_CLUSTER_SCALE_M,
+            p.z / MUSHROOM_CLUSTER_SCALE_M,
+        ) * 0.5
+            + 0.5;
+        let mushroom = smoothstep(0.80, 0.94, mushroom_cluster)
+            * tree
+            * (0.35 + 0.45 * humidity)
+            * (1.0 - clearing * 0.55)
+            * flat
+            * rooted;
+
+        let berry_cluster = value_noise(
+            seed ^ BERRY_CLUSTER_SALT,
+            p.x / BERRY_CLUSTER_SCALE_M,
+            p.z / BERRY_CLUSTER_SCALE_M,
+        ) * 0.5
+            + 0.5;
+        let berry = smoothstep(0.74, 0.90, berry_cluster)
+            * (clearing * 0.55 + (1.0 - tree) * 0.35)
+            * (0.35 + 0.55 * humidity)
+            * flat
+            * (1.0 - alpine * 0.85)
+            * rooted;
+
+        let snag =
+            (clearing * 0.50 + floor_sparse * 0.38 + tree * 0.07) * flat * (1.0 - beach) * rooted;
 
         Self {
             grass: grass.clamp(0.0, 1.0),
@@ -499,6 +664,9 @@ impl GroundCover {
             // anywhere else.
             reed: 0.0,
             bush: bush.clamp(0.0, 1.0),
+            snag: snag.clamp(0.0, 1.0),
+            mushroom: mushroom.clamp(0.0, 1.0),
+            berry: berry.clamp(0.0, 1.0),
             // Atlas humidity is a rainfall index, not soil moisture, and
             // standing timber is itself evidence of water. Taken raw it puts
             // straw tufts all over a forest floor that is plainly green.
@@ -506,6 +674,8 @@ impl GroundCover {
                 .clamp(0.0, 1.0),
             alpine,
             openness: (1.0 - tree).clamp(0.0, 1.0),
+            conifer,
+            clearing,
             footing: flat,
             bank: 0.0,
             aspect,
@@ -524,8 +694,9 @@ impl GroundCover {
         self.moisture = (self.moisture + 0.45 * self.bank).clamp(0.0, 1.0);
         // Gallery woodland: a line of trees follows water across ground far too
         // dry to carry a wood of its own.
-        self.tree =
-            (self.tree + 0.40 * self.bank * (1.0 - self.alpine) * thaw(self.snow)).clamp(0.0, 1.0);
+        self.tree = (self.tree
+            + 0.40 * self.bank * (1.0 - self.alpine) * thaw(self.snow) * TREE_DENSITY)
+            .clamp(0.0, 1.0);
         self.openness = (1.0 - self.tree).clamp(0.0, 1.0);
         // Scrub grows anywhere flat and damp enough, and crowds the edge of the
         // water on top of that — added rather than scaled, or a bank running
@@ -533,6 +704,8 @@ impl GroundCover {
         // frozen shore is not a reed-bed's cousin in green shrubs.
         let fringe = self.bank * self.footing * (1.0 - self.alpine) * thaw(self.snow);
         self.bush = (self.bush + 0.34 * fringe).clamp(0.0, 1.0);
+        self.mushroom = (self.mushroom + 0.18 * self.moisture * self.tree * fringe).clamp(0.0, 1.0);
+        self.berry = (self.berry + 0.12 * fringe * (1.0 - self.alpine)).clamp(0.0, 1.0);
         self.reed = (0.45 + 0.5 * self.moisture).clamp(0.0, 1.0) * self.bank;
         self
     }
@@ -552,6 +725,8 @@ struct PropTaste {
     alpine: f32,
     /// Wants open ground rather than a closed stand.
     open: f32,
+    /// 0 = broadleaf, 1 = conifer.
+    conifer: f32,
 }
 
 impl PropTaste {
@@ -559,6 +734,7 @@ impl PropTaste {
         dry: 0.5,
         alpine: 0.5,
         open: 0.5,
+        conifer: 0.5,
     };
 
     fn of(stem: &str) -> Self {
@@ -572,6 +748,10 @@ impl PropTaste {
         if stem.contains("sparse") {
             taste.dry = 0.75;
             taste.open = 0.8;
+        }
+        if stem.contains("meadow") {
+            taste.dry = 0.35;
+            taste.open = 1.0;
         }
         // Valley scrub; `bush_alpine_low` overrides below. Neutral 0.5 would
         // still pick berry and lush clumps on a snow line.
@@ -587,9 +767,38 @@ impl PropTaste {
         if stem.contains("sapling") {
             taste.open = 1.0;
             taste.alpine = 0.35;
+            taste.conifer = 0.85;
         }
-        if stem.contains("spruce") || stem.contains("ponderosa") {
+        if stem.contains("spruce") || stem.contains("ponderosa") || stem.contains("pine") {
             taste.open = 0.15;
+            taste.conifer = 1.0;
+        }
+        if stem.contains("cypress") {
+            taste.open = 0.25;
+            taste.conifer = 1.0;
+            taste.dry = 0.25;
+        }
+        if stem.contains("oak")
+            || stem.contains("birch")
+            || stem.contains("maple")
+            || stem.contains("poplar")
+            || stem.contains("willow")
+        {
+            taste.conifer = 0.0;
+            taste.open = 0.45;
+        }
+        if stem.contains("snag") {
+            taste.open = 0.82;
+            taste.conifer = 0.65;
+        }
+        if stem.contains("mushroom") {
+            taste.dry = 0.15;
+            taste.open = 0.22;
+            taste.alpine = 0.08;
+        }
+        if stem.contains("berry") {
+            taste.open = 0.78;
+            taste.dry = 0.35;
         }
         // Berries want light and an edge to stand on; a reed only ever stands
         // in the open water it is rooted in.
@@ -602,6 +811,7 @@ impl PropTaste {
         if stem.contains("broad") {
             taste.open = 0.7;
             taste.dry = 0.15;
+            taste.conifer = 0.0;
         }
         if stem.contains("reed") {
             taste.dry = 0.0;
@@ -616,7 +826,8 @@ impl PropTaste {
         let want_dry = 1.0 - cover.moisture;
         let miss = (self.dry - want_dry).abs() * 1.15
             + (self.alpine - cover.alpine).abs() * 0.45
-            + (self.open - cover.openness).abs() * 0.40;
+            + (self.open - cover.openness).abs() * 0.40
+            + (self.conifer - cover.conifer).abs() * 0.55;
         (1.0 - miss).clamp(0.04, 1.0)
     }
 }
@@ -654,6 +865,9 @@ impl ScatterCatalog {
             ("trees", PropClass::Tree),
             ("reeds", PropClass::Reed),
             ("bushes", PropClass::Bush),
+            ("snags", PropClass::Snag),
+            ("mushrooms", PropClass::Mushroom),
+            ("berries", PropClass::Berry),
         ] {
             let dir = root.join(dir);
             let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1740,8 +1954,14 @@ impl Sowing {
                     continue;
                 };
                 let fall = self.fall_at(p);
-                let mut cover =
-                    GroundCover::sample(surface, p, ground, fall, canopy_noise(self.seed, p));
+                let mut cover = GroundCover::sample(
+                    self.seed,
+                    surface,
+                    p,
+                    ground,
+                    fall,
+                    canopy_noise(self.seed, p),
+                );
                 let wants_water = !far_from_water && class.follows_water();
                 let early: Option<SurfaceColumn> = wants_water.then(|| column_at(p));
                 if let Some(column) = early {
@@ -1872,7 +2092,8 @@ fn sow_far_forest(
             ponds.carve(p, &mut column);
             let ground = column.ground();
             let fall = far_fall(surface, p);
-            let mut cover = GroundCover::sample(surface, p, ground, fall, canopy_noise(seed, p));
+            let mut cover =
+                GroundCover::sample(seed, surface, p, ground, fall, canopy_noise(seed, p));
             if !far_from_water {
                 cover = cover.with_water(column.wetness());
             }
@@ -2038,6 +2259,9 @@ fn class_salt(class: PropClass) -> u64 {
         PropClass::Tree => 0x7472_6565_7300,
         PropClass::Reed => 0x7265_6564_7300,
         PropClass::Bush => 0x6275_7368_7300,
+        PropClass::Snag => 0x534E_4147_7300,
+        PropClass::Mushroom => 0x4D55_5348_7300,
+        PropClass::Berry => 0x4245_5252_7300,
     }
 }
 
@@ -2076,6 +2300,7 @@ mod tests {
                     continue;
                 }
                 let cover = GroundCover::sample(
+                    surface.world_seed() as u32 as u64,
                     surface,
                     p,
                     column.ground(),
@@ -2294,7 +2519,7 @@ mod tests {
             ponds.carve(p, &mut column);
             let fall = far_fall(&surface, p);
             let mut cover =
-                GroundCover::sample(&surface, p, column.ground(), fall, canopy_noise(7, p));
+                GroundCover::sample(7, &surface, p, column.ground(), fall, canopy_noise(7, p));
             let dry_beyond = -BANK_REACH_M;
             let far_from_water = surface
                 .water_reach(p)
@@ -2361,8 +2586,9 @@ mod tests {
     fn bushes_and_grass_do_not_stand_on_snow() {
         let (surface, _) = world(20260809);
         let p = forested(&surface);
-        let low = GroundCover::sample(&surface, p, 80.0, Fall::default(), 0.0);
-        let cap = GroundCover::sample(&surface, p, 1_800.0, Fall::default(), 0.0);
+        let seed = surface.world_seed() as u32 as u64;
+        let low = GroundCover::sample(seed, &surface, p, 80.0, Fall::default(), 0.0);
+        let cap = GroundCover::sample(seed, &surface, p, 1_800.0, Fall::default(), 0.0);
         assert!(low.bush > 0.08, "open lowland grew no scrub: {}", low.bush);
         assert!(
             low.grass > 0.15,
@@ -2392,7 +2618,8 @@ mod tests {
         let (surface, _) = world(20260809);
         let p = forested(&surface);
         // Treeline is complete by 780 m; snow on the flat starts around 1 050 m.
-        let alpine = GroundCover::sample(&surface, p, 820.0, Fall::default(), 0.0);
+        let seed = surface.world_seed() as u32 as u64;
+        let alpine = GroundCover::sample(seed, &surface, p, 820.0, Fall::default(), 0.0);
         assert!(
             alpine.snow < 0.05,
             "just above the treeline is already snow: {}",
@@ -2411,5 +2638,67 @@ mod tests {
         assert!(PropTaste::of("bush_broad_lush").alpine < 0.2);
         assert!(PropTaste::of("bush_berries").alpine < 0.2);
         assert_eq!(PropTaste::of("bush_alpine_low").alpine, 1.0);
+    }
+
+    #[test]
+    fn clearings_open_the_canopy_without_flattening_the_whole_forest() {
+        let (surface, _) = world(20260809);
+        let seed = surface.world_seed() as u32 as u64;
+        let p = forested(&surface);
+        let closed = GroundCover::sample(seed, &surface, p, 80.0, Fall::default(), 0.5);
+        let mut open_sum = 0.0f32;
+        let mut open_count = 0usize;
+        let mut closed_sum = 0.0f32;
+        let mut closed_count = 0usize;
+        for i in 0..96usize {
+            let x = p.x + ((i % 12) as f64 - 6.0) * 18.0;
+            let z = p.z + ((i / 12) as f64 - 4.0) * 18.0;
+            let at = GlobalXZ::at(x, z);
+            let cover = GroundCover::sample(seed, &surface, at, 80.0, Fall::default(), 0.5);
+            if cover.clearing > 0.45 {
+                open_sum += cover.tree;
+                open_count += 1;
+            } else if cover.clearing < 0.05 {
+                closed_sum += cover.tree;
+                closed_count += 1;
+            }
+        }
+        assert!(
+            closed.tree > 0.35,
+            "forested probe lost its timber: {}",
+            closed.tree
+        );
+        if open_count > 0 && closed_count > 0 {
+            let open_mean = open_sum / open_count as f32;
+            let closed_mean = closed_sum / closed_count as f32;
+            assert!(
+                open_mean < closed_mean * 0.45,
+                "clearings did not thin the stand ({open_mean} vs {closed_mean})"
+            );
+        }
+        assert!(
+            clearing_field(seed, p) == clearing_field(seed, p),
+            "clearing field must be deterministic"
+        );
+    }
+
+    #[test]
+    fn species_bias_tracks_humidity_and_height() {
+        let (surface, _) = world(20260809);
+        let seed = surface.world_seed() as u32 as u64;
+        let sea = surface.sea_surface_z();
+        let p = forested(&surface);
+        let humid_low = species_conifer_bias(seed, p, sea + 90.0, 0.92, 0.05, sea);
+        let dry_high = species_conifer_bias(seed, p, sea + 480.0, 0.28, 0.55, sea);
+        assert!(
+            humid_low < dry_high,
+            "humid lowland ({humid_low}) should lean broadleaf vs dry rise ({dry_high})"
+        );
+    }
+
+    #[test]
+    fn broadleaf_and_conifer_meshes_disagree_on_lineage() {
+        assert!(PropTaste::of("pine_spruce_narrow").conifer > 0.9);
+        assert!(PropTaste::of("oak_round_mature").conifer < 0.1);
     }
 }

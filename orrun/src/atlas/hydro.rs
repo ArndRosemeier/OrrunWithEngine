@@ -111,6 +111,9 @@ pub struct HydroVectors {
     pub cell_rivers: Vec<Vec<u32>>,
     pub cell_lakes: Vec<Vec<u32>>,
     pub cell_coasts: Vec<Vec<u32>>,
+    /// Packed atlas ocean bit per cell. Coast rings can miss inland cells;
+    /// this is the fallback so land is never treated as open ocean.
+    pub atlas_ocean: Vec<u8>,
 }
 
 impl HydroVectors {
@@ -126,6 +129,11 @@ impl HydroVectors {
         reach_sinks(&mut rivers, &lakes, &coasts, sea);
         let (cell_rivers, cell_lakes, cell_coasts) =
             build_cell_index(atlas.size, &rivers, &lakes, &coasts);
+        let atlas_ocean: Vec<u8> = atlas
+            .cells
+            .iter()
+            .map(|&cell| u8::from(pack::biome(cell) == Biome::Ocean))
+            .collect();
         let hydro = Self {
             sea_surface_z: sea,
             rivers,
@@ -134,6 +142,7 @@ impl HydroVectors {
             cell_rivers,
             cell_lakes,
             cell_coasts,
+            atlas_ocean,
         };
         hydro.validate_or_panic();
         hydro
@@ -156,6 +165,23 @@ impl HydroVectors {
         for (i, c) in self.coasts.iter().enumerate() {
             assert!(c.ring.len() >= 4, "coast {i} ring too short");
         }
+        assert_eq!(
+            self.atlas_ocean.len(),
+            self.cell_coasts.len(),
+            "atlas ocean mask must cover every hydro cell"
+        );
+    }
+
+    #[inline]
+    pub fn is_atlas_ocean(&self, idx: usize) -> bool {
+        self.atlas_ocean[idx] != 0
+    }
+
+    pub fn grid_size(&self) -> usize {
+        let n = self.atlas_ocean.len();
+        let size = (n as f64).sqrt() as usize;
+        assert_eq!(size * size, n, "hydro atlas mask is not a square grid");
+        size
     }
 
     #[inline]
@@ -168,15 +194,19 @@ impl HydroVectors {
         z * size + x
     }
 
-    /// Canonical land side of the same warped coast rings used by the 3D
-    /// surface. Packed atlas cells are only the source raster; after smoothing
-    /// and meandering, a point near a coast must ask the final vector geometry.
+    /// Land if a coast ring contains the point, otherwise if the atlas cell is
+    /// not ocean. Rings win near a traced shoreline; the atlas bit covers
+    /// inland cells no fragment ring was stamped onto.
     pub(crate) fn contains_land(&self, size: usize, p: Vec2) -> bool {
         let q = p + shore_domain_warp(p);
         let idx = self.cell_index(size, q.x, q.y);
-        self.cell_coasts[idx]
+        if self.cell_coasts[idx]
             .iter()
             .any(|&coast_id| point_in_ring(q, &self.coasts[coast_id as usize].ring))
+        {
+            return true;
+        }
+        !self.is_atlas_ocean(idx)
     }
 }
 

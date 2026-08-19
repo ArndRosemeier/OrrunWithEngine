@@ -15,11 +15,11 @@ use glam::{Vec2, Vec3};
 
 use super::hydro_geom::{coast_signed_full, signed_distance_ring, COAST_QUERY_M};
 use super::{
-    chunk_span, classify_settlement, resolve_spawn, AtlasBounds, AtlasCell, ContinentalSurface,
-    EntryError, HamletStand, Locomotion, MapPoint, PondField, PondWindow, PropClass,
-    ScatterCatalog, SessionError, SessionState, SettlementLayer, TerrainChunkBuilder, TravelPhase,
-    TravelTimings, WalkInput, WorldEntryRequest, WorldSession, WorldStream, CHUNK_SAMPLE_M,
-    CHUNK_SPAN_M, MEDIUM, MIN_WATER_DEPTH,
+    best_settlement_entry, chunk_span, classify_settlement, resolve_spawn, AtlasBounds, AtlasCell,
+    ContinentalSurface, EntryError, HamletStand, Locomotion, MapPoint, PondField, PondWindow,
+    PropClass, ScatterCatalog, SessionError, SessionState, SettlementLayer, TerrainChunkBuilder,
+    TravelPhase, TravelTimings, WalkInput, WaterBody, WorldEntryRequest, WorldSession, WorldStream,
+    CHUNK_SAMPLE_M, CHUNK_SPAN_M, MEDIUM, MIN_WATER_DEPTH,
 };
 use crate::atlas::cell_overlay::AtlasCellOverlay;
 use crate::atlas::hydro::HydroSink;
@@ -32,9 +32,12 @@ fn vendored_props_arrive_with_the_colour_the_generator_authored() {
     // that will stand in the world as a grey stick.
     let catalog = ScatterCatalog::discover().expect("vendored props");
     assert!(catalog.count_of(PropClass::Grass) >= 3);
-    assert!(catalog.count_of(PropClass::Tree) >= 3);
+    assert!(catalog.count_of(PropClass::Tree) >= 8);
     assert!(catalog.count_of(PropClass::Rock) >= 4);
     assert!(catalog.count_of(PropClass::Bush) >= 6);
+    assert!(catalog.count_of(PropClass::Snag) >= 2);
+    assert!(catalog.count_of(PropClass::Mushroom) >= 2);
+    assert!(catalog.count_of(PropClass::Berry) >= 2);
 
     let tuft = engine::model::Model::load(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -229,6 +232,53 @@ fn largest_settlement_is_the_highest_tier_then_pop() {
             pin.population
         );
     }
+}
+
+#[test]
+fn inland_atlas_land_is_not_carved_as_open_ocean() {
+    let (atlas, surface) = world_of(20260809, 1000);
+    let p = GlobalXZ::at(457_327.0, 431_562.0);
+    let biome = crate::atlas::pack::biome(atlas.cell_at(457, 431));
+    assert!(
+        crate::atlas::biomes::is_land(biome),
+        "the reported click must stay atlas land, got {biome:?}"
+    );
+    let column = surface.column(p);
+    assert!(
+        !matches!(column.body(), Some(WaterBody::Ocean)),
+        "plains at ({:.0}, {:.0}) was carved as ocean (wetness={:.1} ground={:.1})",
+        p.x,
+        p.z,
+        column.wetness(),
+        column.ground()
+    );
+    let ponds = PondField::empty(p);
+    let request = WorldEntryRequest::at_global(AtlasBounds::of(&atlas), p).expect("in bounds");
+    resolve_spawn(&surface, &ponds, request)
+        .expect("a green inland click must have walkable ground nearby");
+    let coast = surface.coast_signed(p);
+    assert!(
+        coast > 90.0,
+        "inland plains must sit well inside the land side, coast_sd={coast}"
+    );
+    assert_eq!(
+        super::ambience::ocean_presence(coast),
+        0.0,
+        "ocean ambience must be silent on dry inland ground"
+    );
+}
+
+#[test]
+fn full_size_has_a_walkable_start_settlement() {
+    let (_, surface) = world_of(20260809, 1000);
+    let ponds = PondField::empty(GlobalXZ::at(0.0, 0.0));
+    let (pin, request) =
+        best_settlement_entry(&surface, &ponds).expect("at least one settlement must be walkable");
+    resolve_spawn(&surface, &ponds, request).expect("chosen settlement resolves");
+    eprintln!(
+        "full-size start: {} pop {} at ({:.0}, {:.0})",
+        pin.tier, pin.population, pin.at.x, pin.at.z
+    );
 }
 
 #[test]
@@ -1468,9 +1518,10 @@ fn bank_cover_needs_a_bank() {
     let (_atlas, surface) = world_of(20260809, 48);
     let p = dry_inland(&surface);
     let ground = surface.column(p).ground();
-    let dry = super::GroundCover::sample(&surface, p, ground, super::Fall::default(), 0.0)
+    let seed = surface.world_seed() as u32 as u64;
+    let dry = super::GroundCover::sample(seed, &surface, p, ground, super::Fall::default(), 0.0)
         .with_water(-500.0);
-    let wet = super::GroundCover::sample(&surface, p, ground, super::Fall::default(), 0.0)
+    let wet = super::GroundCover::sample(seed, &surface, p, ground, super::Fall::default(), 0.0)
         .with_water(0.0);
     assert_eq!(dry.reed, 0.0, "reeds grew half a kilometre from any water");
     assert_eq!(dry.bank, 0.0);
@@ -2094,27 +2145,11 @@ fn standing_session(seed: i32, size: usize) -> Option<(World, WorldSession)> {
 /// Pond scanning and the entry ring take a few seconds in debug; the loading
 /// screen covers that. Tests wait for the real work, not a short wall clock.
 fn wait_until_world(session: &mut WorldSession, world: &mut World) {
-    wait_until_world_for(session, world, Duration::from_secs(90));
+    session.wait_until_world(world);
 }
 
 fn wait_until_world_for(session: &mut WorldSession, world: &mut World, budget: Duration) {
-    let deadline = Instant::now() + budget;
-    while Instant::now() < deadline {
-        session.step(world, WalkInput::IDLE).expect("update");
-        if session.state() == SessionState::World {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!(
-        "the entry ring never became resident (spawn={} progress={:.0}% status={} resident={} pending={} inflight={})",
-        session.spawn().is_some(),
-        session.loading_progress() * 100.0,
-        session.loading_status(),
-        session.stream().resident_count(),
-        session.stream().pending_count(),
-        session.stream().inflight_count(),
-    );
+    session.wait_until_world_for(world, budget);
 }
 
 #[test]
@@ -2786,7 +2821,8 @@ fn open_ocean_coast_queries_stay_cheap() {
     let mut open = None;
     'outer: for az in 0..size {
         for ax in 0..size {
-            if hydro.cell_coasts[az * size + ax].is_empty() {
+            if hydro.cell_coasts[az * size + ax].is_empty() && hydro.is_atlas_ocean(az * size + ax)
+            {
                 open = Some(Vec2::new(
                     (ax as f32 + 0.5) * CELL_METRES,
                     (az as f32 + 0.5) * CELL_METRES,

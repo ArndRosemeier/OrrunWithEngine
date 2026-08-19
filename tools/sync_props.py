@@ -32,6 +32,7 @@ WANTED: dict[str, tuple[str, ...]] = {
         "grass_tuft_lush",
         "grass_tuft_dry",
         "grass_tuft_sparse",
+        "grass_tuft_meadow",
     ),
     "rocks": (
         "rock_boulder_round",
@@ -48,6 +49,26 @@ WANTED: dict[str, tuple[str, ...]] = {
         "pine_ponderosa_stylized",
         "pine_spruce_narrow",
         "pine_young_sapling",
+        "oak_round_mature",
+        "maple_compact",
+        "birch_silver_slender",
+        "poplar_autumn",
+        "cypress_column_tall",
+    ),
+    "snags": (
+        "snag_dead_broken",
+        "snag_dead_twisted",
+        "snag_dead_tall",
+    ),
+    "mushrooms": (
+        "mushroom_cluster_brown",
+        "mushroom_cluster_red_spotted",
+        "mushroom_shelf_log",
+    ),
+    "berries": (
+        "berry_patch_blue",
+        "berry_patch_black",
+        "berry_patch_strawberry",
     ),
     "reeds": (
         "reed_tall",

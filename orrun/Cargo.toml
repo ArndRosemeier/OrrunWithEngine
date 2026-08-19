@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "orrun"
 version.workspace = true
 edition.workspace = true
@@ -32,6 +32,14 @@ path = "src/bin/chunk_cost.rs"
 [[bin]]
 name = "pond_map"
 path = "src/bin/pond_map.rs"
+
+[[bin]]
+name = "playtester"
+path = "src/bin/playtester.rs"
+
+[[bin]]
+name = "combat_sim"
+path = "src/bin/combat_sim.rs"
 
 [dependencies]
 engine = { workspace = true }

@@ -906,6 +906,17 @@ impl ContinentalSurface {
         &self.index
     }
 
+    /// Signed distance to the sea: positive inland, negative in the ocean.
+    ///
+    /// The one land/ocean side every system must use — terrain, spawn, ambience.
+    pub fn coast_signed(&self, p: GlobalXZ) -> f32 {
+        self.coast_signed_at(Vec2::new(p.x as f32, p.z as f32))
+    }
+
+    fn coast_signed_at(&self, xz: Vec2) -> f32 {
+        self.index.coast_signed(&self.hydro, xz)
+    }
+
     pub fn bounds(&self) -> AtlasBounds {
         self.bounds
     }
@@ -1001,7 +1012,7 @@ impl ContinentalSurface {
         // land must come down to it. Stepping straight to a shelf depth (or
         // keeping the full inland height up to the rim) would put a wall around
         // every island.
-        let coast_sd = self.index.coast_signed(&self.hydro, xz);
+        let coast_sd = self.coast_signed_at(xz);
         if coast_sd < 0.0 {
             let seaward = (-coast_sd).min(2_000.0);
             let shelf = smoothstep(0.0, SHORE_BAND_M, seaward);
@@ -1162,7 +1173,7 @@ impl ContinentalSurface {
     /// and not.
     pub fn water_reach(&self, p: GlobalXZ) -> f32 {
         let xz = Vec2::new(p.x as f32, p.z as f32);
-        let mut reach = -self.index.coast_signed(&self.hydro, xz);
+        let mut reach = -self.coast_signed_at(xz);
         if let Some((_, sd)) = self.index.nearest_lake(&self.hydro, xz) {
             reach = reach.max(sd);
         }

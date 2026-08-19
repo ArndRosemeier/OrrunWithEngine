@@ -6,9 +6,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::atlas::SIZE as MAX_CONTINENT_SIZE;
 use crate::save::{self, SaveError};
 
 pub const FORMAT: u32 = 1;
+pub const DEFAULT_CONTINENT_SIZE: usize = 256;
+pub const MIN_CONTINENT_SIZE: usize = 32;
+
+/// Clamp a requested atlas edge length to supported bounds.
+pub fn clamp_continent_size(size: usize) -> usize {
+    size.clamp(MIN_CONTINENT_SIZE, MAX_CONTINENT_SIZE)
+}
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
@@ -40,6 +48,12 @@ pub enum SettingsError {
 pub struct Settings {
     pub format: u32,
     pub hitch_log: bool,
+    #[serde(default = "default_continent_size")]
+    pub continent_size: usize,
+}
+
+fn default_continent_size() -> usize {
+    DEFAULT_CONTINENT_SIZE
 }
 
 impl Default for Settings {
@@ -47,11 +61,16 @@ impl Default for Settings {
         Self {
             format: FORMAT,
             hitch_log: false,
+            continent_size: DEFAULT_CONTINENT_SIZE,
         }
     }
 }
 
 impl Settings {
+    pub fn continent_size(&self) -> usize {
+        clamp_continent_size(self.continent_size)
+    }
+
     pub fn load() -> Result<Self, SettingsError> {
         let path = settings_path()?;
         let text = match fs::read_to_string(&path) {
@@ -150,6 +169,7 @@ mod tests {
         let settings = Settings {
             format: FORMAT,
             hitch_log: true,
+            continent_size: 512,
         };
         let text = serde_json::to_string(&settings).expect("write");
         let back: Settings = serde_json::from_str(&text).expect("read");
@@ -161,5 +181,17 @@ mod tests {
         let text = r#"{"format":1,"hitch_log":false,"instance_submit":"cpu_indexed"}"#;
         let settings: Settings = serde_json::from_str(text).expect("read old settings");
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn missing_continent_size_defaults_to_256() {
+        let text = r#"{"format":1,"hitch_log":false}"#;
+        let settings: Settings = serde_json::from_str(text).expect("read old settings");
+        assert_eq!(settings.continent_size(), DEFAULT_CONTINENT_SIZE);
+    }
+
+    #[test]
+    fn continent_size_clamps_to_atlas_max() {
+        assert_eq!(clamp_continent_size(10_000), MAX_CONTINENT_SIZE);
     }
 }

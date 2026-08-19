@@ -9,20 +9,24 @@ use super::biomes;
 use super::features::NodeKind;
 use super::landmask::collar_cells;
 use super::pack;
-use super::population::{cell_is_settlement_flat, flatness_fitness};
-use super::types::GraphNode;
+use super::population::{cell_is_settlement_flat, classify_settlement_site, SettlementSite};
+use super::types::{GraphNode, Link};
 use super::{feature_hash, layer_seed};
 
 const SIZE_FULL: i32 = 1000;
 const PRIMARY_NODE_TARGET: i32 = 72;
+const SETTLEMENT_TARGET_FULL: i32 = 100;
+const DUNGEON_TARGET_FULL: i32 = 50;
 const SETTLEMENT_MIN_POP: i32 = 7;
 
 pub fn seed_nodes(
     world_seed: i32,
     size: usize,
-    cells: &[i32],
+    cells: &mut [i32],
     landmass_id: &mut [i32],
     lake_id: &[i32],
+    river_links: &FxHashMap<i32, Vec<Link>>,
+    mouth_distance: &[i32],
     nodes: &mut Vec<GraphNode>,
 ) {
     let mut rng = ChaCha8Rng::seed_from_u64(u64::from(layer_seed(world_seed, "atlas_nodes")));
@@ -43,7 +47,9 @@ pub fn seed_nodes(
         cells,
         landmass_id,
         lake_id,
-        (target * 6 / 10).clamp(2, target),
+        river_links,
+        mouth_distance,
+        settlement_target(size),
         &mut occupied,
         spacing,
         &mut rng,
@@ -132,160 +138,219 @@ pub fn seed_nodes(
     );
 }
 
+fn settlement_target(size: usize) -> usize {
+    ((SETTLEMENT_TARGET_FULL * size as i32) / SIZE_FULL)
+        .max(4)
+        .clamp(4, 220) as usize
+}
+
+fn dungeon_target(size: usize) -> usize {
+    ((DUNGEON_TARGET_FULL * size as i32) / SIZE_FULL)
+        .max(2)
+        .clamp(2, 120) as usize
+}
+
+fn settlement_pop_for_site(site: SettlementSite, rng: &mut ChaCha8Rng) -> i32 {
+    let (lo, hi) = match site {
+        SettlementSite::RiverMouth => (10, 15),
+        SettlementSite::Confluence => (8, 14),
+        SettlementSite::NearRiver => (6, 12),
+        SettlementSite::Inland => (4, 10),
+    };
+    let mut pop = rng.gen_range(lo..=hi);
+    if site == SettlementSite::Inland && rng.gen::<f32>() < 0.06 {
+        pop = rng.gen_range(10..=15);
+    }
+    if site == SettlementSite::RiverMouth && rng.gen::<f32>() < 0.08 {
+        pop = rng.gen_range(6..=9);
+    }
+    pop.clamp(1, 15)
+}
+
+fn site_from_tier(tier: u8) -> SettlementSite {
+    match tier {
+        0 => SettlementSite::RiverMouth,
+        1 => SettlementSite::Confluence,
+        2 => SettlementSite::NearRiver,
+        _ => SettlementSite::Inland,
+    }
+}
+
+fn site_bucket_index(site: SettlementSite) -> usize {
+    match site {
+        SettlementSite::RiverMouth => 0,
+        SettlementSite::Confluence => 1,
+        SettlementSite::NearRiver => 2,
+        SettlementSite::Inland => 3,
+    }
+}
+
+fn pick_settlement_site(rng: &mut ChaCha8Rng, buckets: &[Vec<i32>; 4]) -> Option<SettlementSite> {
+    let mut total = 0.0f32;
+    for (tier, bucket) in buckets.iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        total += site_from_tier(tier as u8).weight();
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    let mut cursor = rng.gen::<f32>() * total;
+    for (tier, bucket) in buckets.iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        let site = site_from_tier(tier as u8);
+        cursor -= site.weight();
+        if cursor <= 0.0 {
+            return Some(site);
+        }
+    }
+    None
+}
+
 fn seed_settlement_nodes(
     world_seed: i32,
     size: usize,
-    cells: &[i32],
+    cells: &mut [i32],
     landmass_id: &mut [i32],
     lake_id: &[i32],
-    budget: usize,
+    river_links: &FxHashMap<i32, Vec<Link>>,
+    mouth_distance: &[i32],
+    target: usize,
     occupied: &mut FxHashMap<i32, bool>,
     spacing: i32,
     rng: &mut ChaCha8Rng,
     nodes: &mut Vec<GraphNode>,
 ) {
-    let peaks = population_peaks(size, cells);
-    for &(_pop, idx) in &peaks {
-        if nodes.len() >= budget {
+    let mut buckets: [Vec<i32>; 4] = [vec![], vec![], vec![], vec![]];
+    for az in 0..size {
+        for ax in 0..size {
+            let idx = az * size + ax;
+            let packed = cells[idx];
+            let biome = pack::biome(packed);
+            if !biomes::is_land(biome) {
+                continue;
+            }
+            if !cell_is_settlement_flat(ax as i32, az as i32, size, cells) {
+                continue;
+            }
+            if near_lake(ax as i32, az as i32, size, lake_id)
+                && biome == super::biomes::Biome::Wetland
+            {
+                continue;
+            }
+            let site =
+                classify_settlement_site(ax as i32, az as i32, size, river_links, mouth_distance);
+            buckets[site_bucket_index(site)].push(idx as i32);
+        }
+    }
+
+    let max_attempts = target * 500;
+    let mut placed = 0usize;
+    for _ in 0..max_attempts {
+        if placed >= target {
             break;
         }
-        try_add_node(
+        let Some(site) = pick_settlement_site(rng, &buckets) else {
+            break;
+        };
+        let bucket = &buckets[site_bucket_index(site)];
+        if bucket.is_empty() {
+            continue;
+        }
+        let pick = bucket[rng.gen_range(0..bucket.len())];
+        let ax = pick % size as i32;
+        let az = pick / size as i32;
+        if try_add_settlement(
             world_seed,
             size,
             cells,
             landmass_id,
-            lake_id,
-            idx % size as i32,
-            idx / size as i32,
+            ax,
+            az,
+            site,
             occupied,
             spacing,
             rng,
             nodes,
-        );
-    }
-
-    let mut hosted: FxHashMap<i32, bool> = FxHashMap::default();
-    for node in nodes.iter() {
-        if node.kind == NodeKind::Settlement {
-            hosted.insert(node.landmass, true);
-        }
-    }
-
-    struct Best {
-        pop: i32,
-        fitness: f32,
-        idx: i32,
-    }
-    let mut best_flat: FxHashMap<i32, Best> = FxHashMap::default();
-    for az in 0..size {
-        for ax in 0..size {
-            let idx = az * size + ax;
-            let pop = pack::population(cells[idx]);
-            if pop < SETTLEMENT_MIN_POP {
-                continue;
-            }
-            if !cell_is_settlement_flat(ax as i32, az as i32, size, cells) {
-                continue;
-            }
-            let mass = landmass_id[idx];
-            if mass < 0 || hosted.contains_key(&mass) {
-                continue;
-            }
-            let fitness = flatness_fitness(ax as i32, az as i32, size, cells);
-            let take = match best_flat.get(&mass) {
-                None => true,
-                Some(prev) => {
-                    pop > prev.pop
-                        || (pop == prev.pop
-                            && (fitness > prev.fitness
-                                || ((fitness - prev.fitness).abs() < 1e-6
-                                    && (idx as i32) < prev.idx)))
-                }
-            };
-            if take {
-                best_flat.insert(
-                    mass,
-                    Best {
-                        pop,
-                        fitness,
-                        idx: idx as i32,
-                    },
-                );
-            }
-        }
-    }
-
-    for (mass, pick) in best_flat {
-        if hosted.contains_key(&mass) {
-            continue;
-        }
-        let before = nodes.len();
-        try_add_node(
-            world_seed,
-            size,
-            cells,
-            landmass_id,
-            lake_id,
-            pick.idx % size as i32,
-            pick.idx / size as i32,
-            occupied,
-            (spacing / 2).max(2),
-            rng,
-            nodes,
-        );
-        if nodes.len() > before {
-            hosted.insert(mass, true);
+        ) {
+            placed += 1;
         }
     }
 }
 
-fn population_peaks(size: usize, cells: &[i32]) -> Vec<(i32, i32)> {
-    let mut peaks = Vec::new();
-    let radius = 2i32;
-    for az in 0..size {
-        for ax in 0..size {
-            let idx = az * size + ax;
-            let pop = pack::population(cells[idx]);
-            if pop < SETTLEMENT_MIN_POP {
-                continue;
-            }
-            if !cell_is_settlement_flat(ax as i32, az as i32, size, cells) {
-                continue;
-            }
-            let mut is_peak = true;
-            'scan: for dz in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx == 0 && dz == 0 {
-                        continue;
-                    }
-                    let nx = ax as i32 + dx;
-                    let nz = az as i32 + dz;
-                    if nx < 0 || nz < 0 || nx as usize >= size || nz as usize >= size {
-                        continue;
-                    }
-                    let nb = nz as usize * size + nx as usize;
-                    let npop = pack::population(cells[nb]);
-                    if npop > pop || (npop == pop && (nb as i32) < idx as i32) {
-                        is_peak = false;
-                        break 'scan;
-                    }
-                }
-            }
-            if is_peak {
-                peaks.push((pop, idx as i32));
-            }
+fn stamp_cell_population(cells: &mut [i32], idx: usize, pop: i32) {
+    let packed = cells[idx];
+    cells[idx] = pack::pack(
+        pack::elevation(packed),
+        pack::humidity(packed),
+        pack::biome(packed),
+        pack::relief(packed),
+        pop,
+    );
+}
+
+fn try_add_settlement(
+    world_seed: i32,
+    size: usize,
+    cells: &mut [i32],
+    landmass_id: &mut [i32],
+    ax: i32,
+    az: i32,
+    site: SettlementSite,
+    occupied: &mut FxHashMap<i32, bool>,
+    spacing: i32,
+    rng: &mut ChaCha8Rng,
+    nodes: &mut Vec<GraphNode>,
+) -> bool {
+    if ax < 0 || az < 0 || ax as usize >= size || az as usize >= size {
+        return false;
+    }
+    let idx = az as usize * size + ax as usize;
+    if occupied.contains_key(&(idx as i32)) {
+        return false;
+    }
+    let biome = pack::biome(cells[idx]);
+    if !biomes::is_land(biome) || !cell_is_settlement_flat(ax, az, size, cells) {
+        return false;
+    }
+    for node in nodes.iter() {
+        if node.kind == NodeKind::Settlement
+            && (node.ax - ax).abs() + (node.az - az).abs() < spacing
+        {
+            return false;
         }
     }
-    peaks.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| {
-                let fa = flatness_fitness(a.1 % size as i32, a.1 / size as i32, size, cells);
-                let fb = flatness_fitness(b.1 % size as i32, b.1 / size as i32, size, cells);
-                fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.1.cmp(&b.1))
+
+    let mut mass = landmass_id[idx];
+    if mass < 0 {
+        mass = 0;
+        landmass_id[idx] = 0;
+    }
+
+    let pop = settlement_pop_for_site(site, rng);
+    stamp_cell_population(cells, idx, pop);
+
+    let kind = NodeKind::Settlement;
+    let id = feature_hash(&[
+        &world_seed.to_string(),
+        "node",
+        &ax.to_string(),
+        &az.to_string(),
+        &(kind as u8).to_string(),
+    ]);
+    nodes.push(GraphNode {
+        id,
+        kind,
+        cell: idx as i32,
+        ax,
+        az,
+        landmass: mass,
     });
-    peaks
+    occupied.insert(idx as i32, true);
+    true
 }
 
 fn try_add_node(
@@ -318,11 +383,7 @@ fn try_add_node(
         landmass_id[idx] = 0;
     }
 
-    let kind = if pack::population(cells[idx]) >= SETTLEMENT_MIN_POP
-        && cell_is_settlement_flat(ax, az, size, cells)
-    {
-        NodeKind::Settlement
-    } else if biome == super::biomes::Biome::Coast {
+    let kind = if biome == super::biomes::Biome::Coast {
         NodeKind::CoastalGate
     } else if near_lake(ax, az, size, lake_id) {
         NodeKind::LakeShore
@@ -369,10 +430,10 @@ fn seed_dungeon_nodes(
     nodes: &mut Vec<GraphNode>,
 ) {
     let mut rng = ChaCha8Rng::seed_from_u64(u64::from(layer_seed(world_seed, "atlas_dungeons")));
-    let target = (8 * size as i32 / SIZE_FULL).max(2).clamp(2, 16) as usize;
-    let dungeon_spacing = spacing.max(6);
-    let collar = (collar_cells(size) + 3).min(size as i32 / 4).max(2);
-    let attempts = target * 80;
+    let target = dungeon_target(size);
+    let dungeon_spacing = spacing.max(4).min(size as i32 / 6).max(3);
+    let collar = (collar_cells(size) + 2).min(size as i32 / 4).max(2);
+    let attempts = target * 400;
     for _ in 0..attempts {
         if nodes.iter().filter(|n| n.kind == NodeKind::Dungeon).count() >= target {
             return;
@@ -427,10 +488,13 @@ fn try_add_dungeon(
     if near_lake(ax, az, size, lake_id) {
         return;
     }
-    if pack::relief(cells[idx]) > 28 {
+    if pack::relief(cells[idx]) > 32 {
         return;
     }
-    if pack::elevation(cells[idx]) < 50 {
+    if pack::elevation(cells[idx]) < 30 {
+        return;
+    }
+    if !cell_is_settlement_flat(ax, az, size, cells) {
         return;
     }
     if pack::population(cells[idx]) >= SETTLEMENT_MIN_POP {
@@ -438,7 +502,7 @@ fn try_add_dungeon(
     }
     for node in nodes.iter() {
         let need = if node.kind == NodeKind::Settlement {
-            spacing + 2
+            spacing + 1
         } else {
             spacing
         };

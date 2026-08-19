@@ -1,25 +1,22 @@
 //! Where the player was standing when they last closed the game.
 //!
-//! Only the stand is kept — which world, where in it, and which way they were
-//! facing. Everything else about the continent is a pure function of the seed,
-//! so there is nothing else that could disagree with itself after a reload.
-//!
-//! The height is deliberately not saved: re-entry resolves the ground under
-//! the spot the same way a fresh entry does, so a player cannot come back
-//! inside a hill that generated a hand's width differently.
+//! FORMAT 2 also keeps combat vitals and the last hatch-mouth shrine. The
+//! continent itself stays a pure function of the seed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use engine::space::GlobalXZ;
+use engine::place::GlobalPlace;
+use engine::space::{GlobalPosition, GlobalXZ};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::combat::{Attrs, Ranks};
 use crate::world::Heading;
 
 /// Shape of the file on disk. A file written by another shape is an error, not
 /// a guess at what its fields used to mean.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum SaveError {
@@ -52,7 +49,31 @@ pub enum SaveError {
     },
 }
 
-/// One remembered stand.
+/// Last hatch mouth. Death returns here; no extra shrine mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedShrine {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw_degrees: f32,
+}
+
+impl SavedShrine {
+    pub fn from_place(place: GlobalPlace) -> Self {
+        Self {
+            x: place.position.x,
+            y: place.position.y,
+            z: place.position.z,
+            yaw_degrees: place.yaw_degrees,
+        }
+    }
+
+    pub fn to_place(self) -> GlobalPlace {
+        GlobalPlace::at(GlobalPosition::at(self.x, self.y, self.z)).with_yaw_deg(self.yaw_degrees)
+    }
+}
+
+/// One remembered stand plus combat vitals. FORMAT 2.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedStand {
     pub format: u32,
@@ -61,6 +82,14 @@ pub struct SavedStand {
     pub x: f64,
     pub z: f64,
     pub yaw_degrees: f32,
+    pub level: i32,
+    pub xp: i32,
+    pub hp: f64,
+    pub mana: f64,
+    pub attrs: Attrs,
+    pub ranks: Ranks,
+    pub shaken_until: f64,
+    pub last_shrine: Option<SavedShrine>,
 }
 
 impl SavedStand {
@@ -72,6 +101,18 @@ impl SavedStand {
             x: at.x,
             z: at.z,
             yaw_degrees: facing.degrees(),
+            level: 1,
+            xp: 0,
+            hp: 100.0,
+            mana: 50.0,
+            attrs: Attrs::default(),
+            ranks: Ranks {
+                martial: 1,
+                hunt: 0,
+                arcane: 0,
+            },
+            shaken_until: 0.0,
+            last_shrine: None,
         }
     }
 
@@ -82,30 +123,34 @@ impl SavedStand {
     /// The stand kept for this world, if there is one.
     pub fn read(seed: i32, size: usize) -> Result<Option<Self>, SaveError> {
         let path = path_for(seed, size)?;
-        let text = match fs::read_to_string(&path) {
+        Self::read_at(&path, seed, size)
+    }
+
+    pub fn read_at(path: &Path, seed: i32, size: usize) -> Result<Option<Self>, SaveError> {
+        let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => {
                 return Err(SaveError::Io {
-                    path,
+                    path: path.to_path_buf(),
                     doing: "read",
                     source,
                 })
             }
         };
         let stand: Self = serde_json::from_str(&text).map_err(|source| SaveError::Unreadable {
-            path: path.clone(),
+            path: path.to_path_buf(),
             source,
         })?;
         if stand.format != FORMAT {
             return Err(SaveError::Format {
-                path,
+                path: path.to_path_buf(),
                 found: stand.format,
             });
         }
         if stand.seed != seed || stand.size != size {
             return Err(SaveError::OtherWorld {
-                path,
+                path: path.to_path_buf(),
                 seed: stand.seed,
                 size: stand.size,
             });
@@ -115,6 +160,11 @@ impl SavedStand {
 
     pub fn write(&self) -> Result<PathBuf, SaveError> {
         let path = path_for(self.seed, self.size)?;
+        self.write_at(&path)?;
+        Ok(path)
+    }
+
+    pub fn write_at(&self, path: &Path) -> Result<(), SaveError> {
         let dir = path.parent().expect("save path has a directory");
         fs::create_dir_all(dir).map_err(|source| SaveError::Io {
             path: dir.to_path_buf(),
@@ -122,12 +172,12 @@ impl SavedStand {
             source,
         })?;
         let text = serde_json::to_string_pretty(self).expect("a stand always serialises");
-        fs::write(&path, text).map_err(|source| SaveError::Io {
-            path: path.clone(),
+        fs::write(path, text).map_err(|source| SaveError::Io {
+            path: path.to_path_buf(),
             doing: "written",
             source,
         })?;
-        Ok(path)
+        Ok(())
     }
 }
 
@@ -142,6 +192,9 @@ pub fn data_dir() -> Result<PathBuf, SaveError> {
 }
 
 fn save_dir() -> Result<PathBuf, SaveError> {
+    if let Some(override_dir) = std::env::var_os("ORRUN_SAVE_DIR") {
+        return Ok(PathBuf::from(override_dir));
+    }
     if let Some(appdata) = std::env::var_os("APPDATA") {
         return Ok(Path::new(&appdata).join("Orrun"));
     }
@@ -157,6 +210,32 @@ fn save_dir() -> Result<PathBuf, SaveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::space::GlobalXZ;
+
+    fn isolated_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "orrun-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("isolated save dir");
+        dir
+    }
+
+    fn isolate_appdata() -> PathBuf {
+        let dir = isolated_dir();
+        std::env::set_var("APPDATA", &dir);
+        std::env::remove_var("ORRUN_SAVE_DIR");
+        dir
+    }
+
+    #[test]
+    fn format_is_versioned() {
+        assert_eq!(FORMAT, 2);
+    }
 
     #[test]
     fn a_stand_survives_the_round_trip() {
@@ -172,14 +251,68 @@ mod tests {
     }
 
     #[test]
+    fn combat_vitals_and_shrine_round_trip_without_appdata() {
+        let dir = isolated_dir();
+        let path = dir.join("stand-1-64.json");
+        let mut stand = SavedStand::new(
+            1,
+            64,
+            GlobalXZ::at(10.0, 20.0),
+            Heading::from_degrees(90.0).expect("heading"),
+        );
+        stand.level = 3;
+        stand.xp = 40;
+        stand.hp = 88.0;
+        stand.mana = 41.0;
+        stand.attrs.might = 14;
+        stand.ranks.martial = 3;
+        stand.shaken_until = 12.5;
+        stand.last_shrine = Some(SavedShrine {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            yaw_degrees: 45.0,
+        });
+        stand.write_at(&path).expect("write isolated");
+        let back = SavedStand::read_at(&path, 1, 64)
+            .expect("read isolated")
+            .expect("present");
+        assert_eq!(back.level, 3);
+        assert_eq!(back.xp, 40);
+        assert_eq!(back.hp, 88.0);
+        assert_eq!(back.mana, 41.0);
+        assert_eq!(back.attrs.might, 14);
+        assert_eq!(back.ranks.martial, 3);
+        assert_eq!(back.shaken_until, 12.5);
+        assert_eq!(back.last_shrine.unwrap().x, 1.0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_goes_to_isolated_appdata_not_real() {
+        let dir = isolate_appdata();
+        let stand = SavedStand::new(
+            9,
+            32,
+            GlobalXZ::at(1.0, 2.0),
+            Heading::from_degrees(0.0).expect("heading"),
+        );
+        let path = stand.write().expect("write via APPDATA");
+        assert!(path.starts_with(&dir), "{}", path.display());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn each_world_keeps_its_own_stand() {
-        // Playing another seed must not overwrite where you were in this one.
-        let Ok(a) = path_for(1, 256) else {
-            return;
-        };
+        let dir = isolate_appdata();
+        std::env::set_var("ORRUN_SAVE_DIR", &dir);
+        let a = path_for(1, 256).expect("first path");
         let b = path_for(2, 256).expect("second path");
         let c = path_for(1, 512).expect("third path");
+        std::env::remove_var("ORRUN_SAVE_DIR");
         assert_ne!(a, b);
         assert_ne!(a, c);
+        assert!(a.starts_with(&dir));
+        let _ = fs::remove_dir_all(dir);
     }
 }

@@ -85,7 +85,7 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
 
     let half = size as f32 * 0.5;
     let collar = collar_cells(size);
-    let soft_margin = collar as f32 + size as f32 * 0.02;
+    let soft_margin = collar as f32 + size as f32 * 0.04;
     let size_i = size as i32;
 
     let mut land = vec![0u8; count];
@@ -104,7 +104,6 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
                 .min(size_i - 1 - ax as i32)
                 .min(az as i32)
                 .min(size_i - 1 - az as i32);
-            let hard_sea = edge_d < collar;
             let dxn = (ax as f32 - half) / half;
             let dzn = (az as f32 - half) / half;
             let radial = (dxn * dxn + dzn * dzn).sqrt();
@@ -129,9 +128,10 @@ pub fn build_landmask(world_seed: i32, size: usize) -> LandmaskPlanes {
             mass = smoothstep(-0.08, 0.82, mass);
             let mut landness = cont * 0.66 + pen * 0.22 + mass * 0.56;
             landness -= cut * lerp(0.06, 0.30, radial.clamp(0.0, 1.0));
-            let rim = smoothstep(soft_margin, soft_margin + size as f32 * 0.06, edge_d as f32);
-            landness *= lerp(0.34, 1.0, rim);
-            let is_land = (!hard_sea) && landness > 0.08;
+            let edge_fade =
+                smoothstep(0.0, soft_margin + size as f32 * 0.06, edge_d as f32).powf(1.35);
+            landness *= edge_fade;
+            let is_land = landness > 0.08;
             land[idx] = if is_land { 1 } else { 0 };
 
             if !is_land {

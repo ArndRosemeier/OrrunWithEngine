@@ -10,6 +10,7 @@ mod alpine;
 mod ambience;
 mod atlas_fields;
 mod chunk_mesh;
+mod combat_layer;
 mod coords;
 mod doors;
 mod dungeon;
@@ -35,12 +36,13 @@ mod tests;
 pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use chunk_mesh::TerrainChunkBuilder;
+pub use combat_layer::{first_fixture_auto_hit, CombatLayer};
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,
 };
-pub use dungeon::{DungeonError, DungeonLayer};
-pub use entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
+pub use dungeon::{DungeonError, DungeonLayer, LIVE_OPEN_M};
+pub use entry::{best_settlement_entry, resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaRole, FaunaSpec};
 pub use footprint::{BuildingIndex, BuildingPlot, CastlePlot, DungeonPlot, HousePlot};
 pub use look::{install_daylight, install_materials};

@@ -1,0 +1,1621 @@
+{
+  "all_pass": true,
+  "formulas": {
+    "aggro_hear_m": 6.0,
+    "aggro_sight_m": 12.0,
+    "aimed_shot": "2.0s draw, *1.8, 10s CD",
+    "always_hit": true,
+    "arcane_10_spell": "1.15 if Arcane>=10 else 1.00",
+    "arrows_at_create": 40,
+    "attr_points_per_level": 2,
+    "attr_start": 10,
+    "auto_continues_while_casting": true,
+    "bash": "0.4s anim, interrupt + 1.5s stun, 8.0s CD, 0 dmg",
+    "bind": "root 4.0s; damage after 1.0s breaks; 0 damage",
+    "bind_cast_s": 1.5,
+    "bind_cd_s": 12.0,
+    "bind_mana": 16,
+    "bind_range_m": 24.0,
+    "bow_draw_s": 1.2,
+    "bow_falloff_end_m": 35.0,
+    "bow_full_m": 20.0,
+    "bow_hit": "floor((7 + Swift*0.4) * skill_rider * aimed_mult * hunt_5_bonus * range_mult)",
+    "cleave": "second target within 2.2m at 40% (Martial>=7)",
+    "death": "last shrine + 5 min Shaken (-10% dmg); no corpse; no XP debt",
+    "discipline_points_per_level": 1,
+    "dungeon_wolf_counts": {
+      "0": 2,
+      "1": 4,
+      "2": 6
+    },
+    "ember": "floor((14 + Will*0.5) * ember_rank * arcane_10_spell * skill_rider)",
+    "ember_cast_s": 1.2,
+    "ember_cd_s": 0.0,
+    "ember_mana": 3,
+    "ember_range_m": 28.0,
+    "ember_rank": "1.30 if Arcane>=10 else 1.15 if Arcane>=1 else 1.00",
+    "first_hit_establishes_threat": true,
+    "gcd": "spell cast time is the wait; Ward instant + 1.0s GCD",
+    "hard_cap_s": 180.0,
+    "hp_l1": 100,
+    "hp_per_level": 12,
+    "interrupt": "any HP damage on caster interrupts current cast; Bash interrupts",
+    "leash_m": 40.0,
+    "mana_l1": 50,
+    "mana_per_level": 6,
+    "mana_regen_combat_per_s": 0.4,
+    "mana_regen_note": "sim is in-combat only; OOC regen 2.0/s specified for the bible but unused in these fights",
+    "mana_regen_ooc_per_s": 2.0,
+    "mana_regen_per_s": 0.4,
+    "mark": "+15% damage 12s (Hunt>=10)",
+    "melee_cone_deg": 120.0,
+    "melee_hit": "floor((8 + Might*0.4) * skill_rider * strike_mult * martial_5_bonus)",
+    "melee_reach_m": 2.8,
+    "melee_swing_s": 1.8,
+    "mend": "floor((25 + Will*0.4) * arcane_10_spell)",
+    "mend_cast_s": 2.5,
+    "mend_cd_s": 0.0,
+    "mend_mana": 20,
+    "mitigation": "floor(incoming * 100 / (100 + Grit_or_Armor))",
+    "no_crit_v1": true,
+    "no_taunt_v1": true,
+    "pin": "bow hit + 40% slow 4.0s, 12s CD",
+    "potion": "Lesser Mend +40 HP, 60s CD, not a spell, no mana",
+    "potion_at_create": 1,
+    "potion_heal": 40,
+    "second_wind": "once/combat, 20% max HP (Martial>=10)",
+    "seed_unused_v1": true,
+    "skill_rider": "1 + skill * 0.004",
+    "skill_xp": "+1 per connecting damaging hit; cost = 8 * current_skill; cap = level * 5",
+    "social_m": 15.0,
+    "specialist_spend": {
+      "Arcane": "all attr → Will; all discipline → Arcane",
+      "Hunt": "all attr → Swift; all discipline → Hunt",
+      "Martial": "all attr → Might; all discipline → Martial"
+    },
+    "sprint_mps": 7.0,
+    "strike": "next swing * 1.5, 6.0s CD, 0 mana",
+    "threat_damage": "damage * 1.0",
+    "threat_heal": "heal * 0.5 applied to current lock",
+    "tick_s": 0.1,
+    "trash_speed_mps": 5.2,
+    "walk_mps": 4.5,
+    "ward_absorb": "floor((20 + Will*0.3) * arcane_10_spell)",
+    "ward_cd_s": 16.0,
+    "ward_dur_s": 8.0,
+    "ward_gcd_s": 1.0,
+    "ward_mana": 18,
+    "wolf_dmg": "10 + 2*(lvl-1)",
+    "wolf_hp": "70 + 18*(lvl-1)",
+    "wolf_xp": "35 + 12*(lvl-1)"
+  },
+  "leveling_path": {
+    "clears": {
+      "d1": 7,
+      "d2": 9,
+      "t2": 3
+    },
+    "d1_first_xp": 190,
+    "d1_repeat_xp": 110,
+    "d2_first_xp": 494,
+    "d2_repeat_xp": 354,
+    "events": [
+      {
+        "label": "D1 first-clear (2 L1 wolves + heart + first)",
+        "level_after": 1,
+        "leveled_to": [],
+        "minutes": 4,
+        "total_minutes": 4.0,
+        "xp": 190,
+        "xp_into_level": 190
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 2,
+        "leveled_to": [
+          2
+        ],
+        "minutes": 4,
+        "total_minutes": 8.0,
+        "xp": 110,
+        "xp_into_level": 100
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 2,
+        "leveled_to": [],
+        "minutes": 4,
+        "total_minutes": 12.0,
+        "xp": 110,
+        "xp_into_level": 210
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 3,
+        "leveled_to": [
+          3
+        ],
+        "minutes": 4,
+        "total_minutes": 16.0,
+        "xp": 110,
+        "xp_into_level": 70
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 3,
+        "leveled_to": [],
+        "minutes": 4,
+        "total_minutes": 20.0,
+        "xp": 110,
+        "xp_into_level": 180
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 3,
+        "leveled_to": [],
+        "minutes": 4,
+        "total_minutes": 24.0,
+        "xp": 110,
+        "xp_into_level": 290
+      },
+      {
+        "label": "D1 repeat (2 L1 wolves + heart)",
+        "level_after": 4,
+        "leveled_to": [
+          4
+        ],
+        "minutes": 4,
+        "total_minutes": 28.0,
+        "xp": 110,
+        "xp_into_level": 100
+      },
+      {
+        "label": "D2 first-clear Pale Hall (4 L4 wolves + heart + first)",
+        "level_after": 5,
+        "leveled_to": [
+          5
+        ],
+        "minutes": 7,
+        "total_minutes": 35.0,
+        "xp": 494,
+        "xp_into_level": 44
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 5,
+        "leveled_to": [],
+        "minutes": 7,
+        "total_minutes": 42.0,
+        "xp": 354,
+        "xp_into_level": 398
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 6,
+        "leveled_to": [
+          6
+        ],
+        "minutes": 7,
+        "total_minutes": 49.0,
+        "xp": 354,
+        "xp_into_level": 52
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 6,
+        "leveled_to": [],
+        "minutes": 7,
+        "total_minutes": 56.0,
+        "xp": 354,
+        "xp_into_level": 406
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 6,
+        "leveled_to": [],
+        "minutes": 7,
+        "total_minutes": 63.0,
+        "xp": 354,
+        "xp_into_level": 760
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 7,
+        "leveled_to": [
+          7
+        ],
+        "minutes": 7,
+        "total_minutes": 70.0,
+        "xp": 354,
+        "xp_into_level": 264
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 7,
+        "leveled_to": [],
+        "minutes": 7,
+        "total_minutes": 77.0,
+        "xp": 354,
+        "xp_into_level": 618
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 7,
+        "leveled_to": [],
+        "minutes": 7,
+        "total_minutes": 84.0,
+        "xp": 354,
+        "xp_into_level": 972
+      },
+      {
+        "label": "D2 repeat (4 L4 wolves + heart)",
+        "level_after": 8,
+        "leveled_to": [
+          8
+        ],
+        "minutes": 7,
+        "total_minutes": 91.0,
+        "xp": 354,
+        "xp_into_level": 326
+      },
+      {
+        "label": "T2 first-clear (6 L6 wolves + Line-Mother + heart + first)",
+        "level_after": 9,
+        "leveled_to": [
+          9
+        ],
+        "minutes": 12,
+        "total_minutes": 103.0,
+        "xp": 1170,
+        "xp_into_level": 296
+      },
+      {
+        "label": "T2 repeat (6 L6 wolves + Line-Mother + heart)",
+        "level_after": 9,
+        "leveled_to": [],
+        "minutes": 12,
+        "total_minutes": 115.0,
+        "xp": 970,
+        "xp_into_level": 1266
+      },
+      {
+        "label": "T2 repeat (6 L6 wolves + Line-Mother + heart)",
+        "level_after": 10,
+        "leveled_to": [
+          10
+        ],
+        "minutes": 12,
+        "total_minutes": 127.0,
+        "xp": 970,
+        "xp_into_level": 0
+      }
+    ],
+    "final_level": 10,
+    "in_90_150": true,
+    "t2_first_xp": 1170,
+    "t2_repeat_xp": 970,
+    "total_minutes": 127.0
+  },
+  "mob_sheets": {
+    "crawler_scorpion": {
+      "armor": 8,
+      "damage": 14,
+      "hear_m": 6.0,
+      "hp": 106,
+      "id": "crawler_scorpion",
+      "leash_m": 40.0,
+      "level": 3,
+      "name": "scorpion",
+      "reach_m": 1.8,
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [
+        "poison_3hps_4s_refresh_not_stack"
+      ],
+      "speed_mps": 5.2,
+      "swing_s": 2.0,
+      "token_brood": 1,
+      "xp": 59
+    },
+    "crawler_spider_wolf_l1": {
+      "armor": 8,
+      "damage": 10,
+      "hear_m": 6.0,
+      "hp": 70,
+      "id": "crawler_spider_wolf",
+      "leash_m": 40.0,
+      "level": 1,
+      "name": "wolf-spider",
+      "reach_m": 1.8,
+      "scale_dmg": "10 + 2*(lvl-1)",
+      "scale_hp": "70 + 18*(lvl-1)",
+      "scale_xp": "35 + 12*(lvl-1)",
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [],
+      "speed_mps": 5.2,
+      "swing_s": 2.0,
+      "token_brood": 1,
+      "xp": 35
+    },
+    "crawler_spider_wolf_l4": {
+      "armor": 8,
+      "damage": 16,
+      "hear_m": 6.0,
+      "hp": 124,
+      "id": "crawler_spider_wolf",
+      "leash_m": 40.0,
+      "level": 4,
+      "name": "wolf-spider",
+      "reach_m": 1.8,
+      "scale_dmg": "10 + 2*(lvl-1)",
+      "scale_hp": "70 + 18*(lvl-1)",
+      "scale_xp": "35 + 12*(lvl-1)",
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [],
+      "speed_mps": 5.2,
+      "swing_s": 2.0,
+      "token_brood": 1,
+      "xp": 71
+    },
+    "crawler_spider_wolf_l6": {
+      "armor": 8,
+      "damage": 20,
+      "hear_m": 6.0,
+      "hp": 160,
+      "id": "crawler_spider_wolf",
+      "leash_m": 40.0,
+      "level": 6,
+      "name": "wolf-spider",
+      "reach_m": 1.8,
+      "scale_dmg": "10 + 2*(lvl-1)",
+      "scale_hp": "70 + 18*(lvl-1)",
+      "scale_xp": "35 + 12*(lvl-1)",
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [],
+      "speed_mps": 5.2,
+      "swing_s": 2.0,
+      "token_brood": 1,
+      "xp": 95
+    },
+    "green_blob": {
+      "armor": 6,
+      "damage": 11,
+      "hear_m": 6.0,
+      "hp": 82,
+      "id": "green_blob",
+      "leash_m": 40.0,
+      "level": 2,
+      "name": "GreenBlob",
+      "reach_m": 1.6,
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [
+        "slow",
+        "no_poison"
+      ],
+      "speed_mps": 5.2,
+      "swing_s": 2.4,
+      "token_brood": 0,
+      "xp": 47
+    },
+    "line_mother": {
+      "armor": 14,
+      "damage": 12,
+      "hear_m": 6.0,
+      "hp": 420,
+      "id": "line_mother",
+      "leash_m": 40.0,
+      "level": 9,
+      "name": "Line-Mother",
+      "reach_m": 2.2,
+      "sight_m": 12.0,
+      "slam_damage": 24,
+      "slam_every_s": 8.0,
+      "social_m": 15.0,
+      "specials": [
+        "slam_every_8s_1.2s_telegraph_interruptible",
+        "enrage_30pct_dmg*1.3_swing*0.77"
+      ],
+      "speed_mps": 3.2,
+      "swing_s": 2.2,
+      "telegraph_s": 1.2,
+      "token_brood": 1,
+      "xp": 280
+    },
+    "orc": {
+      "armor": 10,
+      "damage": 15,
+      "hear_m": 6.0,
+      "hp": 130,
+      "id": "orc",
+      "leash_m": 40.0,
+      "level": 4,
+      "name": "orc",
+      "reach_m": 2.0,
+      "sight_m": 12.0,
+      "social_m": 15.0,
+      "specials": [],
+      "speed_mps": 3.5,
+      "swing_s": 2.0,
+      "token_brood": 0,
+      "xp": 80
+    },
+    "yeti": {
+      "armor": 12,
+      "damage": 14,
+      "hear_m": 6.0,
+      "hp": 240,
+      "id": "yeti",
+      "leash_m": 40.0,
+      "level": 6,
+      "name": "yeti",
+      "reach_m": 2.2,
+      "sight_m": 12.0,
+      "slam_damage": 26,
+      "slam_every_s": 8.0,
+      "social_m": 15.0,
+      "specials": [
+        "slam_every_8s_1.0s_telegraph_interruptible"
+      ],
+      "speed_mps": 3.0,
+      "swing_s": 2.3,
+      "telegraph_s": 1.0,
+      "token_brood": 0,
+      "xp": 160
+    }
+  },
+  "player_specialists": {
+    "L10_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 28
+      },
+      "discipline": "Arcane",
+      "hp": 208,
+      "level": 10,
+      "mana": 104,
+      "ranks": {
+        "Arcane": 10,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 50,
+      "skill_xp": 0,
+      "weapon_skill": 50
+    },
+    "L10_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 28,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 208,
+      "level": 10,
+      "mana": 104,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 10,
+        "Martial": 0
+      },
+      "skill_cap": 50,
+      "skill_xp": 0,
+      "weapon_skill": 50
+    },
+    "L10_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 28,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 208,
+      "level": 10,
+      "mana": 104,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 10
+      },
+      "skill_cap": 50,
+      "skill_xp": 0,
+      "weapon_skill": 50
+    },
+    "L1_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Arcane",
+      "hp": 100,
+      "level": 1,
+      "mana": 50,
+      "ranks": {
+        "Arcane": 1,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 5,
+      "skill_xp": 0,
+      "weapon_skill": 5
+    },
+    "L1_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 100,
+      "level": 1,
+      "mana": 50,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 1,
+        "Martial": 0
+      },
+      "skill_cap": 5,
+      "skill_xp": 0,
+      "weapon_skill": 5
+    },
+    "L1_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 100,
+      "level": 1,
+      "mana": 50,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 1
+      },
+      "skill_cap": 5,
+      "skill_xp": 0,
+      "weapon_skill": 5
+    },
+    "L2_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 12
+      },
+      "discipline": "Arcane",
+      "hp": 112,
+      "level": 2,
+      "mana": 56,
+      "ranks": {
+        "Arcane": 2,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 10,
+      "skill_xp": 0,
+      "weapon_skill": 10
+    },
+    "L2_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 12,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 112,
+      "level": 2,
+      "mana": 56,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 2,
+        "Martial": 0
+      },
+      "skill_cap": 10,
+      "skill_xp": 0,
+      "weapon_skill": 10
+    },
+    "L2_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 12,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 112,
+      "level": 2,
+      "mana": 56,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 2
+      },
+      "skill_cap": 10,
+      "skill_xp": 0,
+      "weapon_skill": 10
+    },
+    "L3_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 14
+      },
+      "discipline": "Arcane",
+      "hp": 124,
+      "level": 3,
+      "mana": 62,
+      "ranks": {
+        "Arcane": 3,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 15,
+      "skill_xp": 0,
+      "weapon_skill": 15
+    },
+    "L3_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 14,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 124,
+      "level": 3,
+      "mana": 62,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 3,
+        "Martial": 0
+      },
+      "skill_cap": 15,
+      "skill_xp": 0,
+      "weapon_skill": 15
+    },
+    "L3_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 14,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 124,
+      "level": 3,
+      "mana": 62,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 3
+      },
+      "skill_cap": 15,
+      "skill_xp": 0,
+      "weapon_skill": 15
+    },
+    "L5_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 18
+      },
+      "discipline": "Arcane",
+      "hp": 148,
+      "level": 5,
+      "mana": 74,
+      "ranks": {
+        "Arcane": 5,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 25,
+      "skill_xp": 0,
+      "weapon_skill": 25
+    },
+    "L5_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 18,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 148,
+      "level": 5,
+      "mana": 74,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 5,
+        "Martial": 0
+      },
+      "skill_cap": 25,
+      "skill_xp": 0,
+      "weapon_skill": 25
+    },
+    "L5_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 18,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 148,
+      "level": 5,
+      "mana": 74,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 5
+      },
+      "skill_cap": 25,
+      "skill_xp": 0,
+      "weapon_skill": 25
+    },
+    "L9_Arcane": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 10,
+        "Will": 26
+      },
+      "discipline": "Arcane",
+      "hp": 196,
+      "level": 9,
+      "mana": 98,
+      "ranks": {
+        "Arcane": 9,
+        "Hunt": 0,
+        "Martial": 0
+      },
+      "skill_cap": 45,
+      "skill_xp": 0,
+      "weapon_skill": 45
+    },
+    "L9_Hunt": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 10,
+        "Swift": 26,
+        "Will": 10
+      },
+      "discipline": "Hunt",
+      "hp": 196,
+      "level": 9,
+      "mana": 98,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 9,
+        "Martial": 0
+      },
+      "skill_cap": 45,
+      "skill_xp": 0,
+      "weapon_skill": 45
+    },
+    "L9_Martial": {
+      "attrs": {
+        "Grit": 10,
+        "Might": 26,
+        "Swift": 10,
+        "Will": 10
+      },
+      "discipline": "Martial",
+      "hp": 196,
+      "level": 9,
+      "mana": 98,
+      "ranks": {
+        "Arcane": 0,
+        "Hunt": 0,
+        "Martial": 9
+      },
+      "skill_cap": 45,
+      "skill_xp": 0,
+      "weapon_skill": 45
+    }
+  },
+  "scenarios": [
+    {
+      "band": "even_1v1",
+      "band_pass": true,
+      "band_reason": "even 1v1",
+      "count": 1,
+      "damage_taken": 45,
+      "discipline": "Martial",
+      "hp_max": 100,
+      "hp_pct": 55.0,
+      "hp_remaining": 55,
+      "lock": 0,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 50.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 9,
+      "min_mana": 50.0,
+      "mob_id": "crawler_spider_wolf",
+      "mob_level": 1,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 10,
+        "hear_m": 6.0,
+        "hp": 70,
+        "id": "crawler_spider_wolf",
+        "leash_m": 40.0,
+        "level": 1,
+        "name": "wolf-spider",
+        "reach_m": 1.8,
+        "scale_dmg": "10 + 2*(lvl-1)",
+        "scale_hp": "70 + 18*(lvl-1)",
+        "scale_xp": "35 + 12*(lvl-1)",
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 35
+      },
+      "notes": "L1 Martial vs 1 wolf-spider",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 10,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 20,
+        "bow_hit": 11,
+        "ember": 19,
+        "hp": 100,
+        "mana": 50,
+        "melee_hit": 12,
+        "melee_strike": 18,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 1
+        },
+        "ward": 23,
+        "weapon_skill": 5
+      },
+      "player_level": 1,
+      "player_sprinted": false,
+      "potions_used": 0,
+      "scenario_id": "1_l1_martial_1wolf",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Strike": 2
+      },
+      "swings": 6,
+      "time_to_die_s": null,
+      "time_to_kill_s": 10.8,
+      "title": "L1 Martial vs 1 wolf-spider",
+      "used_pin_or_bind": false,
+      "winner": "player"
+    },
+    {
+      "band": "2pull_nopot",
+      "band_pass": true,
+      "band_reason": "lose (expected risky)",
+      "count": 2,
+      "damage_taken": 108,
+      "discipline": "Martial",
+      "hp_max": 100,
+      "hp_pct": 0.0,
+      "hp_remaining": 0,
+      "lock": 1,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 50.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 9,
+      "min_mana": 50.0,
+      "mob_id": "crawler_spider_wolf",
+      "mob_level": 1,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 10,
+        "hear_m": 6.0,
+        "hp": 70,
+        "id": "crawler_spider_wolf",
+        "leash_m": 40.0,
+        "level": 1,
+        "name": "wolf-spider",
+        "reach_m": 1.8,
+        "scale_dmg": "10 + 2*(lvl-1)",
+        "scale_hp": "70 + 18*(lvl-1)",
+        "scale_xp": "35 + 12*(lvl-1)",
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 35
+      },
+      "notes": "L1 Martial vs 2 wolf-spiders, no potion",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 10,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 20,
+        "bow_hit": 11,
+        "ember": 19,
+        "hp": 100,
+        "mana": 50,
+        "melee_hit": 12,
+        "melee_strike": 18,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 1
+        },
+        "ward": 23,
+        "weapon_skill": 5
+      },
+      "player_level": 1,
+      "player_sprinted": false,
+      "potions_used": 0,
+      "scenario_id": "2_l1_martial_2wolf_nopot",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Strike": 3
+      },
+      "swings": 7,
+      "time_to_die_s": 14.1,
+      "time_to_kill_s": null,
+      "title": "L1 Martial vs 2 wolf-spiders, no potion",
+      "used_pin_or_bind": false,
+      "winner": "mobs"
+    },
+    {
+      "band": "2pull_pot",
+      "band_pass": true,
+      "band_reason": "win with potion",
+      "count": 2,
+      "damage_taken": 135,
+      "discipline": "Martial",
+      "hp_max": 100,
+      "hp_pct": 5.0,
+      "hp_remaining": 5,
+      "lock": 1,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 50.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 9,
+      "min_mana": 50.0,
+      "mob_id": "crawler_spider_wolf",
+      "mob_level": 1,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 10,
+        "hear_m": 6.0,
+        "hp": 70,
+        "id": "crawler_spider_wolf",
+        "leash_m": 40.0,
+        "level": 1,
+        "name": "wolf-spider",
+        "reach_m": 1.8,
+        "scale_dmg": "10 + 2*(lvl-1)",
+        "scale_hp": "70 + 18*(lvl-1)",
+        "scale_xp": "35 + 12*(lvl-1)",
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 35
+      },
+      "notes": "L1 Martial vs 2 wolf-spiders, 1 potion",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 10,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 20,
+        "bow_hit": 11,
+        "ember": 19,
+        "hp": 100,
+        "mana": 50,
+        "melee_hit": 12,
+        "melee_strike": 18,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 1
+        },
+        "ward": 23,
+        "weapon_skill": 5
+      },
+      "player_level": 1,
+      "player_sprinted": false,
+      "potions_used": 1,
+      "scenario_id": "3_l1_martial_2wolf_pot",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Strike": 4,
+        "potion": 1
+      },
+      "swings": 12,
+      "time_to_die_s": null,
+      "time_to_kill_s": 21.6,
+      "title": "L1 Martial vs 2 wolf-spiders, 1 potion",
+      "used_pin_or_bind": false,
+      "winner": "player"
+    },
+    {
+      "band": "even_1v1",
+      "band_pass": true,
+      "band_reason": "even 1v1",
+      "count": 1,
+      "damage_taken": 0,
+      "discipline": "Hunt",
+      "hp_max": 124,
+      "hp_pct": 100.0,
+      "hp_remaining": 124,
+      "lock": 0,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 62.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 0,
+      "min_mana": 62.0,
+      "mob_id": "crawler_scorpion",
+      "mob_level": 3,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 14,
+        "hear_m": 6.0,
+        "hp": 106,
+        "id": "crawler_scorpion",
+        "leash_m": 40.0,
+        "level": 3,
+        "name": "scorpion",
+        "reach_m": 1.8,
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [
+          "poison_3hps_4s_refresh_not_stack"
+        ],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 59
+      },
+      "notes": "L3 Hunt vs 1 scorpion",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 10,
+          "Swift": 14,
+          "Will": 10
+        },
+        "bow_aimed": 24,
+        "bow_hit": 13,
+        "ember": 20,
+        "hp": 124,
+        "mana": 62,
+        "melee_hit": 12,
+        "melee_strike": 19,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 3,
+          "Martial": 0
+        },
+        "ward": 23,
+        "weapon_skill": 15
+      },
+      "player_level": 3,
+      "player_sprinted": true,
+      "potions_used": 0,
+      "scenario_id": "4_l3_hunt_scorpion",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "AimedShot": 1,
+        "Fire": 6,
+        "Pin": 1
+      },
+      "swings": 8,
+      "time_to_die_s": null,
+      "time_to_kill_s": 11.1,
+      "title": "L3 Hunt vs 1 scorpion",
+      "used_pin_or_bind": true,
+      "winner": "player"
+    },
+    {
+      "band": "pale_hall",
+      "band_pass": true,
+      "band_reason": "Pale Hall room",
+      "count": 4,
+      "damage_taken": 0,
+      "discipline": "Arcane",
+      "hp_max": 148,
+      "hp_pct": 100.0,
+      "hp_remaining": 148,
+      "lock": 1,
+      "mana_decision": true,
+      "mana_hit_zero": false,
+      "mana_remaining": 0.52,
+      "mana_spent": 92,
+      "max_hit_on_player": 0,
+      "min_mana": 0.08,
+      "mob_id": "crawler_spider_wolf",
+      "mob_level": 4,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 16,
+        "hear_m": 6.0,
+        "hp": 124,
+        "id": "crawler_spider_wolf",
+        "leash_m": 40.0,
+        "level": 4,
+        "name": "wolf-spider",
+        "reach_m": 1.8,
+        "scale_dmg": "10 + 2*(lvl-1)",
+        "scale_hp": "70 + 18*(lvl-1)",
+        "scale_xp": "35 + 12*(lvl-1)",
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 71
+      },
+      "notes": "L5 Arcane vs Pale Hall (4 L4 wolves)",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 10,
+          "Swift": 10,
+          "Will": 18
+        },
+        "bow_aimed": 21,
+        "bow_hit": 12,
+        "ember": 29,
+        "hp": 148,
+        "mana": 74,
+        "melee_hit": 13,
+        "melee_strike": 19,
+        "mend": 32,
+        "ranks": {
+          "Arcane": 5,
+          "Hunt": 0,
+          "Martial": 0
+        },
+        "ward": 25,
+        "weapon_skill": 25
+      },
+      "player_level": 5,
+      "player_sprinted": true,
+      "potions_used": 0,
+      "scenario_id": "5_l5_arcane_pale_hall",
+      "seed": 1,
+      "skipped_spell_for_mana": true,
+      "spells_used": {
+        "Bind": 2,
+        "Ember": 20
+      },
+      "swings": 0,
+      "time_to_die_s": null,
+      "time_to_kill_s": 46.4,
+      "title": "L5 Arcane vs Pale Hall (4 L4 wolves)",
+      "used_pin_or_bind": true,
+      "winner": "player"
+    },
+    {
+      "band": "heart",
+      "band_pass": true,
+      "band_reason": "heart",
+      "count": 1,
+      "damage_taken": 142,
+      "discipline": "Martial",
+      "hp_max": 196,
+      "hp_pct": 48.0,
+      "hp_remaining": 94,
+      "lock": 0,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 98.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 13,
+      "min_mana": 98.0,
+      "mob_id": "line_mother",
+      "mob_level": 9,
+      "mob_sheet": {
+        "armor": 14,
+        "damage": 12,
+        "hear_m": 6.0,
+        "hp": 420,
+        "id": "line_mother",
+        "leash_m": 40.0,
+        "level": 9,
+        "name": "Line-Mother",
+        "reach_m": 2.2,
+        "sight_m": 12.0,
+        "slam_damage": 24,
+        "slam_every_s": 8.0,
+        "social_m": 15.0,
+        "specials": [
+          "slam_every_8s_1.2s_telegraph_interruptible",
+          "enrage_30pct_dmg*1.3_swing*0.77"
+        ],
+        "speed_mps": 3.2,
+        "swing_s": 2.2,
+        "telegraph_s": 1.2,
+        "token_brood": 1,
+        "xp": 280
+      },
+      "notes": "L9 Martial vs Line-Mother",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 26,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 23,
+        "bow_hit": 12,
+        "ember": 22,
+        "hp": 196,
+        "mana": 98,
+        "melee_hit": 23,
+        "melee_strike": 35,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 9
+        },
+        "ward": 23,
+        "weapon_skill": 45
+      },
+      "player_level": 9,
+      "player_sprinted": false,
+      "potions_used": 1,
+      "scenario_id": "6_l9_martial_line_mother",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Bash": 3,
+        "Strike": 6,
+        "potion": 1
+      },
+      "swings": 18,
+      "time_to_die_s": null,
+      "time_to_kill_s": 32.4,
+      "title": "L9 Martial vs Line-Mother",
+      "used_pin_or_bind": false,
+      "winner": "player"
+    },
+    {
+      "band": "even_1v1",
+      "band_pass": true,
+      "band_reason": "even 1v1",
+      "count": 1,
+      "damage_taken": 40,
+      "discipline": "Martial",
+      "hp_max": 112,
+      "hp_pct": 64.3,
+      "hp_remaining": 72,
+      "lock": 0,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 56.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 10,
+      "min_mana": 56.0,
+      "mob_id": "green_blob",
+      "mob_level": 2,
+      "mob_sheet": {
+        "armor": 6,
+        "damage": 11,
+        "hear_m": 6.0,
+        "hp": 82,
+        "id": "green_blob",
+        "leash_m": 40.0,
+        "level": 2,
+        "name": "GreenBlob",
+        "reach_m": 1.6,
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [
+          "slow",
+          "no_poison"
+        ],
+        "speed_mps": 5.2,
+        "swing_s": 2.4,
+        "token_brood": 0,
+        "xp": 47
+      },
+      "notes": "L2 Martial vs 1 GreenBlob",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 12,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 20,
+        "bow_hit": 11,
+        "ember": 19,
+        "hp": 112,
+        "mana": 56,
+        "melee_hit": 13,
+        "melee_strike": 19,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 2
+        },
+        "ward": 23,
+        "weapon_skill": 10
+      },
+      "player_level": 2,
+      "player_sprinted": false,
+      "potions_used": 0,
+      "scenario_id": "7_l2_martial_blob",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Strike": 2
+      },
+      "swings": 6,
+      "time_to_die_s": null,
+      "time_to_kill_s": 10.8,
+      "title": "L2 Martial vs 1 GreenBlob",
+      "used_pin_or_bind": false,
+      "winner": "player"
+    },
+    {
+      "band": "d1_clear",
+      "band_pass": true,
+      "band_reason": "must WIN",
+      "count": 2,
+      "damage_taken": 117,
+      "discipline": "Martial",
+      "hp_max": 112,
+      "hp_pct": 31.2,
+      "hp_remaining": 35,
+      "lock": 1,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_remaining": 56.0,
+      "mana_spent": 0,
+      "max_hit_on_player": 9,
+      "min_mana": 56.0,
+      "mob_id": "crawler_spider_wolf",
+      "mob_level": 1,
+      "mob_sheet": {
+        "armor": 8,
+        "damage": 10,
+        "hear_m": 6.0,
+        "hp": 70,
+        "id": "crawler_spider_wolf",
+        "leash_m": 40.0,
+        "level": 1,
+        "name": "wolf-spider",
+        "reach_m": 1.8,
+        "scale_dmg": "10 + 2*(lvl-1)",
+        "scale_hp": "70 + 18*(lvl-1)",
+        "scale_xp": "35 + 12*(lvl-1)",
+        "sight_m": 12.0,
+        "social_m": 15.0,
+        "specials": [],
+        "speed_mps": 5.2,
+        "swing_s": 2.0,
+        "token_brood": 1,
+        "xp": 35
+      },
+      "notes": "SANITY L2 Martial vs D1 (2 L1 wolves) + potion",
+      "oneshot": false,
+      "player": {
+        "attrs": {
+          "Grit": 10,
+          "Might": 12,
+          "Swift": 10,
+          "Will": 10
+        },
+        "bow_aimed": 20,
+        "bow_hit": 11,
+        "ember": 19,
+        "hp": 112,
+        "mana": 56,
+        "melee_hit": 13,
+        "melee_strike": 19,
+        "mend": 29,
+        "ranks": {
+          "Arcane": 0,
+          "Hunt": 0,
+          "Martial": 2
+        },
+        "ward": 23,
+        "weapon_skill": 10
+      },
+      "player_level": 2,
+      "player_sprinted": false,
+      "potions_used": 1,
+      "scenario_id": "s_l2_martial_d1_pot",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {
+        "Strike": 4,
+        "potion": 1
+      },
+      "swings": 11,
+      "time_to_die_s": null,
+      "time_to_kill_s": 19.8,
+      "title": "SANITY L2 Martial vs D1 (2 L1 wolves) + potion",
+      "used_pin_or_bind": false,
+      "winner": "player"
+    },
+    {
+      "band": "no_oneshot",
+      "band_pass": true,
+      "band_reason": "4×14=56 vs 148 HP",
+      "count": 4,
+      "damage_taken": 0,
+      "discipline": "Arcane",
+      "four_wolf_volley": 56,
+      "hp_max": 148,
+      "hp_pct": 100.0,
+      "hp_remaining": 148,
+      "mana_decision": false,
+      "mana_hit_zero": false,
+      "mana_spent": 0,
+      "max_hit_on_player": 56,
+      "min_mana": null,
+      "mob_id": "crawler_spider_wolf",
+      "notes": "first-swing volley vs L5 Arcane max HP (kiting aside)",
+      "one_wolf_hit": 14,
+      "oneshot": false,
+      "player_level": 5,
+      "player_max_hp": 148,
+      "player_sprinted": false,
+      "scenario_id": "s_l5_arcane_oneshot",
+      "seed": 1,
+      "skipped_spell_for_mana": false,
+      "spells_used": {},
+      "swings": 0,
+      "time_to_die_s": null,
+      "time_to_kill_s": null,
+      "title": "SANITY L5 Arcane not one-shot by 4 L4 wolves first swing",
+      "used_pin_or_bind": false,
+      "winner": "n/a"
+    }
+  ],
+  "seed": 1,
+  "xp_curve": {
+    "cumulative_to_10": 6550,
+    "dungeon_wolf_counts": {
+      "0": 2,
+      "1": 4,
+      "2": 6
+    },
+    "dungeon_wolf_level": {
+      "0": 1,
+      "1": 4,
+      "2": 6
+    },
+    "first_clear_bonus": {
+      "0": 80,
+      "1": 140,
+      "2": 200
+    },
+    "heart_bonus": {
+      "0": 40,
+      "1": 70,
+      "2": 120
+    },
+    "minutes_per_dungeon": {
+      "0": 4,
+      "1": 7,
+      "2": 12
+    },
+    "rows": [
+      {
+        "cumulative_to": 200,
+        "from": 1,
+        "to": 2,
+        "xp": 200
+      },
+      {
+        "cumulative_to": 450,
+        "from": 2,
+        "to": 3,
+        "xp": 250
+      },
+      {
+        "cumulative_to": 750,
+        "from": 3,
+        "to": 4,
+        "xp": 300
+      },
+      {
+        "cumulative_to": 1300,
+        "from": 4,
+        "to": 5,
+        "xp": 550
+      },
+      {
+        "cumulative_to": 2000,
+        "from": 5,
+        "to": 6,
+        "xp": 700
+      },
+      {
+        "cumulative_to": 2850,
+        "from": 6,
+        "to": 7,
+        "xp": 850
+      },
+      {
+        "cumulative_to": 3850,
+        "from": 7,
+        "to": 8,
+        "xp": 1000
+      },
+      {
+        "cumulative_to": 5050,
+        "from": 8,
+        "to": 9,
+        "xp": 1200
+      },
+      {
+        "cumulative_to": 6550,
+        "from": 9,
+        "to": 10,
+        "xp": 1500
+      }
+    ],
+    "xp_to_next": {
+      "1": 200,
+      "2": 250,
+      "3": 300,
+      "4": 550,
+      "5": 700,
+      "6": 850,
+      "7": 1000,
+      "8": 1200,
+      "9": 1500
+    }
+  }
+}

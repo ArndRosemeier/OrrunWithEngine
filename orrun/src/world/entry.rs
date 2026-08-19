@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::coords::{AtlasBounds, CoordError, Heading, MapPoint};
 use super::ponds::PondField;
-use super::surface::{ContinentalSurface, SurfaceColumn};
+use super::surface::{ContinentalSurface, SettlementPin, SurfaceColumn};
 
 /// Spacing of candidate spawn positions.
 pub const SEARCH_STEP_M: f64 = 8.0;
@@ -74,6 +74,41 @@ impl WorldEntryRequest {
     pub fn heading(self) -> Option<Heading> {
         self.heading
     }
+}
+
+/// Highest-tier settlement that has dry, walkable ground nearby, then population,
+/// then stable id. Skips pins that sit in open water or on cliffs the player
+/// cannot stand on.
+pub fn best_settlement_entry(
+    surface: &ContinentalSurface,
+    ponds: &PondField,
+) -> Result<(SettlementPin, WorldEntryRequest), EntryError> {
+    let bounds = surface.bounds();
+    let mut pins: Vec<SettlementPin> = surface.settlements().iter().copied().collect();
+    if pins.is_empty() {
+        return Err(EntryError::NoSpawn {
+            x: 0.0,
+            z: 0.0,
+            radius: SEARCH_RADIUS_M,
+        });
+    }
+    pins.sort_by(|a, b| (b.tier, b.population, b.id).cmp(&(a.tier, a.population, a.id)));
+    let mut last = None;
+    for pin in pins {
+        let point = match MapPoint::from_global(bounds, pin.at) {
+            Ok(point) => point,
+            Err(err) => {
+                last = Some(EntryError::Coord(err));
+                continue;
+            }
+        };
+        let request = WorldEntryRequest::at(point);
+        match resolve_spawn(surface, ponds, request) {
+            Ok(_) => return Ok((pin, request)),
+            Err(err) => last = Some(err),
+        }
+    }
+    Err(last.expect("settlement list was non-empty"))
 }
 
 /// Where and how the player enters the world.

@@ -116,7 +116,14 @@ fn deepest_timber(surface: &ContinentalSurface) -> GlobalXZ {
             if column.is_wet() {
                 continue;
             }
-            let cover = GroundCover::sample(surface, p, column.ground(), Fall::default(), 0.0);
+            let cover = GroundCover::sample(
+                surface.world_seed() as u32 as u64,
+                surface,
+                p,
+                column.ground(),
+                Fall::default(),
+                0.0,
+            );
             if cover.tree > best {
                 best = cover.tree;
                 at = p;

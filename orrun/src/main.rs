@@ -2,6 +2,9 @@
 //!
 //! Usage: `cargo run -p orrun -- [seed] [size]`
 //!
+//! `size` is the continent edge in km (32–1000). It defaults to `continent_size`
+//! in settings (256 if unset). A CLI size overrides settings for that launch only.
+//!
 //! Title: the painted vista while the continent is charted and the opening
 //! stand is streamed, then Start. Map (M in the world): drag to pan · scroll
 //! to zoom · F fit · left click travels there · right click reveals a cell
@@ -31,13 +34,13 @@ use orrun::atlas::features::{edge_owner, Dir};
 use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
-use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind};
+use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
 use orrun::save::SavedStand;
-use orrun::settings::{self, Settings};
+use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
-    install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell, ContinentProxySpec,
-    ContinentalSurface, Heading, Locomotion, MapPoint, SessionState, WorldEntryRequest,
-    WorldSession,
+    best_settlement_entry, install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell,
+    ContinentProxySpec, ContinentalSurface, Heading, Locomotion, MapPoint, PondField, SessionState,
+    WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -61,6 +64,8 @@ struct AtlasViewer {
     /// Exact point the player picked to walk to.
     selection: Option<MapPoint>,
     note: Option<String>,
+    show_hamlets: bool,
+    show_dungeons: bool,
 }
 
 impl AtlasViewer {
@@ -79,7 +84,18 @@ impl AtlasViewer {
             overlays: OverlayStore::default(),
             selection: None,
             note: None,
+            show_hamlets: false,
+            show_dungeons: false,
         }
+    }
+
+    fn point_panel(&self, panel_origin: Pos2, point: MapPoint) -> Pos2 {
+        let (fx, fz) = point.fraction();
+        let cell = point.cell();
+        panel_origin
+            + self
+                .local_to_panel(Pos2::ZERO, cell.ax(), cell.az(), [fx, fz])
+                .to_vec2()
     }
 
     fn ensure_texture(&mut self, ctx: &egui::Context) -> TextureHandle {
@@ -274,26 +290,89 @@ impl AtlasViewer {
         }
 
         for node in &self.atlas.nodes {
+            if matches!(node.kind, NodeKind::Settlement | NodeKind::Dungeon) {
+                continue;
+            }
             let p = panel_origin + self.cell_centre_panel(node.ax, node.az).to_vec2();
             let color = match node.kind {
                 NodeKind::CoastalGate => Color32::from_rgb(242, 217, 89),
                 NodeKind::LakeShore => Color32::from_rgb(102, 191, 242),
                 NodeKind::Pass => Color32::from_rgb(191, 191, 204),
                 NodeKind::ClaimReserved => Color32::from_rgb(217, 64, 179),
-                NodeKind::Settlement => Color32::from_rgb(255, 247, 217),
+                NodeKind::Settlement | NodeKind::Dungeon => unreachable!(),
                 NodeKind::Landmark => Color32::from_rgb(242, 102, 89),
-                NodeKind::Dungeon => Color32::from_rgb(140, 92, 64),
             };
-            let mut radius = (self.zoom * 0.18).max(2.0);
-            if node.kind == NodeKind::Settlement {
-                radius = (self.zoom * 0.3).max(3.5);
-                painter.circle_filled(
-                    p,
-                    radius * 1.6,
-                    Color32::from_rgba_unmultiplied(38, 23, 13, 191),
+            let radius = (self.zoom * 0.18).max(2.0);
+            painter.circle_filled(p, radius, color);
+        }
+    }
+
+    fn draw_settlement_markers(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        if !self.show_hamlets {
+            return;
+        }
+        for pin in self.surface.settlements() {
+            let Ok(point) = MapPoint::from_global(self.bounds, pin.at) else {
+                continue;
+            };
+            let p = self.point_panel(panel_origin, point);
+            let mut radius = (self.zoom * 0.3).max(3.5);
+            if pin.tier >= 2 {
+                radius *= 1.15;
+            }
+            painter.circle_filled(
+                p,
+                radius * 1.6,
+                Color32::from_rgba_unmultiplied(38, 23, 13, 191),
+            );
+            let color = match pin.tier {
+                3 => Color32::from_rgb(255, 220, 140),
+                2 => Color32::from_rgb(255, 240, 200),
+                _ => Color32::from_rgb(255, 247, 217),
+            };
+            painter.circle_filled(p, radius, color);
+            if self.zoom >= DETAIL_CELL_PX {
+                painter.text(
+                    p + Vec2::new(radius + 2.0, -radius),
+                    Align2::LEFT_BOTTOM,
+                    settlement_tier_name(pin.tier),
+                    FontId::proportional(11.0),
+                    Color32::from_rgb(255, 247, 217),
                 );
             }
-            painter.circle_filled(p, radius, color);
+        }
+    }
+
+    fn draw_dungeon_markers(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        if !self.show_dungeons {
+            return;
+        }
+        for pin in self.surface.dungeon_pins() {
+            let Ok(point) = MapPoint::from_global(self.bounds, pin.at) else {
+                continue;
+            };
+            let p = self.point_panel(panel_origin, point);
+            let radius = (self.zoom * 0.22).max(3.0) + pin.tier as f32 * 0.4;
+            painter.circle_filled(
+                p,
+                radius * 1.5,
+                Color32::from_rgba_unmultiplied(20, 12, 8, 200),
+            );
+            painter.circle_filled(p, radius, Color32::from_rgb(140, 92, 64));
+            painter.circle_stroke(
+                p,
+                radius,
+                Stroke::new(1.2_f32, Color32::from_rgb(90, 58, 38)),
+            );
+            if self.zoom >= DETAIL_CELL_PX {
+                painter.text(
+                    p + Vec2::new(radius + 2.0, -radius),
+                    Align2::LEFT_BOTTOM,
+                    pin.tier_name(),
+                    FontId::proportional(11.0),
+                    Color32::from_rgb(210, 168, 128),
+                );
+            }
         }
     }
 
@@ -435,12 +514,7 @@ impl AtlasViewer {
         let Some(point) = self.selection else {
             return;
         };
-        let (fx, fz) = point.fraction();
-        let cell = point.cell();
-        let p = panel_origin
-            + self
-                .local_to_panel(Pos2::ZERO, cell.ax(), cell.az(), [fx, fz])
-                .to_vec2();
+        let p = self.point_panel(panel_origin, point);
         let r = (self.zoom * 0.12).clamp(5.0, 18.0);
         painter.circle_stroke(p, r, Stroke::new(2.5_f32, Color32::from_rgb(255, 245, 200)));
         painter.line_segment(
@@ -455,12 +529,7 @@ impl AtlasViewer {
 
     /// Where the player is standing, so a summoned map is not a guess.
     fn draw_stand(&self, painter: &egui::Painter, panel_origin: Pos2, at: MapPoint) {
-        let (fx, fz) = at.fraction();
-        let cell = at.cell();
-        let p = panel_origin
-            + self
-                .local_to_panel(Pos2::ZERO, cell.ax(), cell.az(), [fx, fz])
-                .to_vec2();
+        let p = self.point_panel(panel_origin, at);
         let r = (self.zoom * 0.1).clamp(4.0, 14.0);
         painter.circle_filled(p, r, Color32::from_rgb(120, 200, 255));
         painter.circle_stroke(
@@ -541,11 +610,15 @@ impl AtlasViewer {
     }
 }
 
-fn parse_args() -> (i32, usize) {
+fn parse_args(default_size: usize) -> (i32, usize) {
     let mut args = std::env::args().skip(1);
     let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(20260809);
-    let size = args.next().and_then(|s| s.parse().ok()).unwrap_or(256);
-    (seed, size.max(32))
+    let size = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .map(clamp_continent_size)
+        .unwrap_or(default_size);
+    (seed, size)
 }
 
 /// Where the title starts streaming before Start is pressed.
@@ -558,6 +631,7 @@ fn opening_entry(
     remembered: Option<SavedStand>,
     bounds: AtlasBounds,
     surface: &ContinentalSurface,
+    ponds: &PondField,
 ) -> WorldEntryRequest {
     if let Some(stand) = remembered {
         let point = MapPoint::from_global(bounds, stand.at())
@@ -566,21 +640,37 @@ fn opening_entry(
         eprintln!("resuming at ({:.0} m, {:.0} m)", stand.x, stand.z);
         return WorldEntryRequest::at(point).facing(heading);
     }
-    let pin = surface
+    let (pin, request) = best_settlement_entry(surface, ponds).unwrap_or_else(|err| {
+        panic!("this continent has no walkable settlement to start at: {err}")
+    });
+    if surface
         .largest_settlement()
-        .unwrap_or_else(|| panic!("this continent has no settlements to start at"));
-    let point = MapPoint::from_global(bounds, pin.at)
-        .unwrap_or_else(|err| panic!("largest settlement is off the map: {err}"));
-    eprintln!(
-        "starting at the largest {} (pop {})",
-        settlement_tier_name(pin.tier),
-        pin.population
-    );
-    WorldEntryRequest::at(point)
+        .is_some_and(|best| best.id != pin.id)
+    {
+        eprintln!(
+            "starting at {} (pop {}); the largest {} is not walkable",
+            settlement_tier_name(pin.tier),
+            pin.population,
+            settlement_tier_name(
+                surface
+                    .largest_settlement()
+                    .expect("largest checked above")
+                    .tier
+            ),
+        );
+    } else {
+        eprintln!(
+            "starting at the largest {} (pop {})",
+            settlement_tier_name(pin.tier),
+            pin.population
+        );
+    }
+    request
 }
 
 fn main() {
-    let (seed, size) = parse_args();
+    let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
+    let (seed, size) = parse_args(prefs.continent_size());
     // Read before the window opens: a broken save should say so instead of
     // quietly dropping the player back on the map.
     let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
@@ -616,8 +706,9 @@ fn main() {
     let mut dressed = false;
     let mut settings_ui = SettingsUi {
         open: false,
-        prefs: Settings::load().unwrap_or_else(|err| panic!("{err}")),
+        prefs,
         applied: false,
+        active_continent_size: size,
     };
 
     let last_stand = Arc::new(Mutex::new(remembered));
@@ -651,6 +742,9 @@ fn main() {
                 viewer = Some(AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface)));
                 let mut world_session = WorldSession::new(surface);
                 world_session.attach_proxy(proxy);
+                if let Some(stand) = remembered {
+                    world_session.apply_save(&stand);
+                }
                 session = Some(world_session);
             } else {
                 generating = Some(job);
@@ -679,13 +773,16 @@ fn main() {
                 let bounds = viewer.as_ref().expect("atlas ready").bounds;
                 let session = session.as_mut().expect("atlas ready");
                 if session.state() == SessionState::Atlas {
-                    let request = opening_entry(remembered, bounds, session.surface());
+                    let ponds = session.ponds();
+                    let request =
+                        opening_entry(remembered, bounds, session.surface(), ponds.as_ref());
                     if let Err(err) = session.begin_entry(world, request) {
                         if remembered.is_some() {
                             eprintln!(
                                 "saved stand is not walkable ({err}); starting at the largest town"
                             );
-                            let fallback = opening_entry(None, bounds, session.surface());
+                            let fallback =
+                                opening_entry(None, bounds, session.surface(), ponds.as_ref());
                             session.begin_entry(world, fallback).unwrap_or_else(|err| {
                                 panic!("cannot open the starting stand: {err}")
                             });
@@ -743,9 +840,8 @@ fn main() {
             panic!("world session failed: {err}");
         }
 
-        if let Some((at, heading)) = session.saved_stand() {
-            *stand_in_loop.lock().expect("last stand") =
-                Some(SavedStand::new(seed, size, at, heading));
+        if let Some(stand) = session.saved_full(seed, size) {
+            *stand_in_loop.lock().expect("last stand") = Some(stand);
         }
 
         match session.state() {
@@ -1008,23 +1104,24 @@ fn draw_atlas(
                 viewer.note = Some("cleared cell overlays".into());
             }
 
-            let pointer = ui
-                .input(|i| i.pointer.interact_pos())
-                .map(|p| Pos2::new(p.x - rect.min.x, p.y - rect.min.y));
-
-            // Left click travels there; right click reveals the overlay. A
-            // click that came out of a drag was the player panning the map.
-            if !btn_hit && response.hovered() {
-                let primary = ui.input(|i| i.pointer.button_clicked(PointerButton::Primary));
-                let secondary = ui.input(|i| i.pointer.button_clicked(PointerButton::Secondary));
-                if let Some(local) = pointer {
-                    if primary && !response.dragged_by(PointerButton::Primary) {
+            // Widget click, not a global mouse-up: releasing after a pan, or
+            // clicking Settings / the HUD, used to plant a marker and then
+            // fail to travel.
+            if !btn_hit {
+                if response.clicked() {
+                    if let Some(local) = response.interact_pointer_pos().map(|p| {
+                        Pos2::new(p.x - rect.min.x, p.y - rect.min.y)
+                    }) {
                         if let Some(point) = viewer.screen_to_map(local) {
                             viewer.selection = Some(point);
                             travel_to(viewer, session, world);
                         }
                     }
-                    if secondary {
+                }
+                if response.secondary_clicked() {
+                    if let Some(local) = response.interact_pointer_pos().map(|p| {
+                        Pos2::new(p.x - rect.min.x, p.y - rect.min.y)
+                    }) {
                         if let Some(cell) = viewer.screen_to_cell(local) {
                             viewer.reveal_overlay(cell);
                         }
@@ -1067,6 +1164,8 @@ fn draw_atlas(
                 viewer.draw_cell_details(&painter, rect.min, panel);
             }
             viewer.draw_feature_overlays(&painter, rect.min);
+            viewer.draw_settlement_markers(&painter, rect.min);
+            viewer.draw_dungeon_markers(&painter, rect.min);
             viewer.draw_overlays(&painter, rect.min);
             if let Some(stand) = session
                 .player_position()
@@ -1126,6 +1225,9 @@ fn draw_atlas(
                                         .color(Color32::from_rgb(210, 168, 128)),
                                 );
                             }
+                            ui.add_space(4.0);
+                            ui.checkbox(&mut viewer.show_hamlets, "Show hamlets");
+                            ui.checkbox(&mut viewer.show_dungeons, "Show dungeons");
                         });
                 });
         });
@@ -1195,25 +1297,37 @@ fn travel_to_nearest_dungeon(
 }
 
 fn travel_to_largest_town(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
-    let Some(pin) = viewer.surface.largest_settlement() else {
-        viewer.note = Some("this continent has no settlements".into());
-        return;
-    };
-    let point = match MapPoint::from_global(viewer.bounds, pin.at) {
-        Ok(point) => point,
+    let ponds = session.ponds();
+    let (pin, request) = match best_settlement_entry(viewer.surface.as_ref(), ponds.as_ref()) {
+        Ok(found) => found,
         Err(err) => {
-            viewer.note = Some(format!("largest settlement is off the map: {err}"));
+            viewer.note = Some(format!("no settlement has walkable ground: {err}"));
+            eprintln!("entry refused: {err}");
             return;
         }
     };
+    let point = request.point();
     viewer.selection = Some(point);
-    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+    match session.begin_entry(world, request) {
         Ok(()) => {
-            viewer.note = Some(format!(
-                "travelling to the largest {} (pop {})",
-                settlement_tier_name(pin.tier),
-                pin.population
-            ));
+            let note = if viewer
+                .surface
+                .largest_settlement()
+                .is_some_and(|best| best.id != pin.id)
+            {
+                format!(
+                    "travelling to {} (pop {}); the largest port is not walkable",
+                    settlement_tier_name(pin.tier),
+                    pin.population
+                )
+            } else {
+                format!(
+                    "travelling to the largest {} (pop {})",
+                    settlement_tier_name(pin.tier),
+                    pin.population
+                )
+            };
+            viewer.note = Some(note);
             eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
         }
         Err(err) => {
@@ -1294,6 +1408,8 @@ struct SettingsUi {
     open: bool,
     prefs: Settings,
     applied: bool,
+    /// Atlas edge length for the running session (fixed at launch).
+    active_continent_size: usize,
 }
 
 fn apply_instance_submit_hotkeys(world: &mut World, frame: &Frame) {
@@ -1347,6 +1463,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
         });
 
     let mut hitch = ui_state.prefs.hitch_log;
+    let mut continent_size = ui_state.prefs.continent_size as i32;
     let log_path = settings::hitch_log_path().ok();
     frame.ui.modal("Settings", &mut ui_state.open, |panel, open| {
         let ui = panel.ui();
@@ -1377,6 +1494,40 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
                     .color(Color32::from_rgb(180, 188, 196)),
             );
         }
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Continent size (km)")
+                .size(14.0)
+                .color(Color32::from_rgb(235, 230, 210)),
+        );
+        let min = settings::MIN_CONTINENT_SIZE as i32;
+        let max = MAX_CONTINENT_SIZE as i32;
+        if ui
+            .add(
+                egui::DragValue::new(&mut continent_size)
+                    .range(min..=max)
+                    .speed(8.0),
+            )
+            .changed()
+        {
+            ui_state.prefs.continent_size = clamp_continent_size(continent_size as usize);
+            ui_state
+                .prefs
+                .write()
+                .unwrap_or_else(|err| panic!("{err}"));
+        }
+        let session = ui_state.active_continent_size;
+        let saved = ui_state.prefs.continent_size();
+        let size_note = if saved == session {
+            format!("This session charts {session} km.")
+        } else {
+            format!("This session charts {session} km. Restart to chart {saved} km.")
+        };
+        ui.label(
+            egui::RichText::new(size_note)
+                .size(13.0)
+                .color(Color32::from_rgb(180, 188, 196)),
+        );
         ui.add_space(8.0);
         if ui.button("Close").clicked() {
             *open = false;

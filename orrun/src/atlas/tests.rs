@@ -280,3 +280,70 @@ fn dungeon_nodes_are_inland_and_deterministic() {
         );
     }
 }
+
+#[test]
+fn full_size_continent_seeds_many_settlements_and_dungeons() {
+    let atlas = ContinentAtlas::generate(20260809, 1000);
+    let settlements = atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Settlement)
+        .count();
+    let dungeons = atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .count();
+    assert!(
+        settlements >= 100,
+        "expected at least 100 settlements on a 1000-cell atlas, got {settlements}"
+    );
+    assert!(
+        dungeons >= 50,
+        "expected at least 50 dungeons on a 1000-cell atlas, got {dungeons}"
+    );
+}
+
+#[test]
+fn settlements_spread_beyond_river_mouths() {
+    let atlas = ContinentAtlas::generate(20260809, 256);
+    let mut inland = 0usize;
+    for node in &atlas.nodes {
+        if node.kind != NodeKind::Settlement {
+            continue;
+        }
+        let idx = atlas.index_of(node.ax, node.az);
+        let mouth = atlas.mouth_distance[idx];
+        let on_river = atlas.river_links.contains_key(&(idx as i32));
+        if mouth < 0 && !on_river {
+            inland += 1;
+        }
+    }
+    assert!(
+        inland >= 4,
+        "expected inland hamlets away from rivers, got {inland}"
+    );
+}
+
+#[test]
+fn default_map_size_scales_settlement_and_dungeon_counts() {
+    let atlas = ContinentAtlas::generate(20260809, 256);
+    let settlements = atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Settlement)
+        .count();
+    let dungeons = atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .count();
+    assert!(
+        settlements >= 25,
+        "expected ~25+ settlements on a 256-cell atlas, got {settlements}"
+    );
+    assert!(
+        dungeons >= 12,
+        "expected ~12+ dungeons on a 256-cell atlas, got {dungeons}"
+    );
+}

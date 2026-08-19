@@ -47,7 +47,7 @@ const DUNGEON_LAYER: ColliderLayer = 6;
 /// Soles / hint: standing on the hatch, not the approach ramp.
 const HATCH_REACH_M: f64 = 6.0;
 /// Open the interior once, from the rim or the ramp. Keep it out to [`CACHE_M`].
-const LIVE_OPEN_M: f64 = 16.0;
+pub const LIVE_OPEN_M: f64 = 16.0;
 
 #[derive(Debug, Error)]
 pub enum DungeonError {
@@ -140,6 +140,8 @@ pub struct DungeonLayer {
     generating: bool,
     started: Option<Instant>,
     hatch_armed: bool,
+    /// Last hatch mouth is the shrine. No new mesh.
+    last_shrine: Option<GlobalPlace>,
 }
 
 impl DungeonLayer {
@@ -153,6 +155,7 @@ impl DungeonLayer {
             generating: false,
             started: None,
             hatch_armed: false,
+            last_shrine: None,
         }
     }
 
@@ -216,9 +219,36 @@ impl DungeonLayer {
         self.live.is_some()
     }
 
+    pub fn pin_seated(&self, id: i32) -> bool {
+        self.seated.contains_key(&id)
+    }
+
+    pub fn pin_ready(&self, id: i32) -> bool {
+        self.seated.get(&id).is_some_and(|s| s.layout.is_some())
+    }
+
+    pub fn pin_failed(&self, _id: i32) -> bool {
+        false
+    }
+
+    pub fn landing_yaw(&self) -> Option<f32> {
+        self.live.as_ref().map(|live| live.landing_yaw)
+    }
+
     pub fn near_hatch(&self, feet: GlobalPosition) -> bool {
         self.nearest_within(feet, HATCH_REACH_M).is_some()
     }
+
+    /// Last hatch mouth IS the shrine. No new shrine mesh.
+    pub fn shrine_place(&self, feet: GlobalPosition) -> Option<GlobalPlace> {
+        let seated = self.nearest_within(feet, HATCH_REACH_M)?;
+        Some(GlobalPlace::at(GlobalPosition::at(
+            seated.plot.at.x,
+            f64::from(seated.plot.floor_y + HATCH_LIFT_M),
+            seated.plot.at.z,
+        )))
+    }
+
 
     /// False until the player has stood off the hatch, so a spawn on the pit
     /// does not immediately teleport into the shaft.
@@ -532,6 +562,7 @@ impl DungeonLayer {
         entities.push(hatch_in);
         world.in_space(SpaceId::DEFAULT)?;
         world.link(hatch_out, hatch_in)?;
+        self.last_shrine = Some(GlobalPlace::at(GlobalPosition::at(plot.at.x, f64::from(hatch_y), plot.at.z)).with_yaw_deg(mouth.place.yaw_degrees));
         let ground = GroundPlan::from_places(&layout.placed);
         let colliders: Vec<StaticCollider> = colliders_for(&layout.placed, &ground)
             .into_iter()
@@ -1155,5 +1186,12 @@ mod tests {
             0,
             "a mouth 1.5 km away must be dropped"
         );
+    }
+}
+
+impl DungeonLayer {
+    /// Last hatch mouth. Death returns here; no extra shrine mesh.
+    pub fn shrine(&self) -> Option<GlobalPlace> {
+        self.last_shrine
     }
 }

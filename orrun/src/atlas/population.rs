@@ -15,6 +15,73 @@ pub const SETTLEMENT_SLOPE_REF: f32 = 0.02;
 pub const SETTLEMENT_SLOPE_CLIFF: f32 = 0.12;
 pub const CELL_METRES: f32 = 1000.0;
 
+/// Where a settlement prefers to sit, for weighted seeding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettlementSite {
+    RiverMouth,
+    Confluence,
+    NearRiver,
+    Inland,
+}
+
+impl SettlementSite {
+    pub fn weight(self) -> f32 {
+        match self {
+            Self::RiverMouth => 4.0,
+            Self::Confluence => 2.5,
+            Self::NearRiver => 1.5,
+            Self::Inland => 0.55,
+        }
+    }
+}
+
+pub fn classify_settlement_site(
+    ax: i32,
+    az: i32,
+    size: usize,
+    river_links: &FxHashMap<i32, Vec<Link>>,
+    mouth_distance: &[i32],
+) -> SettlementSite {
+    let idx = az as usize * size + ax as usize;
+    if mouth_distance[idx] == 0 {
+        return SettlementSite::RiverMouth;
+    }
+    if is_river_confluence(ax, az, size, river_links, mouth_distance) {
+        return SettlementSite::Confluence;
+    }
+    if river_links.contains_key(&(idx as i32)) || touches_river(ax, az, size, river_links) {
+        return SettlementSite::NearRiver;
+    }
+    SettlementSite::Inland
+}
+
+pub fn is_river_confluence(
+    ax: i32,
+    az: i32,
+    size: usize,
+    river_links: &FxHashMap<i32, Vec<Link>>,
+    mouth_distance: &[i32],
+) -> bool {
+    let idx = az as usize * size + ax as usize;
+    if mouth_distance[idx] == 0 || !river_links.contains_key(&(idx as i32)) {
+        return false;
+    }
+    let mut river_neighbors = 0u32;
+    for k in 0..8 {
+        let nx = ax + NEIGHBOR_DX[k];
+        let nz = az + NEIGHBOR_DZ[k];
+        if nx >= 0
+            && nz >= 0
+            && (nx as usize) < size
+            && (nz as usize) < size
+            && river_links.contains_key(&(nz * size as i32 + nx))
+        {
+            river_neighbors += 1;
+        }
+    }
+    river_neighbors >= 2
+}
+
 pub fn seed_population(
     world_seed: i32,
     size: usize,
@@ -38,7 +105,7 @@ pub fn seed_population(
                     idx,
                     packed,
                     biome,
-                    mouth_distance[idx],
+                    mouth_distance,
                     size,
                     cells,
                     river_links,
@@ -120,13 +187,14 @@ fn population_score(
     idx: usize,
     packed: i32,
     biome: Biome,
-    mouth_dist: i32,
+    mouth_distance: &[i32],
     size: usize,
     cells: &[i32],
     river_links: &FxHashMap<i32, Vec<Link>>,
     grain: &Noise,
     region: &Noise,
 ) -> f32 {
+    let mouth_dist = mouth_distance[idx];
     let humidity = pack::humidity(packed) as f32 / 255.0;
     let relief = pack::relief(packed) as f32 / 63.0;
     let elevation = pack::elevation(packed);
@@ -146,22 +214,26 @@ fn population_score(
         Biome::Alpine => score -= 0.6,
         Biome::Tundra => score -= 0.35,
         Biome::Wetland => score -= 0.1,
-        Biome::Coast => score += 0.14,
+        Biome::Coast => score += 0.08,
         _ => {}
     }
 
     if river_links.contains_key(&(idx as i32)) {
-        score += 0.38;
+        score += 0.32;
     } else if touches_river(ax, az, size, river_links) {
-        score += 0.14;
+        score += 0.12;
+    }
+
+    if is_river_confluence(ax, az, size, river_links, mouth_distance) {
+        score += 0.28;
     }
 
     if mouth_dist == 0 {
-        score += 0.9;
+        score += 0.48;
     } else if mouth_dist > 0 {
         score += lerp(
-            0.55,
-            0.12,
+            0.32,
+            0.10,
             (mouth_dist - 1) as f32 / POPULATION_MOUTH_RADIUS as f32,
         );
     }

@@ -363,6 +363,7 @@ impl TerrainChunkBuilder {
 
         let fall = Fall::of(normal);
         let cover = GroundCover::sample(
+            self.seed,
             &self.surface,
             p,
             column.ground(),

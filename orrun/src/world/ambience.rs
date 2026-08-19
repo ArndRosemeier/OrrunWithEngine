@@ -13,6 +13,7 @@ use glam::Vec2;
 use rand::Rng;
 use thiserror::Error;
 
+use super::scatter::{canopy_noise, Fall, GroundCover};
 use super::session::WorldSession;
 use super::settlement::HamletStand;
 use super::SessionState;
@@ -301,18 +302,31 @@ fn audio_dirs() -> Vec<PathBuf> {
 }
 
 fn forest_here(session: &WorldSession, at: GlobalXZ) -> bool {
-    session
-        .surface()
-        .fields()
-        .biome_at(at.x as f32, at.z as f32)
-        == Biome::Forest
+    let surface = session.surface();
+    if surface.fields().biome_at(at.x as f32, at.z as f32) != Biome::Forest {
+        return false;
+    }
+    let column = surface.column(at);
+    if column.is_wet() {
+        return false;
+    }
+    let seed = surface.world_seed() as u32 as u64;
+    let cover = GroundCover::sample(
+        seed,
+        surface,
+        at,
+        column.ground(),
+        Fall::default(),
+        canopy_noise(seed, at),
+    );
+    // Deep glades are still forest country; only the thinnest edge falls silent.
+    cover.tree > 0.12 || cover.clearing < 0.92
 }
 
 fn water_presence(session: &WorldSession, at: GlobalXZ) -> (f32, f32) {
     let surface = session.surface();
     let p = Vec2::new(at.x as f32, at.z as f32);
-    let coast = surface.hydro_index().coast_signed(surface.hydro(), p);
-    let ocean = ocean_presence(coast);
+    let ocean = ocean_presence(surface.coast_signed(at));
     let river = match surface.hydro_index().nearest_river(surface.hydro(), p) {
         Some(hit) => river_presence(hit.dist, hit.half_width),
         None => 0.0,

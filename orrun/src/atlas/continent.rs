@@ -121,9 +121,11 @@ impl ContinentAtlas {
         nodes::seed_nodes(
             world_seed,
             size,
-            &cells,
+            &mut cells,
             &mut landmass_id,
             &lake_scratch.lake_id,
+            &river_graph.links,
+            &mouth_distance,
             &mut nodes,
         );
 
@@ -167,6 +169,7 @@ impl ContinentAtlas {
                 cell_rivers: Vec::new(),
                 cell_lakes: Vec::new(),
                 cell_coasts: Vec::new(),
+                atlas_ocean: Vec::new(),
             }),
         };
         atlas.hydro = Arc::new(HydroVectors::bake(&atlas));

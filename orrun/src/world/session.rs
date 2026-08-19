@@ -12,7 +12,7 @@
 //! window gives it back on Escape or when it loses focus.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engine::camera::{Camera, MAX_PITCH_DEGREES};
 use engine::collision::ActorBody;
@@ -45,8 +45,8 @@ use super::world_stream::{WorldStream, FAR_VIEW_M};
 const FOOT_CLEARANCE_M: f32 = 0.05;
 /// Camera height above the feet.
 const EYE_HEIGHT_M: f32 = 1.7;
-const WALK_SPEED: f32 = 10.0;
-const SPRINT_SPEED: f32 = 28.0;
+const WALK_SPEED: f32 = crate::combat::WALK_MPS as f32;
+const SPRINT_SPEED: f32 = crate::combat::SPRINT_MPS as f32;
 const FLY_SPEED: f32 = 40.0;
 const FLY_SPRINT_SPEED: f32 = 160.0;
 /// Take-off speed. At [`GRAVITY`] this clears about a metre and a half.
@@ -141,6 +141,10 @@ pub struct WalkInput {
     /// Space went down during travel: skip the current cinematic beat.
     /// Never skips destination readiness.
     pub skip_travel: bool,
+    /// Tab: cycle lock. Does not steal Escape or E.
+    pub tab: bool,
+    /// Shift. Combat walk 4.5 / sprint 7. Not fly.
+    pub sprint: bool,
 }
 
 impl WalkInput {
@@ -155,6 +159,8 @@ impl WalkInput {
         capture_look: false,
         interact: false,
         skip_travel: false,
+        tab: false,
+        sprint: false,
     };
 
     /// Read one frame of first-person controls.
@@ -226,6 +232,8 @@ impl WalkInput {
             capture_look: keys.mouse_clicked(MouseButton::Left),
             interact,
             skip_travel: keys.pressed(Key::Space),
+            tab: keys.pressed(Key::Tab),
+            sprint,
         }
     }
 }
@@ -313,6 +321,10 @@ pub struct WorldSession {
     proxy: Option<InstalledProxy>,
     /// Last stand in the default space. A hatch teleport must not overwrite this.
     overworld: Option<(GlobalXZ, Heading)>,
+    /// Soft lock + auto-attack. Empty hostiles until a fill/fixture registers them.
+    combat: crate::combat::WorldCombat,
+    combat_layer: super::combat_layer::CombatLayer,
+    last_shrine: Option<GlobalPlace>,
 }
 
 impl WorldSession {
@@ -339,6 +351,9 @@ impl WorldSession {
             proxy_spec: None,
             proxy: None,
             overworld: None,
+            combat: crate::combat::WorldCombat::specialist(1, crate::combat::Discipline::Martial),
+            combat_layer: super::combat_layer::CombatLayer::install(),
+            last_shrine: None,
         }
     }
 
@@ -355,6 +370,68 @@ impl WorldSession {
     /// Attach a proxy built off the render thread. Travel will upload it once.
     pub fn attach_proxy(&mut self, spec: ContinentProxySpec) {
         self.proxy_spec = Some(spec);
+    }
+
+    pub fn combat(&self) -> &crate::combat::WorldCombat {
+        &self.combat
+    }
+
+    pub fn combat_mut(&mut self) -> &mut crate::combat::WorldCombat {
+        &mut self.combat
+    }
+
+    /// Soft lock id. Tab cycles; does not steal Esc or E.
+    pub fn lock_id(&self) -> Option<i32> {
+        self.combat.lock
+    }
+
+    pub fn first_auto_hit(&self) -> Option<i32> {
+        self.combat_layer.first_auto()
+    }
+
+    pub fn last_shrine(&self) -> Option<GlobalPlace> {
+        self.last_shrine.or_else(|| self.dungeons.as_ref().and_then(|d| d.shrine()))
+    }
+
+    pub fn combat_walk_speed(&self) -> f32 {
+        WALK_SPEED
+    }
+
+    /// Next world tick reseats the L1 wolf line on the current facing.
+    pub fn rearm_combat_fixtures(&mut self) {
+        self.combat_layer.rearm();
+    }
+
+    pub fn apply_save(&mut self, stand: &crate::save::SavedStand) {
+        self.combat.player.stats.level = stand.level;
+        self.combat.player.xp = stand.xp;
+        self.combat.player.resources.hp = stand.hp;
+        self.combat.player.resources.mana = stand.mana;
+        self.combat.player.stats.attrs = stand.attrs;
+        self.combat.player.stats.ranks = stand.ranks;
+        if stand.shaken_until > 0.0 {
+            self.combat.player.shaken = Some(crate::combat::Shaken {
+                remaining_s: stand.shaken_until,
+            });
+        } else {
+            self.combat.player.shaken = None;
+        }
+        self.last_shrine = stand.last_shrine.map(|s| s.to_place());
+    }
+
+    pub fn saved_full(&self, seed: i32, size: usize) -> Option<crate::save::SavedStand> {
+        let (at, heading) = self.saved_stand()?;
+        let p = &self.combat.player;
+        let mut stand = crate::save::SavedStand::new(seed, size, at, heading);
+        stand.level = p.stats.level;
+        stand.xp = p.xp;
+        stand.hp = p.resources.hp;
+        stand.mana = p.resources.mana;
+        stand.attrs = p.stats.attrs;
+        stand.ranks = p.stats.ranks;
+        stand.shaken_until = p.shaken.as_ref().map(|s| s.remaining_s).unwrap_or(0.0);
+        stand.last_shrine = self.last_shrine().map(crate::save::SavedShrine::from_place);
+        Some(stand)
     }
 
     pub fn surface(&self) -> &ContinentalSurface {
@@ -1046,6 +1123,28 @@ impl WorldSession {
             player.vy = 0.0;
             player.airborne = false;
         }
+        {
+            let facing = Camera::facing_xz(player.yaw_degrees);
+            if !self.combat_layer.fixture_ready() {
+                self.combat_layer.install_l1_wolf_line(
+                    &mut self.combat,
+                    player.position.x,
+                    player.position.z,
+                    facing.x as f64,
+                    facing.z as f64,
+                );
+            }
+        }
+        if input.tab || (input.capture_look && world.pointer_lock()) {
+            let facing = Camera::facing_xz(player.yaw_degrees);
+            let px = player.position.x;
+            let pz = player.position.z;
+            if input.tab {
+                self.combat.press_tab(px, pz, facing.x as f64, facing.z as f64);
+            } else if input.capture_look && world.pointer_lock() {
+                self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
+            }
+        }
         player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);
         player.pitch_degrees = (player.pitch_degrees + input.pitch_delta_degrees)
             .clamp(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES);
@@ -1085,6 +1184,22 @@ impl WorldSession {
             }
         }
 
+        {
+            let facing = Camera::facing_xz(player.yaw_degrees);
+            self.combat_layer.tick(
+                &mut self.combat,
+                player.position.x,
+                player.position.z,
+                facing.x as f64,
+                facing.z as f64,
+                f64::from(input.dt),
+            );
+            if let Some(d) = self.dungeons.as_ref() {
+                if let Some(place) = d.shrine() {
+                    self.last_shrine = Some(place);
+                }
+            }
+        }
         let foot = player.position.horizontal();
         // Before the streamer, so a chunk is never baked against a window that
         // has stopped reaching it.
@@ -1395,6 +1510,90 @@ impl WorldSession {
 
     pub fn dungeon_seated_count(&self) -> usize {
         self.dungeons.as_ref().map_or(0, DungeonLayer::seated_count)
+    }
+
+    pub fn dungeon_has_live(&self) -> bool {
+        self.dungeons.as_ref().is_some_and(DungeonLayer::has_live)
+    }
+
+    pub fn hatch_armed(&self) -> bool {
+        self.dungeons
+            .as_ref()
+            .is_some_and(DungeonLayer::hatch_armed)
+    }
+
+    pub fn near_hatch(&self) -> bool {
+        match (self.dungeons.as_ref(), self.player) {
+            (Some(dungeons), Some(player)) => dungeons.near_hatch(player.position),
+            _ => false,
+        }
+    }
+
+    pub fn dungeon_pin_seated(&self, id: i32) -> bool {
+        self.dungeons.as_ref().is_some_and(|d| d.pin_seated(id))
+    }
+
+    pub fn dungeon_pin_ready(&self, id: i32) -> bool {
+        self.dungeons.as_ref().is_some_and(|d| d.pin_ready(id))
+    }
+
+    pub fn dungeon_pin_failed(&self, id: i32) -> bool {
+        self.dungeons.as_ref().is_some_and(|d| d.pin_failed(id))
+    }
+
+    pub fn dungeon_landing_yaw(&self) -> Option<f32> {
+        self.dungeons.as_ref().and_then(DungeonLayer::landing_yaw)
+    }
+
+    pub fn in_dungeon(&self, world: &World) -> bool {
+        self.dungeons
+            .as_ref()
+            .and_then(|d| {
+                self.player
+                    .and_then(|p| d.indoor_floor_y(world, p.position))
+            })
+            .is_some()
+    }
+
+    /// Player / SavedStand facing. 0 = +Z, growing toward +X.
+    ///
+    /// This is not the last move direction stored on the player.
+    pub fn player_yaw_degrees(&self) -> Option<f32> {
+        self.player.map(|p| p.yaw_degrees)
+    }
+
+    pub fn player_pitch_degrees(&self) -> Option<f32> {
+        self.player.map(|p| p.pitch_degrees)
+    }
+
+    pub fn feet_on_ground(&self) -> bool {
+        self.player
+            .is_some_and(|p| p.mode == Locomotion::Walk && !p.airborne)
+    }
+
+    /// Headless and unit tests wait for streaming, not a short wall clock.
+    pub fn wait_until_world(&mut self, world: &mut World) {
+        self.wait_until_world_for(world, Duration::from_secs(90));
+    }
+
+    pub fn wait_until_world_for(&mut self, world: &mut World, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            self.step(world, WalkInput::IDLE).expect("update");
+            if self.state() == SessionState::World {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "the entry ring never became resident (spawn={} progress={:.0}% status={} resident={} pending={} inflight={})",
+            self.spawn().is_some(),
+            self.loading_progress() * 100.0,
+            self.loading_status(),
+            self.stream().resident_count(),
+            self.stream().pending_count(),
+            self.stream().inflight_count(),
+        );
     }
 
     /// Where the camera sits, once the player exists.
