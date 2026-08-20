@@ -42,6 +42,8 @@ Walker/door/alley already live. Status icons belong on M7.
 
 Hamlet yard tent + campfire ring SHIP: cream canvas tent AND stone ring in the T0 hamlet courtyard. Prior dirt FAILS were the wrong hook. Playtester PASS + Reviewer SHIP `camp.png` on `a8a5537` (spawn `7e45c69`).
 
+Atlas travel cheats SHIP: three human-clickable buttons after M — hamlet yard, Taken Cairn, Woods Hut. No new key. Reviewer SHIP `f963908`. Reviewer note: hamlet yard is nearest_tier0_pin, not HamletStand courtyard.
+
 ## M7 Ability HUD — LATER
 
 Hotbar CD radial sweep SHIP: radial pie on Strike, not a curtain. Playtester PASS + Reviewer SHIP `cd_sweep.png` on `947f918`.
