@@ -16,11 +16,10 @@ Live bodies: wolf-spider, orc, tribal, skull orc. Hash `c5f0a7b`.
 
 Chaotic pack stays. Post-pack road cut to the well. Dirt ribbon drawn. Walking humans on clipped glbs, opaque clothes. Hash `9ba80ea`. Playtester PASS + Reviewer SHIP.
 
-## M2 Readable packs — NEXT
+## M2 Readable packs - SHIP (2026-08-20)
 
-Unstack spawn hostiles (one lock = one body). Attack/flinch still-proven on the locked mesh. No silent play_animation no-op. Do not ship another live type without an attack shot. Engine hole-body gate already SHIP on Engine `ac97df1`.
-
-## M3 Bones in the dark — QUEUED
+Three L1 wolves strafe +/-1.8 m. One lock = one body. Wolf Attack still on the locked mesh. play_animation fail-loud. Hash `f2b9a31`. Playtester PASS + Reviewer SHIP.
+## M3 Bones in the dark - NEXT
 
 T2+ Brood dungeons. Warrior + 2 Minion per chamber. One Mage+staff pack per dungeon, not on the heart. Clip Unarmed_Melee_Attack_Punch_A. Staff baked. File map ready. After M2.
 
