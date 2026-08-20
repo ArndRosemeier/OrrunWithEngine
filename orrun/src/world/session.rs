@@ -572,7 +572,7 @@ impl WorldSession {
     }
 
     fn sync_ground_loot(&mut self, world: &mut World) -> Result<(), SessionError> {
-        let mut planned: Vec<(i32, f64, f64, f64, Option<crate::loot::GroundPile>)> = Vec::new();
+        let mut planned: Vec<(i32, engine::world::EntityId, f64, f64, f64, Option<crate::loot::GroundPile>)> = Vec::new();
         for h in &self.combat.hostiles {
             if h.alive {
                 continue;
@@ -589,16 +589,16 @@ impl WorldSession {
                 .unwrap_or(0.0);
             if self.ground_loot.iter().any(|p| p.hostile_idx == h.idx) {
                 if !self.combat_layer.has_sparkle(h.idx) {
-                    planned.push((h.idx, h.x, y, h.z, None));
+                    planned.push((h.idx, entity, h.x, y, h.z, None));
                 }
                 continue;
             }
             let site = self.loot_site_for(h.x, h.z);
             let pile = crate::loot::roll_pile(&h.mob_id, h.idx, site);
-            planned.push((h.idx, h.x, y, h.z, Some(pile)));
+            planned.push((h.idx, entity, h.x, y, h.z, Some(pile)));
         }
-        for (idx, x, y, z, pile) in planned {
-            self.combat_layer.spawn_sparkle(world, idx, x, y, z)?;
+        for (idx, entity, x, y, z, pile) in planned {
+            self.combat_layer.spawn_sparkle(world, idx, entity, x, y, z)?;
             if let Some(pile) = pile {
                 self.ground_loot.push(pile);
             }

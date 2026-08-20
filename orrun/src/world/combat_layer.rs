@@ -38,6 +38,10 @@ const FLINCH_PEAK: f32 = 1.32;
 const RING_LIFT_M: f64 = 0.14;
 const RING_MAJOR_M: f32 = 2.55;
 const RING_MINOR_M: f32 = 0.22;
+/// Small chest tell. Not the 3.7 m ground carpet (half 1.85).
+const SPARKLE_HALF_M: f32 = 0.34;
+/// Prone-orc torso above the Death-posed mesh feet.
+const SPARKLE_LIFT_M: f64 = 0.50;
 const GOLD: Color = Color {
     r: 1.0,
     g: 0.90,
@@ -296,9 +300,10 @@ impl CombatLayer {
         &mut self,
         world: &mut World,
         idx: i32,
-        x: f64,
-        y: f64,
-        z: f64,
+        entity: EntityId,
+        fallback_x: f64,
+        fallback_y: f64,
+        fallback_z: f64,
     ) -> EngineResult<()> {
         if let Some(id) = self.sparkles.get(&idx).copied() {
             if world.entity(id).is_ok() {
@@ -306,9 +311,17 @@ impl CombatLayer {
             }
             self.sparkles.remove(&idx);
         }
+        // Same XZ as lock-ring / hit-flash: Death-posed mesh origin, not combat h.x/h.z
+        // (orc mesh sits ORC_MESH_BEHIND_M behind the hostile point).
+        let (x, y, z) = self
+            .mesh_anchors
+            .iter()
+            .find(|a| a.id == entity)
+            .map(|a| (a.pos.x, a.pos.y, a.pos.z))
+            .unwrap_or((fallback_x, fallback_y, fallback_z));
         let id = world.spawn_anchored(
             sparkle_mesh()?,
-            GlobalPlace::at(GlobalPosition::at(x, y + 0.42, z)),
+            GlobalPlace::at(GlobalPosition::at(x, y + SPARKLE_LIFT_M, z)),
         )?;
         let _ = world.set_casts_shadow(id, false);
         self.sparkles.insert(idx, id);
@@ -1671,9 +1684,9 @@ fn hit_flash_mesh() -> EngineResult<Mesh> {
 }
 
 fn sparkle_mesh() -> EngineResult<Mesh> {
-    // Clone of the hit-flash unlit quad. Stays until taken or reset.
+    // Clone of the hit-flash unlit quad, lock-ring-tube scale. Stays until taken or reset.
     let mut mesh = Mesh::new();
-    let s = 1.85;
+    let s = SPARKLE_HALF_M;
     let a = mesh.add_point((-s, 0.0, -s))?;
     let b = mesh.add_point((s, 0.0, -s))?;
     let c = mesh.add_point((s, 0.0, s))?;
