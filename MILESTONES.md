@@ -34,7 +34,9 @@ Live roster through L10: Yeti L6 Punch `2ef0de5`, Demon L8 Punch+trident `6476cd
 
 ## M6 Village life 2 - NEXT
 
-Fire ring and tents if we get meshes. More civilian loops. Status icons. Kill death pose.
+Kill death pose SHIP: Engine `6ef3042` play-once holds last frame, Orrun `f275831` (Playtester PASS + Reviewer). Bandit/villagers skip (no Death clip). Player slain path unchanged. No loot sparkle.
+
+Walker/door/alley already live. Status icons belong on M7. Fire ring and tents wait for a mesh (indoor furn_hearth is not a campfire).
 
 ## M7 Ability HUD — LATER
 
