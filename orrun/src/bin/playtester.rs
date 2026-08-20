@@ -88,6 +88,8 @@ fn main() {
         "bluedemon.png",
         "tribal_veteran.json",
         "tribal_veteran.png",
+        "death.json",
+        "death.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -145,6 +147,8 @@ fn main() {
         combat_fail_armed: false,
         combat_fail_sent: false,
         combat_death_sent: false,
+        combat_death_killed: false,
+        combat_death_hold_at: None,
         incoming_hp: None,
         combat_orc_punch_at: None,
         combat_yeti_punch_at: None,
@@ -337,6 +341,7 @@ enum Phase {
     BindWrite,
     CombatLive,
     CombatOrcLive,
+    CombatDeathLive,
     CombatYetiLive,
     CombatDemonLive,
     CombatBlueDemonLive,
@@ -393,6 +398,8 @@ struct Driver {
     combat_fail_armed: bool,
     combat_fail_sent: bool,
     combat_death_sent: bool,
+    combat_death_killed: bool,
+    combat_death_hold_at: Option<f32>,
     incoming_hp: Option<f64>,
     combat_orc_punch_at: Option<f32>,
     combat_yeti_punch_at: Option<f32>,
@@ -456,6 +463,7 @@ impl Driver {
             self.phase,
             Phase::CombatLive
                 | Phase::CombatOrcLive
+                | Phase::CombatDeathLive
                 | Phase::CombatYetiLive
                 | Phase::CombatDemonLive
                 | Phase::CombatBlueDemonLive
@@ -467,6 +475,7 @@ impl Driver {
                 | Some("slain")
                 | Some("hud")
                 | Some("roster")
+                | Some("death")
                 | Some("yeti")
                 | Some("demon")
                 | Some("bluedemon")
@@ -482,7 +491,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -561,6 +570,22 @@ impl Driver {
                         combat_melee_stand(&self.session),
                     ) {
                         if pos.horizontal().distance(stand) > 0.35 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                }
+            }
+            Phase::CombatDeathLive => {
+                if !self.combat_death_killed && self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if self.combat_death_killed {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        orc_view_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
                             input = walk_toward(pos.horizontal(), stand, dt);
                             input.yaw_delta_degrees = self.pending_yaw_delta;
                             input.pitch_delta_degrees = self.pending_pitch_delta;
@@ -863,6 +888,7 @@ impl Driver {
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
+            Phase::CombatDeathLive => self.tick_combat_death(world, frame),
             Phase::CombatYetiLive => self.tick_combat_yeti(world, frame),
             Phase::CombatDemonLive => self.tick_combat_demon(world, frame),
             Phase::CombatBlueDemonLive => self.tick_combat_bluedemon(world, frame),
@@ -899,6 +925,7 @@ impl Driver {
             "bind" => self.start_bind(world, frame),
             "combat" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
+            "combat_death" => self.start_combat_death(world, frame),
             "combat_yeti" => self.start_combat_yeti(world, frame),
             "combat_demon" => self.start_combat_demon(world, frame),
             "combat_bluedemon" => self.start_combat_bluedemon(world, frame),
@@ -2190,6 +2217,144 @@ impl Driver {
         self.ok_hook("combat_orc");
         world.mark_ready();
         self.queue_shot(world, frame, "roster");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+
+    fn start_combat_death(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_orc_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_death_killed = false;
+        self.combat_death_hold_at = None;
+        self.phase = Phase::CombatDeathLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_death(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_death: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_death: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_death: orc mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_orc();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = orc_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 14.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_death: never looked at orc");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        self.combat_tab_sent = true;
+        if !self.combat_death_killed {
+            if self.session.lock_id().is_none() {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_death: lock unset after Tab");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            let Some((name, hp)) = self.session.lock_name_hp() else {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_death: lock name/hp unset after Tab");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            };
+            let name = name.to_string();
+            if name != "orc" || hp <= 0.0 {
+                self.fail_current(&format!(
+                    "combat_death: want live orc lock, got {name} hp={hp}"
+                ));
+                self.advance_after_fail(world, frame);
+                return;
+            }
+            let lock = self.session.lock_id();
+            let combat = self.session.combat_mut();
+            for h in &mut combat.hostiles {
+                if Some(h.idx) == lock {
+                    h.hp = 0.0;
+                    h.alive = false;
+                }
+            }
+            combat.lock = None;
+            self.combat_death_killed = true;
+            return;
+        }
+        let Some(stand) = orc_view_stand(&self.session) else {
+            self.fail_current("combat_death: no orc view stand");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_death: never reached orc view stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !death_hold_ready(world, &self.session) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_death: Death clip never held last frame");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let hold_at = *self.combat_death_hold_at.get_or_insert(frame.time);
+        // One extra beat on the hold frame so the shot is not mid-flop.
+        if frame.time - hold_at < 0.08 {
+            return;
+        }
+        let corpse = self
+            .session
+            .combat()
+            .hostiles
+            .iter()
+            .find(|h| !h.alive)
+            .map(|h| (h.name.clone(), h.alive, h.hp));
+        let Some((name, alive, hp)) = corpse else {
+            self.fail_current("combat_death: no dead hostile after kill");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        self.write_json(
+            "combat_death",
+            json!({
+                "status": "ok",
+                "name": name,
+                "alive": alive,
+                "hp": hp,
+                "clip": "Death",
+                "looping": false,
+                "shot": "death.png",
+            }),
+        );
+        self.ok_hook("combat_death");
+        world.mark_ready();
+        self.queue_shot(world, frame, "death");
         self.phase = Phase::NextHook;
         self.phase_t0 = frame.time;
     }
@@ -4065,6 +4230,27 @@ fn demon_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
         (h.z - fz * BEHIND_M) as f32,
     );
     Some((eye, target))
+}
+
+
+fn death_hold_ready(world: &World, session: &WorldSession) -> bool {
+    let Some(id) = session.combat().hostiles.iter().find_map(|h| h.entity) else {
+        return false;
+    };
+    for (eid, ent) in world.animated_entities() {
+        if *eid != id {
+            continue;
+        }
+        let a = ent.animator();
+        if a.clip_name() != "Death" || a.looping {
+            return false;
+        }
+        let Some(clip) = a.model.clips.get(a.clip_index) else {
+            return false;
+        };
+        return clip.duration > 0.0 && a.time + 1e-3 >= clip.duration;
+    }
+    false
 }
 
 fn orc_view_stand(session: &WorldSession) -> Option<GlobalXZ> {

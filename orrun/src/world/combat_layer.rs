@@ -26,7 +26,7 @@ use engine::mesh::Mesh;
 use engine::place::{GlobalPlace, Place};
 use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -111,6 +111,7 @@ pub struct CombatLayer {
     flash_t: f32,
     incoming_hit: bool,
     hurt_flash_s: f64,
+    death_posed: HashSet<EntityId>,
 }
 
 impl CombatLayer {
@@ -140,6 +141,7 @@ impl CombatLayer {
             flash_t: 0.0,
             incoming_hit: false,
             hurt_flash_s: 0.0,
+            death_posed: HashSet::new(),
         }
     }
 
@@ -197,6 +199,7 @@ impl CombatLayer {
         self.lock_ring = None;
         self.ring_on = None;
         self.flash = None;
+        self.death_posed.clear();
     }
 
     pub fn roster_pins_skipped(&self) -> bool {
@@ -296,6 +299,7 @@ impl CombatLayer {
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
+        self.death_posed.clear();
     }
 
     pub fn despawn_meshes(&mut self, world: &mut World) {
@@ -306,6 +310,7 @@ impl CombatLayer {
         self.despawn_ring(world);
         self.despawn_flash(world);
         self.flinch = None;
+        self.death_posed.clear();
     }
 
     fn despawn_ring(&mut self, world: &mut World) {
@@ -1417,6 +1422,7 @@ impl CombatLayer {
                 })?;
             }
         }
+        self.play_death_poses(world, combat)?;
         self.sync_lock_ring(world, combat, &mut ground_y)?;
         if self.pending_flinch {
             self.pending_flinch = false;
@@ -1425,6 +1431,36 @@ impl CombatLayer {
         }
         self.tick_flinch(world, dt)?;
         self.tick_flash(world, dt);
+        Ok(())
+    }
+
+    fn play_death_poses(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
+        for h in &combat.hostiles {
+            if h.alive {
+                continue;
+            }
+            let Some(spec) = mesh_spec(&h.mob_id) else {
+                continue;
+            };
+            let Some(clip) = spec.anim_death else {
+                continue;
+            };
+            let Some(id) = h
+                .entity
+                .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
+            else {
+                continue;
+            };
+            if !self.death_posed.insert(id) {
+                continue;
+            }
+            world.play_animation_once(id, clip).map_err(|err| {
+                EngineError::Model(format!("death clip '{clip}' failed: {err}"))
+            })?;
+            world.set_animation_speed(id, 1.0).map_err(|err| {
+                EngineError::Model(format!("death clip speed failed: {err}"))
+            })?;
+        }
         Ok(())
     }
 

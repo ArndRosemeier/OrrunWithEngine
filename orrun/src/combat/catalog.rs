@@ -5,6 +5,7 @@ pub struct CombatMesh {
     pub source: &'static str,      // relative to orrun/assets
     pub anim_idle: &'static str,   // "Idle"
     pub anim_melee: &'static str,  // "Punch"
+    pub anim_death: Option<&'static str>, // Some("Death") / Some("Death_A"); None bandit
     pub anim_weapon: Option<&'static str>, // Some("Weapon") orc+skull, None tribal
     pub weapon_node: Option<&'static str>, // Some("Orc_Weapon") orc only
 }
@@ -16,6 +17,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Orc.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: Some("Weapon"),
             weapon_node: Some("Orc_Weapon"),
         },
@@ -24,6 +26,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Tribal.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -32,6 +35,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Orc_Skull.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: Some("Weapon"),
             weapon_node: None,
         },
@@ -40,6 +44,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "fauna/wolf/wolf.gltf",
             anim_idle: "Idle",
             anim_melee: "Attack",
+            anim_death: Some("Death"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -48,6 +53,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/kaykit/Skeleton_Warrior.glb",
             anim_idle: "Idle",
             anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_death: Some("Death_A"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -56,6 +62,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/kaykit/Skeleton_Minion.glb",
             anim_idle: "Idle",
             anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_death: Some("Death_A"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -64,6 +71,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "humans/male_bandit_01.glb",
             anim_idle: "Idle",
             anim_melee: "Attack",
+            anim_death: None,
             anim_weapon: None,
             weapon_node: None,
         },
@@ -72,6 +80,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/kaykit/Skeleton_Mage_Staff.glb",
             anim_idle: "Idle",
             anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_death: Some("Death_A"),
             anim_weapon: Some("Spellcast_Shoot"),
             weapon_node: None,
         },
@@ -80,6 +89,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Yeti.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -88,6 +98,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Demon.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: Some("Weapon"),
             weapon_node: Some("Trident"),
         },
@@ -96,6 +107,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/BlueDemon.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -104,6 +116,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             source: "monsters/big/Tribal_Veteran.glb",
             anim_idle: "Idle",
             anim_melee: "Punch",
+            anim_death: Some("Death"),
             anim_weapon: None,
             weapon_node: None,
         },
@@ -160,6 +173,7 @@ mod tests {
             model.find_clip(spec.anim_melee).is_some(),
             "Attack missing on bandit"
         );
+        assert!(spec.anim_death.is_none(), "bandit has no Death clip");
     }
 
     #[test]
@@ -167,6 +181,7 @@ mod tests {
         let spec = mesh_spec("demon").expect("demon");
         assert_eq!(spec.anim_idle, "Idle");
         assert_eq!(spec.anim_melee, "Punch");
+        assert_eq!(spec.anim_death, Some("Death"));
         assert_eq!(spec.anim_weapon, Some("Weapon"));
         assert_eq!(spec.weapon_node, Some("Trident"));
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -202,6 +217,7 @@ mod tests {
         assert_eq!(spec.source, "monsters/big/BlueDemon.glb");
         assert_eq!(spec.anim_idle, "Idle");
         assert_eq!(spec.anim_melee, "Punch");
+        assert_eq!(spec.anim_death, Some("Death"));
         assert_eq!(spec.anim_weapon, None);
         assert_eq!(spec.weapon_node, None);
         let alias = mesh_spec("BlueDemon").expect("BlueDemon");
@@ -244,6 +260,7 @@ mod tests {
         assert_eq!(spec.source, "monsters/big/Tribal_Veteran.glb");
         assert_eq!(spec.anim_idle, "Idle");
         assert_eq!(spec.anim_melee, "Punch");
+        assert_eq!(spec.anim_death, Some("Death"));
         assert_eq!(spec.anim_weapon, None);
         assert_eq!(spec.weapon_node, None);
         let alias = mesh_spec("TribalVeteran").expect("TribalVeteran");
@@ -309,6 +326,44 @@ mod tests {
             model.find_clip(spec.anim_melee).is_some(),
             "Punch missing on yeti"
         );
+    }
+
+    #[test]
+    fn anim_death_names_match_glb_or_none() {
+        for (id, want) in [
+            ("orc", Some("Death")),
+            ("tribal", Some("Death")),
+            ("orc_skull", Some("Death")),
+            ("wolf", Some("Death")),
+            ("skeleton_warrior", Some("Death_A")),
+            ("skeleton_minion", Some("Death_A")),
+            ("skeleton_mage", Some("Death_A")),
+            ("yeti", Some("Death")),
+            ("demon", Some("Death")),
+            ("blue_demon", Some("Death")),
+            ("tribal_veteran", Some("Death")),
+            ("bandit", None),
+        ] {
+            let spec = mesh_spec(id).expect(id);
+            assert_eq!(spec.anim_death, want, "{id}");
+            let Some(clip) = spec.anim_death else {
+                continue;
+            };
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(spec.source);
+            let root = path.parent().unwrap();
+            let model = engine::anim::AnimatedModel::load_with(
+                &path,
+                root,
+                &engine::EngineLimits::default(),
+            )
+            .unwrap_or_else(|err| panic!("{id} glb load: {err}"));
+            assert!(
+                model.find_clip(clip).is_some(),
+                "{id} missing death clip {clip}"
+            );
+        }
     }
 
     #[test]
