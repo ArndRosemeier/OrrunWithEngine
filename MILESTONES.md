@@ -30,7 +30,7 @@ Later stamps (not this close): berry theft, ford, silk yard, cut landing, Ash Ho
 
 ## M5 Path to 20 - NEXT
 
-Remaining roster from packs we have: Yeti, Demon, BlueDemon, tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
+Yeti L6 Punch fixture SHIP `2ef0de5` (Playtester PASS + Reviewer). Slam tell HOLD (no clip). Remaining: Demon, BlueDemon, tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
 
 ## M6 Village life 2 — LATER
 
