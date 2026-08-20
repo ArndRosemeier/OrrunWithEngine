@@ -46,4 +46,6 @@ Hotbar CD radial sweep SHIP: radial pie on Strike, not a curtain. Playtester PAS
 
 Cast bar SHIP: Ember remaining-time bar above the hotbar. Pie left alone. Playtester PASS + Reviewer SHIP `cast_bar.png` on `c8403d7`.
 
+Incoming HP ghost SHIP: red leftover on the 160px bar. Pie/pip/cast bar unchanged. Playtester PASS + Reviewer SHIP `incoming.png` on `9bd8900`.
+
 Con color / status icons / nameplates still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
