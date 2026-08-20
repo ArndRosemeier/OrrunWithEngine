@@ -258,11 +258,6 @@ impl CombatLayer {
         Ok(model)
     }
 
-    #[allow(dead_code)]
-    fn wolf_model(&mut self) -> EngineResult<Arc<AnimatedModel>> {
-        self.model_for("crawler_spider_wolf")
-    }
-
     /// Visible fixture meshes on the live hostiles. Faces the player.
     ///
     /// Each hostile uses `catalog::mesh_spec(mob_id)`. Wolf stays
@@ -1093,11 +1088,6 @@ pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
     }
 }
 
-fn load_wolf_model() -> EngineResult<Arc<AnimatedModel>> {
-    load_combat_model("crawler_spider_wolf")
-}
-
-
 /// Headless live lock+auto of the L1 Martial fixture wolf. First mitigated hit is 11.
 pub fn first_fixture_auto_hit() -> i32 {
     let mut combat = WorldCombat::specialist(1, Discipline::Martial);
@@ -1304,7 +1294,7 @@ mod tests {
         let catalog = FaunaCatalog::load().expect("fauna catalog");
         let spec = catalog.spec("wolf");
         assert_eq!(spec.source, "wolf/wolf.gltf");
-        let model = load_wolf_model().expect("wolf.gltf via AnimatedModel");
+        let model = load_combat_model("crawler_spider_wolf").expect("wolf.gltf via AnimatedModel");
         assert!(model.find_clip(&spec.anim_idle).is_some());
     }
 
