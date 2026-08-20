@@ -115,8 +115,12 @@ fn pin_keepout_m(pin: &SettlementPin) -> f64 {
     settle + f64::from(SITE_HAMLET_PAD_M)
 }
 
+fn hamlet_pad_blocks(p: GlobalXZ, hamlets: &[HamletStand]) -> bool {
+    hamlets.iter().any(|h| h.covers(p, SITE_HAMLET_PAD_M))
+}
+
 fn hamlet_blocks(p: GlobalXZ, hamlets: &[HamletStand], pins: &[SettlementPin]) -> bool {
-    if hamlets.iter().any(|h| h.covers(p, SITE_HAMLET_PAD_M)) {
+    if hamlet_pad_blocks(p, hamlets) {
         return true;
     }
     pins.iter().any(|pin| pin.at.distance(p) < pin_keepout_m(pin))
@@ -442,7 +446,9 @@ pub fn spawn_site_props(
     let catalog = kit::catalog();
     let world_seed = surface.world_seed();
     for site in sites {
+        let before = ids.len();
         let ground = surface.column(site.at).ground();
+        let one = (|| -> EngineResult<()> {
         match site.kind {
             SiteKind::TakenCairn => {
                 for (rel, dx, dz, yaw) in CAIRN_ROCKS {
@@ -497,6 +503,14 @@ pub fn spawn_site_props(
                         GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + item.place.yaw_degrees);
                     ids.push(world.spawn_anchored(mesh, place)?);
                 }
+            }
+        }
+        Ok(())
+        })();
+        match one {
+            Ok(()) => {}
+            Err(_) => {
+                ids.truncate(before);
             }
         }
     }

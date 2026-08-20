@@ -1437,6 +1437,7 @@ impl WorldSession {
                 .map(SettlementLayer::hamlets)
                 .unwrap_or(&[]);
             let sites = super::sites::plan_overland_sites(&self.surface, pins, hamlets);
+            super::sites::clear_overland_sites(&mut self.combat);
             super::sites::seat_overland_sites(&mut self.combat, &sites);
             super::sites::despawn_site_props(world, &mut self.site_prop_ids);
             self.site_prop_ids =
@@ -1445,12 +1446,23 @@ impl WorldSession {
             self.roster_pins_seated = true;
             return Ok(true);
         }
+        let want = self.overland_sites.len() * 2;
+        let have = self
+            .combat
+            .hostiles
+            .iter()
+            .filter(|h| super::sites::is_bandit_id(&h.mob_id) && h.alive)
+            .count();
+        if have < want {
+            super::sites::clear_overland_sites(&mut self.combat);
+            super::sites::seat_overland_sites(&mut self.combat, &self.overland_sites);
+        }
         if self.site_prop_ids.is_empty() && !self.overland_sites.is_empty() {
             self.site_prop_ids =
                 super::sites::spawn_site_props(world, &self.surface, &self.overland_sites)?;
             return Ok(true);
         }
-        Ok(false)
+        Ok(have < want)
     }
 
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {

@@ -326,31 +326,35 @@ impl CombatLayer {
         const WOLF_MESH_BEHIND_M: f64 = 2.55;
         const ORC_MESH_BEHIND_M: f64 = 1.6;
         for (i, h) in combat.hostiles.iter_mut().enumerate() {
-            let spec = mesh_spec(&h.mob_id).ok_or_else(|| {
-                EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
-            })?;
-            let model = self.model_for(&h.mob_id)?;
-            let y = feet_y.get(i).copied().unwrap_or(0.0);
-            let behind = if is_wolf_mesh(&h.mob_id) {
-                WOLF_MESH_BEHIND_M
-            } else {
-                ORC_MESH_BEHIND_M
-            };
-            let pos = GlobalPosition::at(h.x + ax * behind, y, h.z + az * behind);
-            let render = world.to_render(pos)?;
-            let place = Place::at(render.x, render.y, render.z)?
-                .yaw_deg(yaw)?
-                .scale(1.0)?;
-            let id = world.spawn_animated_shared(model.clone(), place)?;
-            if model.find_clip(spec.anim_idle).is_some() {
-                world.play_animation(id, spec.anim_idle)?;
-                if is_wolf_mesh(&h.mob_id) {
-                    world.set_animation_speed(id, 0.65)?;
+            let result = (|| -> EngineResult<()> {
+                let spec = mesh_spec(&h.mob_id).ok_or_else(|| {
+                    EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
+                })?;
+                let model = self.model_for(&h.mob_id)?;
+                let y = feet_y.get(i).copied().unwrap_or(0.0);
+                let behind = if is_wolf_mesh(&h.mob_id) {
+                    WOLF_MESH_BEHIND_M
+                } else {
+                    ORC_MESH_BEHIND_M
+                };
+                let pos = GlobalPosition::at(h.x + ax * behind, y, h.z + az * behind);
+                let render = world.to_render(pos)?;
+                let place = Place::at(render.x, render.y, render.z)?
+                    .yaw_deg(yaw)?
+                    .scale(1.0)?;
+                let id = world.spawn_animated_shared(model.clone(), place)?;
+                if model.find_clip(spec.anim_idle).is_some() {
+                    world.play_animation(id, spec.anim_idle)?;
+                    if is_wolf_mesh(&h.mob_id) {
+                        world.set_animation_speed(id, 0.65)?;
+                    }
                 }
-            }
-            h.entity = Some(id);
-            self.mesh_ids.push(id);
-            self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
+                h.entity = Some(id);
+                self.mesh_ids.push(id);
+                self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
+                Ok(())
+            })();
+            let _ = result;
         }
         Ok(())
     }
