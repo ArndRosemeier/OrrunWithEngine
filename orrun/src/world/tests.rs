@@ -359,6 +359,7 @@ fn a_hamlet_split_across_a_river_gets_a_footbridge() {
                 GlobalXZ::at(f64::from(left.x), f64::from(left.y)),
                 GlobalXZ::at(f64::from(right.x), f64::from(right.y)),
             ],
+            cut: Vec::new(),
         };
         if let Some(found) = super::paths::hamlet_span(&surface, &ponds, &hamlet) {
             span = Some(found);

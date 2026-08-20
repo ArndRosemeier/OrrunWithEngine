@@ -1261,6 +1261,7 @@ mod tests {
             at: GlobalXZ::at(0.0, 0.0),
             radius: 20.0,
             houses: vec![],
+            cut: Vec::new(),
         };
         let pin = SettlementPin {
             id: 1,
@@ -1287,6 +1288,7 @@ mod tests {
             at: GlobalXZ::at(0.0, 0.0),
             radius: 20.0,
             houses: vec![],
+            cut: Vec::new(),
         };
         let pins = [
             SettlementPin {

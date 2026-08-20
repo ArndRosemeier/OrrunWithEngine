@@ -1573,6 +1573,7 @@ mod tests {
             at,
             radius: 20.0,
             houses: vec![at],
+            cut: Vec::new(),
         };
         let hamlets = [hamlet];
         let empty = BuildingIndex::new(Vec::new());

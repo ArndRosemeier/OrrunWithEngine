@@ -44,8 +44,8 @@ const MAX_TILES_PER_FRAME: usize = 16;
 /// Tile uploads per loading frame, so the first street is up before walking.
 const MAX_TILES_LOADING: usize = 64;
 /// Keep house footprints off the atlas road bed (half of a primary ribbon plus a wall).
-const ROAD_CLEAR_M: f32 = 4.0;
-/// Extra metres past the outermost house where the dirt ribbon still pauses.
+pub(crate) const ROAD_CLEAR_M: f32 = 4.0;
+/// Extra metres past the outermost house. Atlas dirt still pauses here; the cut ribbon does not.
 pub const HAMLET_ROAD_PAD_M: f32 = 10.0;
 /// Engine collider layer for house walls and castle curtains.
 const COLLIDER_LAYER: ColliderLayer = 2;
@@ -140,9 +140,12 @@ impl HouseDoor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HamletStand {
     pub at: GlobalXZ,
-    /// Disk that covers the packed houses, for roads to pause inside.
+    /// Disk that covers the packed houses. Atlas samples still pause inside;
+    /// the village street is the dirt cut to the well, stored on `cut`.
     pub radius: f32,
     pub houses: Vec<GlobalXZ>,
+    /// World-XZ polyline from the hamlet rim to the plaza / well.
+    pub cut: Vec<Vec2>,
 }
 
 impl HamletStand {
@@ -207,7 +210,7 @@ impl Plot for GroundPlot<'_> {
 struct Packing {
     seed: i32,
     pins: Vec<SettlementPin>,
-    plans: HashMap<i32, Plan2D>,
+    plans: HashMap<i32, (Plan2D, Vec<Vec2>)>,
     surface: Arc<ContinentalSurface>,
     ponds: Arc<PondField>,
     ground: ContactSnapshot,
@@ -218,7 +221,7 @@ struct Packing {
 }
 
 struct PackResult {
-    plans: HashMap<i32, Plan2D>,
+    plans: HashMap<i32, (Plan2D, Vec<Vec2>)>,
     cities: Vec<(i32, SeatedCity)>,
 }
 
@@ -236,7 +239,7 @@ pub struct SettlementLayer {
     seed: i32,
     seated: HashMap<i32, SeatedCity>,
     standing: Vec<Standing>,
-    plans: HashMap<i32, Plan2D>,
+    plans: HashMap<i32, (Plan2D, Vec<Vec2>)>,
     hamlets: Vec<HamletStand>,
     plot_index: Arc<BuildingIndex>,
     tiles: HashMap<TileKey, EntityId>,
@@ -621,7 +624,7 @@ impl Packing {
         let mut plans = self.plans;
         let mut cities = Vec::new();
         for pin in self.pins {
-            let plan = plans.entry(pin.id).or_insert_with(|| {
+            let (plan, cut) = plans.entry(pin.id).or_insert_with(|| {
                 layout_for(self.seed, pin, &self.surface, &self.ponds)
                     .unwrap_or_else(|err| panic!("hamlet at node {} failed: {err}", pin.id))
             });
@@ -653,6 +656,7 @@ impl Packing {
                         at: pin.at,
                         radius,
                         houses,
+                        cut: cut.clone(),
                     },
                     plots,
                     standing,
@@ -683,7 +687,7 @@ fn layout_for(
     pin: SettlementPin,
     surface: &ContinentalSurface,
     ponds: &PondField,
-) -> Result<Plan2D, HamletError> {
+) -> Result<(Plan2D, Vec<Vec2>), HamletError> {
     let mut config = layout_config(pin);
     config.seed = plan_seed(world_seed, pin.id);
     let plot = GroundPlot {
@@ -693,7 +697,191 @@ fn layout_for(
         origin: pin.at,
         roads: nearby_road_segs(surface, pin.at, config.max_settle_radius + 24.0),
     };
-    plan_on(&config, Some(&plot))
+    let mut plan = plan_on(&config, Some(&plot))?;
+    let cut = apply_road_cut(&mut plan, surface, ponds, pin, &config);
+    Ok((plan, cut))
+}
+
+/// Cut a dirt corridor from the nearest atlas road on the rim to the plaza.
+/// Deletes blocking `ShapeKind::House` OBBs. Retries once with a sideways offset
+/// if fewer than 4 dwellings remain.
+fn apply_road_cut(
+    plan: &mut Plan2D,
+    surface: &ContinentalSurface,
+    ponds: &PondField,
+    pin: SettlementPin,
+    config: &crate::hamlet::HamletLabConfig,
+) -> Vec<Vec2> {
+    let polyline = cut_polyline(plan, surface, ponds, pin, config);
+    if polyline.len() < 2 {
+        return Vec::new();
+    }
+    let original = plan.clone();
+    let first = filter_houses_on_cut(plan, pin, &polyline);
+    if first >= 4 {
+        return polyline;
+    }
+    let dir = polyline[polyline.len() - 1] - polyline[0];
+    let perp = if dir.length_squared() > 1e-8 {
+        Vec2::new(-dir.y, dir.x).normalize() * config.alley
+    } else {
+        Vec2::new(config.alley, 0.0)
+    };
+    let retry_line: Vec<Vec2> = polyline.iter().map(|p| *p + perp).collect();
+    let mut retry = original.clone();
+    let second = filter_houses_on_cut(&mut retry, pin, &retry_line);
+    let keep_retry = second >= 4 || (first < 4 && second > first);
+    if keep_retry {
+        *plan = retry;
+        retry_line
+    } else {
+        polyline
+    }
+}
+
+fn cut_polyline(
+    plan: &Plan2D,
+    surface: &ContinentalSurface,
+    ponds: &PondField,
+    pin: SettlementPin,
+    config: &crate::hamlet::HamletLabConfig,
+) -> Vec<Vec2> {
+    let origin = Vec2::new(pin.at.x as f32, pin.at.z as f32);
+    let plaza = origin + plan.plaza;
+    let dry = |p: Vec2| {
+        let at = GlobalXZ::at(f64::from(p.x), f64::from(p.y));
+        let mut column = surface.column(at);
+        ponds.carve(at, &mut column);
+        !column.is_wet()
+    };
+    let mut segs = nearby_road_segs(surface, pin.at, config.max_settle_radius + 24.0);
+    if segs.is_empty() {
+        segs = nearby_road_segs(surface, pin.at, 1200.0);
+    }
+    if segs.is_empty() {
+        for road in surface.roads() {
+            for w in road.points.windows(2) {
+                segs.push((w[0], w[1]));
+            }
+        }
+    }
+    if segs.is_empty() {
+        return Vec::new();
+    }
+    let mut best_q = None;
+    let mut best_ab = None;
+    let mut best_d = f32::MAX;
+    let mut found_dry = false;
+    for &(a, b) in &segs {
+        let q = closest_on_seg(plaza, a, b);
+        let is_dry = dry(q);
+        if found_dry && !is_dry {
+            continue;
+        }
+        let d = plaza.distance(q);
+        if is_dry && !found_dry {
+            found_dry = true;
+            best_d = d;
+            best_q = Some(q);
+            best_ab = Some((a, b));
+            continue;
+        }
+        if d < best_d {
+            best_d = d;
+            best_q = Some(q);
+            best_ab = Some((a, b));
+        }
+    }
+    let Some(q) = best_q else {
+        return Vec::new();
+    };
+    let mut to_q = q - plaza;
+    if to_q.length_squared() < 1e-6 {
+        if let Some((a, b)) = best_ab {
+            to_q = b - a;
+        }
+    }
+    if to_q.length_squared() < 1e-6 {
+        return Vec::new();
+    }
+    let rim_r = if plan.built_envelope > 1.0 {
+        plan.built_envelope
+    } else {
+        config.max_settle_radius
+    };
+    let rim = plaza + to_q.normalize() * rim_r;
+    vec![rim, plaza]
+}
+
+fn filter_houses_on_cut(plan: &mut Plan2D, pin: SettlementPin, cut: &[Vec2]) -> u32 {
+    let origin = Vec2::new(pin.at.x as f32, pin.at.z as f32);
+    let radius = ROAD_CLEAR_M * 0.5;
+    plan.shapes.retain(|shape| {
+        if shape.kind != ShapeKind::House {
+            return true;
+        }
+        if shape.catalog_id == "Well" {
+            return true;
+        }
+        let center = origin + shape.center;
+        !obb_hits_stadium(center, shape.half_size, shape.yaw, cut, radius)
+    });
+    plan.house_count = plan
+        .shapes
+        .iter()
+        .filter(|s| {
+            s.kind == ShapeKind::House
+                && spec_for(&s.catalog_id)
+                    .map(|spec| spec.is_dwelling())
+                    .unwrap_or(false)
+        })
+        .count() as u32;
+    plan.house_count
+}
+
+fn closest_on_seg(p: Vec2, a: Vec2, b: Vec2) -> Vec2 {
+    let d = b - a;
+    let len2 = d.length_squared();
+    if len2 < 1e-8 {
+        return a;
+    }
+    let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
+    a + d * t
+}
+
+fn obb_hits_stadium(center: Vec2, half: Vec2, yaw: f32, cut: &[Vec2], radius: f32) -> bool {
+    cut.windows(2)
+        .any(|w| dist_obb_seg(center, half, yaw, w[0], w[1]) <= radius)
+}
+
+fn dist_obb_seg(center: Vec2, half: Vec2, yaw: f32, a: Vec2, b: Vec2) -> f32 {
+    let (s, c) = yaw.sin_cos();
+    let to_local = |p: Vec2| {
+        let d = p - center;
+        Vec2::new(d.x * c - d.y * s, d.x * s + d.y * c)
+    };
+    dist_aabb_seg(half, to_local(a), to_local(b))
+}
+
+fn dist_aabb_seg(half: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-6 {
+        return dist_aabb_point(half, a);
+    }
+    let n = ((len / 0.25).ceil() as usize).max(1);
+    let mut best = f32::MAX;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        best = best.min(dist_aabb_point(half, a + d * t));
+    }
+    best
+}
+
+fn dist_aabb_point(half: Vec2, p: Vec2) -> f32 {
+    let dx = (p.x.abs() - half.x).max(0.0);
+    let dz = (p.y.abs() - half.y).max(0.0);
+    (dx * dx + dz * dz).sqrt()
 }
 
 fn seat_plan(
@@ -1075,6 +1263,7 @@ mod tests {
             at: GlobalXZ::at(0.0, 0.0),
             radius: 20.0,
             houses: vec![],
+            cut: Vec::new(),
         };
         let inside = GlobalXZ::at(0.0, 5.0);
         assert!(
@@ -1151,5 +1340,78 @@ mod tests {
         assert_ne!(house, castle);
         assert!(!house.castle);
         assert!(castle.castle);
+    }
+
+    #[test]
+    fn a_house_obb_on_the_cut_is_a_hit() {
+        let center = Vec2::new(0.0, 0.0);
+        let half = Vec2::new(4.0, 3.0);
+        let cut = [Vec2::new(-10.0, 0.0), Vec2::new(10.0, 0.0)];
+        assert!(obb_hits_stadium(center, half, 0.0, &cut, ROAD_CLEAR_M * 0.5));
+        let far = [Vec2::new(-10.0, 20.0), Vec2::new(10.0, 20.0)];
+        assert!(!obb_hits_stadium(center, half, 0.0, &far, ROAD_CLEAR_M * 0.5));
+    }
+
+    #[test]
+    fn filter_houses_keeps_castle_and_drops_a_blocker() {
+        let mut plan = Plan2D {
+            shapes: vec![
+                Shape {
+                    kind: ShapeKind::Castle,
+                    center: Vec2::new(30.0, 0.0),
+                    half_size: Vec2::new(8.0, 8.0),
+                    yaw: 0.0,
+                    radius: 8.0,
+                    catalog_id: "castle_keep_8x6".into(),
+                    polygon: Vec::new(),
+                },
+                Shape {
+                    kind: ShapeKind::House,
+                    center: Vec2::ZERO,
+                    half_size: Vec2::new(4.0, 3.0),
+                    yaw: 0.0,
+                    radius: 4.0,
+                    catalog_id: "Cottage_A".into(),
+                    polygon: Vec::new(),
+                },
+                Shape {
+                    kind: ShapeKind::House,
+                    center: Vec2::new(0.0, 18.0),
+                    half_size: Vec2::new(4.0, 3.0),
+                    yaw: 0.0,
+                    radius: 4.0,
+                    catalog_id: "Cottage_A".into(),
+                    polygon: Vec::new(),
+                },
+            ],
+            plaza: Vec2::ZERO,
+            house_count: 2,
+            ..Plan2D::default()
+        };
+        let pin = SettlementPin {
+            id: 1,
+            at: GlobalXZ::at(0.0, 0.0),
+            tier: 0,
+            population: 8,
+        };
+        let cut = [Vec2::new(-8.0, 0.0), Vec2::new(8.0, 0.0)];
+        filter_houses_on_cut(&mut plan, pin, &cut);
+        assert_eq!(
+            plan.shapes.iter().filter(|s| s.kind == ShapeKind::Castle).count(),
+            1
+        );
+        assert!(
+            !plan
+                .shapes
+                .iter()
+                .any(|s| s.kind == ShapeKind::House && s.center == Vec2::ZERO),
+            "house on the cut should be deleted"
+        );
+        assert!(
+            plan.shapes
+                .iter()
+                .any(|s| s.kind == ShapeKind::House && s.center.y > 10.0),
+            "off-cut house should stay"
+        );
     }
 }

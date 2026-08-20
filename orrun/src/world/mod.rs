@@ -28,6 +28,7 @@ mod session;
 mod settlement;
 mod surface;
 mod travel;
+mod villagers;
 mod world_stream;
 
 #[cfg(test)]
@@ -52,7 +53,8 @@ pub use scatter::{
     Fall, GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer, PROP_CLASSES,
 };
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
-pub use settlement::{HamletStand, SettlementError, SettlementLayer};
+pub use settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
+pub use villagers::VillagerLayer;
 pub use surface::{
     classify_settlement, ContinentalSurface, DungeonPin, SettlementPin, SurfaceColumn,
     SurfaceError, SurfaceMaterial, TerrainLayers, WaterBody, MIN_WATER_DEPTH,

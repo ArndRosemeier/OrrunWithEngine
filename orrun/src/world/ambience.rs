@@ -485,6 +485,7 @@ mod tests {
             at: GlobalXZ::at(0.0, 0.0),
             radius: 20.0,
             houses: Vec::new(),
+            cut: Vec::new(),
         };
         let hamlets = [hamlet];
         let inside = GlobalXZ::at(5.0, 0.0);

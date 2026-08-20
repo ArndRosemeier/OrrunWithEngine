@@ -21,7 +21,7 @@ use orrun::controls::{self, Action, PressedActions};
 use orrun::hud;
 use orrun::settings::Settings;
 use orrun::world::{
-    install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, Locomotion,
+    install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, HousePlot, Locomotion,
     Ambience, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
 };
 use serde_json::{json, Value};
@@ -67,6 +67,8 @@ fn main() {
         "controls.json",
         "combat_body.json",
         "combat_body.png",
+        "village.json",
+        "village.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -306,6 +308,8 @@ enum Phase {
     CombatOrcLive,
     CombatBodyLive,
     ControlsLive,
+    VillageTravel,
+    VillageLive,
     NextHook,
     Done,
 }
@@ -572,6 +576,30 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
+            Phase::VillageTravel => {
+                input.skip_travel = true;
+            }
+            Phase::VillageLive => {
+                if self.session.locomotion() != Some(Locomotion::Fly) {
+                    input.toggle_fly = true;
+                }
+                if let (Some(stand), Some(pos)) = (
+                    village_camera_stand(&self.session),
+                    self.session.player_position(),
+                ) {
+                    let dx = (stand.x - pos.x) as f32;
+                    let dz = (stand.z - pos.z) as f32;
+                    let dy = (stand.y - pos.y) as f32;
+                    let mut direction = Vec3::new(dx, dy, dz);
+                    if direction.length_squared() > 1e-6 {
+                        direction = direction.normalize();
+                    } else {
+                        direction = Vec3::Y;
+                    }
+                    input.direction = direction;
+                    input.step_m = FLY_SPEED * dt;
+                }
+            }
             _ => {}
         }
         input
@@ -619,6 +647,8 @@ impl Driver {
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::ControlsLive => self.tick_controls(world, frame),
+            Phase::VillageTravel => self.tick_village_travel(world, frame),
+            Phase::VillageLive => self.tick_village_live(world, frame),
             Phase::NextHook => {
                 self.hook_i += 1;
                 self.start_current_hook(world, frame);
@@ -645,6 +675,7 @@ impl Driver {
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
             "controls" => self.start_controls(world, frame),
+            "village" => self.start_village(world, frame),
             "faction_overlay" => {
                 self.write_json(&name, json!({ "status": "absent" }));
                 self.reports
@@ -875,6 +906,17 @@ impl Driver {
             self.fail_current("dungeon never went live");
             self.advance_after_fail(world, frame);
         }
+    }
+
+    fn aim_village_cut(&mut self) {
+        let Some((eye, target)) = village_look(&self.session) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn aim_pitch(&mut self, target: f32) {
@@ -2175,6 +2217,196 @@ impl Driver {
         }
     }
 
+    fn start_village(&mut self, world: &mut World, frame: &Frame) {
+        let from = self
+            .session
+            .player_position()
+            .map(|p| p.horizontal())
+            .or_else(|| self.session.spawn().map(|s| s.ground()))
+            .unwrap_or(GlobalXZ::at(0.0, 0.0));
+        let Some(pin) = self.session.nearest_tier0_pin(from) else {
+            self.fail_current("village: no tier-0 pin on this atlas");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let dist = pin.at.distance(from);
+        if dist > 80.0 || self.session.state() != SessionState::World {
+            match WorldEntryRequest::at_global(self.session.surface().bounds(), pin.at) {
+                Ok(request) => match self.session.begin_entry(world, request) {
+                    Ok(()) => {
+                        self.phase = Phase::VillageTravel;
+                        self.phase_t0 = frame.time;
+                    }
+                    Err(err) => {
+                        self.fail_current(&format!("village entry failed: {err}"));
+                        self.advance_after_fail(world, frame);
+                    }
+                },
+                Err(err) => {
+                    self.fail_current(&format!("village pin is not a valid entry: {err}"));
+                    self.advance_after_fail(world, frame);
+                }
+            }
+        } else {
+            self.phase = Phase::VillageLive;
+            self.phase_t0 = frame.time;
+        }
+    }
+
+    fn tick_village_travel(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() == SessionState::World {
+            self.phase = Phase::VillageLive;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+            self.fail_current("village: timed out travelling to the hamlet");
+            self.advance_after_fail(world, frame);
+        }
+    }
+
+    fn tick_village_live(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("village: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let stand = pos.horizontal();
+        if !self.session.stream().required_ready(stand) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("village: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(hamlet) = self.session.nearest_tier0_hamlet() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("village: no seated tier-0 hamlet");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        if hamlet.cut.len() < 2 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("village: seated hamlet has no cut");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let dwelling_count = hamlet.houses.len();
+        let cut: Vec<glam::Vec2> = hamlet.cut.clone();
+        let _well = hamlet.at;
+        let ribbon_faces = self.session.ribbon_faces();
+        let human_count = self.session.village_human_mesh_count(world);
+        let human_on_corridor = self.session.village_human_on_corridor();
+        let houses = self.session.village_house_plots();
+        if dwelling_count < 4
+            || ribbon_faces == 0
+            || !self.session.has_ribbon_mesh()
+            || human_count < 5
+            || !human_on_corridor
+        {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                let why = if ribbon_faces == 0 || !self.session.has_ribbon_mesh() {
+                    format!(
+                        "HOLD: village ribbon missing (faces={ribbon_faces} mesh={})",
+                        self.session.has_ribbon_mesh()
+                    )
+                } else if dwelling_count < 4 {
+                    format!("HOLD: village has {dwelling_count} dwellings")
+                } else if human_count < 5 {
+                    format!("HOLD: village humans {human_count} (want >=5 with a mesh)")
+                } else {
+                    "HOLD: no human on the corridor".into()
+                };
+                self.fail_current(&why);
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+
+        self.aim_village_cut();
+        let Some(cam) = village_camera_stand(&self.session) else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("HOLD: village cut has no dry sample outside a house");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let horiz = stand.distance(GlobalXZ::at(cam.x, cam.z));
+        let high_enough = pos.y >= cam.y - 8.0;
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let looking = village_look(&self.session).is_some_and(|(eye, target)| {
+            view_angle_degrees(eye, yaw, pitch, target) < 16.0
+        });
+        if horiz > 10.0 || !high_enough || !looking {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "village: camera never sat above the cut (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
+                    pos.y
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+
+        let samples = sample_cut_metres(&cut, 1.0);
+        let blocked: Vec<usize> = samples
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let xz = GlobalXZ::at(f64::from(p.x), f64::from(p.y));
+                houses.iter().any(|h: &HousePlot| h.contains_xz(xz))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !blocked.is_empty() {
+            self.fail_current(&format!(
+                "village: {} cut samples sit inside a house OBB",
+                blocked.len()
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.village_has_well() {
+            self.fail_current("village: well missing");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+
+        self.write_json(
+            "village",
+            json!({
+                "status": "ok",
+                "cut_len": cut.len(),
+                "cut_samples": samples.len(),
+                "cut_blocked": 0,
+                "dwelling_count": dwelling_count,
+                "well": true,
+                "ribbon_faces": ribbon_faces,
+                "human_count": human_count,
+                "human_on_corridor": human_on_corridor,
+                "pose": {
+                    "x": pos.x,
+                    "y": pos.y,
+                    "z": pos.z,
+                    "yaw_degrees": self.session.player_yaw_degrees(),
+                    "pitch_degrees": pitch,
+                },
+            }),
+        );
+        self.ok_hook("village");
+        world.mark_ready();
+        self.queue_shot(world, frame, "village");
+        self.phase = Phase::NextHook;
+    }
+
     fn write_json(&self, name: &str, value: Value) {
         let path = self.shots.join(format!("{name}.json"));
         fs::write(
@@ -2231,6 +2463,23 @@ impl Driver {
         .expect("report.json");
         world.request_exit();
     }
+}
+
+fn sample_cut_metres(cut: &[glam::Vec2], step: f32) -> Vec<glam::Vec2> {
+    let mut out = Vec::new();
+    if cut.len() < 2 {
+        return out;
+    }
+    for w in cut.windows(2) {
+        let d = w[1] - w[0];
+        let len = d.length();
+        let n = ((len / step).ceil() as usize).max(1);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            out.push(w[0] + d * t);
+        }
+    }
+    out
 }
 
 fn walk_toward(from: GlobalXZ, to: GlobalXZ, dt: f32) -> WalkInput {
@@ -2417,6 +2666,60 @@ fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
         .unwrap_or(pos.y as f32);
     let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
     let target = Vec3::new(mid_x as f32, ground + 0.85, mid_z as f32);
+    Some((eye, target))
+}
+
+fn village_bank_xz(session: &WorldSession) -> Option<GlobalXZ> {
+    let cut = session.village_cut();
+    if cut.len() < 2 {
+        return None;
+    }
+    let houses = session.village_house_plots();
+    let a = cut[0];
+    let b = cut[cut.len() - 1];
+    let mut best: Option<GlobalXZ> = None;
+    let mut best_score = f32::MAX;
+    for i in 0..=80 {
+        let t = i as f32 / 80.0;
+        let p = a.lerp(b, t);
+        let xz = GlobalXZ::at(f64::from(p.x), f64::from(p.y));
+        if session.surface().is_wet(xz) {
+            continue;
+        }
+        if houses.iter().any(|h| h.contains_xz(xz)) {
+            continue;
+        }
+        let score = (t - 0.55).abs();
+        if score < best_score {
+            best_score = score;
+            best = Some(xz);
+        }
+    }
+    best
+}
+
+fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {
+    let hamlet = session.nearest_tier0_hamlet()?;
+    let at = session
+        .village_corridor_human()
+        .map(|p| p.horizontal())
+        .or_else(|| village_bank_xz(session))?;
+    let contact = session.contact_height(at).or_else(|| session.contact_height(hamlet.at))?;
+    Some(GlobalPosition::at(at.x, f64::from(contact + 12.0), at.z))
+}
+
+fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
+    let person = session.village_corridor_human();
+    let at = person
+        .map(|p| p.horizontal())
+        .or_else(|| village_bank_xz(session))?;
+    let pos = session.player_position()?;
+    let ground = person
+        .map(|p| p.y as f32)
+        .or_else(|| session.contact_height(at))
+        .unwrap_or(pos.y as f32);
+    let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+    let target = Vec3::new(at.x as f32, ground + 0.9, at.z as f32);
     Some((eye, target))
 }
 

@@ -57,6 +57,11 @@ impl HousePlot {
         lx.abs() <= self.half_x + pad && lz.abs() <= self.half_z + pad
     }
 
+    /// True when `p` is inside the dwelling OBB (no pad).
+    pub fn contains_xz(self, p: GlobalXZ) -> bool {
+        self.contains(p, 0.0)
+    }
+
     /// True when a prop would stand inside the house or against the walls.
     pub fn blocks_prop(self, p: GlobalXZ) -> bool {
         self.contains(p, PROP_CLEAR_M)

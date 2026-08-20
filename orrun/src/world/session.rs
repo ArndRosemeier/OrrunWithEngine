@@ -37,7 +37,9 @@ use super::look::install_daylight;
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
-use super::settlement::{HamletStand, SettlementError, SettlementLayer};
+use super::settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
+use super::villagers::VillagerLayer;
+use super::footprint::HousePlot;
 use super::surface::ContinentalSurface;
 use super::travel::{
     travel_view, ContinentProxySpec, TravelPhase, TravelSource, TravelTimings, TravelView,
@@ -312,6 +314,8 @@ pub struct WorldSession {
     paths: Option<PathLayer>,
     /// Near-player wildlife, once the animal meshes have been loaded.
     fauna: Option<FaunaLayer>,
+    /// Clipped humans in seated tier-0 hamlets.
+    villagers: Option<VillagerLayer>,
     /// Swinging house leaves and the one live portal interior.
     doors: DoorLayer,
     /// Atlas dungeon mouths: pits, background generate, floor hatches.
@@ -352,6 +356,7 @@ impl WorldSession {
             settlements: None,
             paths: None,
             fauna: None,
+            villagers: None,
             doors: DoorLayer::new(),
             dungeons: None,
             state: SessionState::Atlas,
@@ -938,6 +943,9 @@ impl WorldSession {
         if let Some(fauna) = self.fauna.as_mut() {
             fauna.clear(world)?;
         }
+        if let Some(villagers) = self.villagers.as_mut() {
+            villagers.clear(world)?;
+        }
         if let Some(dungeons) = self.dungeons.as_mut() {
             dungeons.clear(world)?;
         }
@@ -1113,6 +1121,7 @@ impl WorldSession {
                     Some(SettlementLayer::install(world, self.surface.world_seed())?);
                 self.paths = Some(PathLayer::new());
                 self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
+                self.villagers = Some(VillagerLayer::new());
                 self.dungeons = Some(DungeonLayer::install());
             }
             if let Some(dungeons) = self.dungeons.as_mut() {
@@ -1242,6 +1251,27 @@ impl WorldSession {
             if fauna.busy() {
                 return Ok(false);
             }
+        }
+        if let Some(villagers) = self.villagers.as_mut() {
+            let hamlets = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::hamlets)
+                .unwrap_or(&[]);
+            let doors = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::doors)
+                .unwrap_or(&[]);
+            villagers.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                hamlets,
+                doors,
+                plots.plots(),
+                0.0,
+            )?;
         }
         let Some(ground) = self.stream.contact_height(focus) else {
             return Err(SessionError::MissingContact {
@@ -1612,6 +1642,22 @@ impl WorldSession {
             )?;
             world.hitch_span("paths", hitch_ms(t), format!("hamlets={}", hamlets.len()));
         }
+        if let Some(villagers) = self.villagers.as_mut() {
+            let doors = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::doors)
+                .unwrap_or(&[]);
+            villagers.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                hamlets,
+                doors,
+                plots.plots(),
+                input.dt,
+            )?;
+        }
         if let Some(fauna) = self.fauna.as_mut() {
             let t = Instant::now();
             fauna.follow(
@@ -1929,6 +1975,119 @@ impl WorldSession {
     /// What the last sow of ground cover took on its own thread.
     pub fn sow_ms(&self) -> f32 {
         self.scatter.as_ref().map_or(0.0, ScatterLayer::sow_ms)
+    }
+
+    /// Nearest seated tier-0 hamlet to the player (or the first seated one).
+    pub fn nearest_tier0_hamlet(&self) -> Option<&HamletStand> {
+        let focus = self
+            .player
+            .map(|p| p.position.horizontal())
+            .or_else(|| self.spawn.map(|s| s.ground()))?;
+        let mut best: Option<(&HamletStand, f64)> = None;
+        for hamlet in self.hamlets() {
+            if !self.pin_is_tier0(hamlet.at) {
+                continue;
+            }
+            let d = hamlet.at.distance(focus);
+            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((hamlet, d));
+            }
+        }
+        best.map(|(h, _)| h)
+    }
+
+    pub fn village_well(&self) -> Option<GlobalXZ> {
+        self.nearest_tier0_hamlet().map(|h| h.at)
+    }
+
+    pub fn village_cut(&self) -> &[glam::Vec2] {
+        self.nearest_tier0_hamlet()
+            .map(|h| h.cut.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn village_dwelling_count(&self) -> usize {
+        self.nearest_tier0_hamlet()
+            .map(|h| h.houses.len())
+            .unwrap_or(0)
+    }
+
+    pub fn village_has_well(&self) -> bool {
+        self.nearest_tier0_hamlet().is_some()
+    }
+
+    pub fn village_human_count(&self) -> usize {
+        self.villagers.as_ref().map_or(0, VillagerLayer::human_count)
+    }
+
+    pub fn village_human_mesh_count(&self, world: &World) -> usize {
+        self.villagers
+            .as_ref()
+            .map_or(0, |v| v.mesh_count(world))
+    }
+
+    pub fn village_human_on_corridor(&self) -> bool {
+        self.village_corridor_human().is_some()
+    }
+
+    pub fn village_corridor_human(&self) -> Option<engine::space::GlobalPosition> {
+        let cut = self.village_cut();
+        self.villagers.as_ref().and_then(|v| v.corridor_human(cut))
+    }
+
+    pub fn ribbon_faces(&self) -> usize {
+        self.paths.as_ref().map_or(0, |p| p.ribbon_faces())
+    }
+
+    pub fn has_ribbon_mesh(&self) -> bool {
+        self.paths.as_ref().is_some_and(|p| p.has_ribbon_mesh())
+    }
+
+    pub fn village_house_plots(&self) -> Vec<HousePlot> {
+        let Some(hamlet) = self.nearest_tier0_hamlet() else {
+            return Vec::new();
+        };
+        self.settlements
+            .as_ref()
+            .map(|s| {
+                s.plots()
+                    .iter()
+                    .filter_map(|p| match p {
+                        super::footprint::BuildingPlot::House(h) if hamlet.covers(h.at, 0.0) => {
+                            Some(*h)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn village_doors(&self) -> &[HouseDoor] {
+        self.settlements
+            .as_ref()
+            .map(SettlementLayer::doors)
+            .unwrap_or(&[])
+    }
+
+    fn pin_is_tier0(&self, at: GlobalXZ) -> bool {
+        self.surface.settlements().iter().any(|pin| {
+            pin.tier <= 1 && (pin.at.x - at.x).abs() < 0.75 && (pin.at.z - at.z).abs() < 0.75
+        })
+    }
+
+    /// Closest hamlet/village pin (tier 0, or atlas leftover tier 1).
+    pub fn nearest_tier0_pin(&self, from: GlobalXZ) -> Option<super::surface::SettlementPin> {
+        self.surface
+            .settlements()
+            .iter()
+            .filter(|p| p.tier <= 1)
+            .min_by(|a, b| {
+                a.at.distance(from)
+                    .partial_cmp(&b.at.distance(from))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
     }
 }
 

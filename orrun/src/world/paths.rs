@@ -17,7 +17,7 @@ use engine::world::{EntityId, World};
 use glam::{Vec2, Vec3};
 
 use super::ponds::PondField;
-use super::settlement::HamletStand;
+use super::settlement::{HamletStand, ROAD_CLEAR_M};
 use super::surface::{ContinentalSurface, SurfaceColumn};
 use super::world_stream::NEAR;
 use crate::hamlet::WATERLINE_MARGIN;
@@ -108,6 +108,8 @@ pub struct PathLayer {
     pending: Option<Pending>,
     /// Hamlets the in-flight or last bake was started against.
     hamlets: Vec<HamletStand>,
+    /// Face count of the last installed ribbon mesh (0 if nothing was drawn).
+    ribbon_faces: usize,
 }
 
 impl Default for PathLayer {
@@ -125,6 +127,7 @@ impl PathLayer {
             resident_chunks: 0,
             pending: None,
             hamlets: Vec::new(),
+            ribbon_faces: 0,
         }
     }
 
@@ -137,6 +140,7 @@ impl PathLayer {
         self.centre = None;
         self.resident_chunks = 0;
         self.hamlets.clear();
+        self.ribbon_faces = 0;
         Ok(())
     }
 
@@ -150,6 +154,19 @@ impl PathLayer {
             }
         }
         best
+    }
+
+    /// Faces in the last installed path mesh. Zero means nothing was drawn.
+    pub fn ribbon_faces(&self) -> usize {
+        self.ribbon_faces
+    }
+
+    pub fn ribbon_entity(&self) -> Option<EntityId> {
+        self.entity
+    }
+
+    pub fn has_ribbon_mesh(&self) -> bool {
+        self.entity.is_some() && self.ribbon_faces > 0
     }
 
     pub fn follow(
@@ -208,6 +225,7 @@ impl PathLayer {
             world.despawn(id);
         }
         self.decks = bake.decks;
+        self.ribbon_faces = bake.mesh.face_count();
         if bake.mesh.face_count() == 0 {
             return Ok(());
         }
@@ -264,6 +282,20 @@ fn bake_paths(
     }
 
     for hamlet in hamlets {
+        if hamlet.cut.len() >= 2 {
+            let run = drape_cut(surface, ponds, &hamlet.cut);
+            if run.len() >= 2 {
+                add_ribbon(
+                    &mut mesh,
+                    origin,
+                    &run,
+                    ROAD_CLEAR_M,
+                    road_dirt(),
+                    surface,
+                    ponds,
+                )?;
+            }
+        }
         if let Some(span) = hamlet_span(surface, ponds, hamlet) {
             if span.kind == SpanKind::Bridge && !near_deck(&decks, &span) {
                 add_bridge(&mut mesh, origin, &span, surface, ponds)?;
@@ -580,6 +612,22 @@ fn in_hamlet(p: Vec2, hamlets: &[HamletStand]) -> bool {
         let c = Vec2::new(h.at.x as f32, h.at.z as f32);
         p.distance(c) < h.radius
     })
+}
+
+fn drape_cut(surface: &ContinentalSurface, ponds: &PondField, cut: &[Vec2]) -> Vec<Vec3> {
+    cut.iter()
+        .map(|p| {
+            let col = column_at(surface, ponds, *p);
+            Vec3::new(p.x, col.ground() + ROAD_LIFT_M, p.y)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn cut_centreline(cut: &[Vec2], ground: f32) -> Vec<Vec3> {
+    cut.iter()
+        .map(|p| Vec3::new(p.x, ground + ROAD_LIFT_M, p.y))
+        .collect()
 }
 
 fn project_t(p: Vec2, a: Vec2, b: Vec2) -> Option<f32> {
@@ -1222,28 +1270,36 @@ mod tests {
     }
 
     #[test]
-    fn a_road_pauses_inside_a_hamlet() {
-        let samples: Vec<Sample> = (0..20).map(|i| samp(i as f32 * 6.0, -2.0, 10.0)).collect();
+    fn a_cut_ribbon_reaches_the_well() {
+        let plaza = Vec2::new(54.0, 0.0);
+        let rim = Vec2::new(20.0, 0.0);
         let hamlet = HamletStand {
             at: GlobalXZ::at(54.0, 0.0),
             radius: 18.0,
             houses: Vec::new(),
+            cut: vec![rim, plaza],
         };
-        let runs = dry_runs(&samples, &[], &[hamlet]);
+        assert!(hamlet.cut.len() >= 2);
+        let run = cut_centreline(&hamlet.cut, 10.0);
         assert!(
-            runs.len() >= 2,
-            "the ribbon should break through the village, got {} run(s)",
-            runs.len()
+            run.len() >= 2,
+            "cut ribbon needs a start and the well"
         );
-        for run in &runs {
-            for p in run {
-                assert!(
-                    (p.x - 54.0).abs() >= 18.0 - 0.01,
-                    "ribbon still inside the hamlet at x={}",
-                    p.x
-                );
-            }
-        }
+        let well = run.last().expect("well");
+        assert!(
+            (well.x - plaza.x).abs() < 1e-4 && (well.z - plaza.y).abs() < 1e-4,
+            "cut ribbon must reach the well at {:?}, got {:?}",
+            plaza,
+            well
+        );
+        assert!(
+            (run[0].x - rim.x).abs() < 1e-4,
+            "cut ribbon must start on the rim"
+        );
+        assert!(
+            (well.y - (10.0 + ROAD_LIFT_M)).abs() < 1e-5,
+            "cut ribbon must sit on the dirt lift"
+        );
     }
 
     #[test]
