@@ -22,13 +22,15 @@ Three L1 wolves strafe +/-1.8 m. One lock = one body. Wolf Attack still on the l
 ## M3 Bones in the dark - SHIP (2026-08-20)
 
 T2+ Brood: Warrior + 2 Minion per chamber, Punch_A on the locked mesh. One Mage_Staff pack per dungeon, not on the heart. Staff on the body. Hash `af73aec`. Playtester PASS + Reviewer SHIP.
-## M4 Overland logic - NEXT
+## M4 Overland logic - SHIP (2026-08-20)
 
-Packs sit on a site with a visible prop. First stamp: Taken Cairn + Woods Hut (bandits). Then berry theft, ford, silk yard, cut landing, Ash Hold, Sour Well. No tent/campfire mesh yet.
+Packs sit on a visible site. First stamp: Taken Cairn + Woods Hut (L5 bandits). Hut is a small square thatch-hip (straw, half-timber, gray plinth), not a hamlet longhouse. +18 m pin offset dead. Hash `e2f12ab` (hut `fec7850`). Playtester PASS + Reviewer SHIP.
 
-## M5 Path to 20 — QUEUED
+Later stamps (not this close): berry theft, ford, silk yard, cut landing, Ash Hold, Sour Well.
 
-Remaining roster from packs we have: Yeti, Demon, BlueDemon, tribal veteran. No fake bows. Hinterland bandit (male_bandit_01, Attack once) after M4.
+## M5 Path to 20 - NEXT
+
+Remaining roster from packs we have: Yeti, Demon, BlueDemon, tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
 
 ## M6 Village life 2 — LATER
 
