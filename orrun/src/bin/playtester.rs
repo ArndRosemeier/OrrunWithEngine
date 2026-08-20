@@ -914,10 +914,9 @@ impl Driver {
         };
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-        let (dyaw, _) = look_deltas(eye, target, yaw, pitch);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
         self.pending_yaw_delta = dyaw;
-        // From above the pin, not a horizon vista.
-        self.pending_pitch_delta = -50.0 - pitch;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn aim_pitch(&mut self, target: f32) {
@@ -2301,7 +2300,7 @@ impl Driver {
         }
         let dwelling_count = hamlet.houses.len();
         let cut: Vec<glam::Vec2> = hamlet.cut.clone();
-        let pin = hamlet.at;
+        let _pin = hamlet.at;
         let ribbon_faces = self.session.ribbon_faces();
         let human_count = self.session.village_human_mesh_count(world);
         let human_on_corridor = self.session.village_human_on_corridor();
@@ -2339,17 +2338,24 @@ impl Driver {
             }
             return;
         };
-        let horiz = stand.distance(pin);
-        let high_enough = pos.y >= cam.y - 10.0;
+        let Some(person) = self.session.village_corridor_human() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("HOLD: no walker on the corridor");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let horiz = stand.distance(person.horizontal());
+        let high_enough = (pos.y - cam.y).abs() < 1.6;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let looking = village_look(&self.session).is_some_and(|(eye, target)| {
-            view_angle_degrees(eye, yaw, pitch, target) < 18.0
+            view_angle_degrees(eye, yaw, pitch, target) < 16.0
         });
-        if horiz > 12.0 || !high_enough || !looking || pitch > -42.0 {
+        if horiz > 5.5 || !high_enough || !looking {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
-                    "village: camera never sat above the pin (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
+                    "village: camera never sat on a walker (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
                     pos.y
                 ));
                 self.advance_after_fail(world, frame);
@@ -2670,55 +2676,34 @@ fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     Some((eye, target))
 }
 
-fn village_bank_xz(session: &WorldSession) -> Option<GlobalXZ> {
-    let cut = session.village_cut();
-    if cut.len() < 2 {
-        return None;
-    }
-    let houses = session.village_house_plots();
-    let a = cut[0];
-    let b = cut[cut.len() - 1];
-    let mut best: Option<GlobalXZ> = None;
-    let mut best_score = f32::MAX;
-    for i in 0..=80 {
-        let t = i as f32 / 80.0;
-        let p = a.lerp(b, t);
-        let xz = GlobalXZ::at(f64::from(p.x), f64::from(p.y));
-        if session.surface().is_wet(xz) {
-            continue;
-        }
-        if houses.iter().any(|h| h.contains_xz(xz)) {
-            continue;
-        }
-        let score = (t - 0.55).abs();
-        if score < best_score {
-            best_score = score;
-            best = Some(xz);
-        }
-    }
-    best
-}
-
 fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {
-    let hamlet = session.nearest_tier0_hamlet()?;
-    let pin = hamlet.at;
-    let contact = session.contact_height(pin)?;
-    // Above the pin, looking at the land street — not sitting on the river chord.
-    Some(GlobalPosition::at(pin.x, f64::from(contact + 72.0), pin.z))
+    let person = session.village_corridor_human()?;
+    let cut = session.village_cut();
+    let at = person.horizontal();
+    let (dx, dz) = if cut.len() >= 2 {
+        let a = cut[0];
+        let b = cut[cut.len() - 1];
+        let tx = b.x - a.x;
+        let tz = b.y - a.y;
+        let len = (tx * tx + tz * tz).sqrt().max(1e-6);
+        // Three-quarter: off the road a few metres, not a top-down speck.
+        ((-tz / len) * 3.6, (tx / len) * 3.6)
+    } else {
+        (3.6, 0.0)
+    };
+    let stand = GlobalXZ::at(at.x + f64::from(dx), at.z + f64::from(dz));
+    let contact = session
+        .contact_height(stand)
+        .unwrap_or(person.y as f32);
+    Some(GlobalPosition::at(stand.x, f64::from(contact + 1.7), stand.z))
 }
 
 fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
-    let person = session.village_corridor_human();
-    let at = person
-        .map(|p| p.horizontal())
-        .or_else(|| village_bank_xz(session))?;
+    let person = session.village_corridor_human()?;
+    let at = person.horizontal();
     let pos = session.player_position()?;
-    let ground = person
-        .map(|p| p.y as f32)
-        .or_else(|| session.contact_height(at))
-        .unwrap_or(pos.y as f32);
     let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
-    let target = Vec3::new(at.x as f32, ground + 1.1, at.z as f32);
+    let target = Vec3::new(at.x as f32, person.y as f32 + 1.2, at.z as f32);
     Some((eye, target))
 }
 
