@@ -9,9 +9,13 @@
 
 use crate::combat::catalog::mesh_spec;
 use crate::combat::math::{
-    mitigation, SKULL_BOLT_DMG, SKULL_BOLT_RANGE_M, SKULL_TELE_S, TICK, WALK_MPS,
+    mitigation, MAGE_BOLT_DMG, MAGE_BOLT_RANGE_M, MAGE_TELE_S, SKULL_BOLT_DMG,
+    SKULL_BOLT_RANGE_M, SKULL_TELE_S, TICK, WALK_MPS,
 };
-use crate::combat::sheets::{orc_sheet, orc_skull_sheet, tribal_sheet, wolf_sheet, MobSheet};
+use crate::combat::sheets::{
+    orc_sheet, orc_skull_sheet, skeleton_mage_sheet, skeleton_minion_sheet,
+    skeleton_warrior_sheet, tribal_sheet, wolf_sheet, MobSheet,
+};
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::world::settlement::{HamletStand, HAMLET_ROAD_PAD_M};
 use crate::world::surface::SettlementPin;
@@ -29,6 +33,7 @@ use std::sync::Arc;
 
 /// Attack pip is a short tell, not the 1.8 s swing clock.
 const ATTACK_PIP_S: f64 = 0.15;
+const STRAFE_M: f64 = 1.8;
 const FLINCH_S: f32 = 4.0;
 const FLINCH_PEAK: f32 = 1.32;
 const RING_LIFT_M: f64 = 0.14;
@@ -62,6 +67,8 @@ pub enum CombatSfx {
 enum FixtureKind {
     WolfLine,
     Orc,
+    Bones,
+    Mage,
 }
 
 struct MeshAnchor {
@@ -90,6 +97,7 @@ pub struct CombatLayer {
     fixture_kind: FixtureKind,
     pending_melee: Option<(Option<EntityId>, &'static str)>,
     skull_tele: HashMap<i32, f64>,
+    mage_tele: HashMap<i32, f64>,
     lock_ring: Option<EntityId>,
     ring_on: Option<i32>,
     attack_pip_s: f64,
@@ -118,6 +126,7 @@ impl CombatLayer {
             fixture_kind: FixtureKind::WolfLine,
             pending_melee: None,
             skull_tele: HashMap::new(),
+            mage_tele: HashMap::new(),
             lock_ring: None,
             ring_on: None,
             attack_pip_s: 0.0,
@@ -145,6 +154,14 @@ impl CombatLayer {
         self.fixture_kind = FixtureKind::WolfLine;
     }
 
+    pub fn request_bones_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::Bones;
+    }
+
+    pub fn request_mage_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::Mage;
+    }
+
     /// Playtester HOLD rearms must stay three-wolves / one-orc.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
@@ -156,6 +173,14 @@ impl CombatLayer {
 
     pub fn wants_orc(&self) -> bool {
         self.fixture_kind == FixtureKind::Orc
+    }
+
+    pub fn wants_bones(&self) -> bool {
+        self.fixture_kind == FixtureKind::Bones
+    }
+
+    pub fn wants_mage(&self) -> bool {
+        self.fixture_kind == FixtureKind::Mage
     }
 
     pub fn first_auto(&self) -> Option<i32> {
@@ -219,6 +244,7 @@ impl CombatLayer {
         self.hurt_flash_s = 0.0;
         self.pending_melee = None;
         self.skull_tele.clear();
+        self.mage_tele.clear();
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
@@ -370,7 +396,6 @@ impl CombatLayer {
         // First at 1.5 m so wolf reach (1.8 m) connects. The other two sit
         // beside it (strafe, metres not centimetres) so Tab can pick one mesh.
         let (sx, sz) = (-fz, fx);
-        const STRAFE_M: f64 = 1.8;
         for i in 0..3 {
             let dist = 1.5;
             let strafe = match i {
@@ -500,6 +525,147 @@ impl CombatLayer {
         self.hurt_flash_s = 0.0;
     }
 
+    /// One Warrior + two Minions, wolf-line seating (1.5 m + strafe +/-1.8 m).
+    /// Does not call install_l1_wolf_line (that still clears).
+    pub fn install_bones_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let (sx, sz) = (-fz, fx);
+        let warrior = skeleton_warrior_sheet();
+        let minion = skeleton_minion_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        for i in 0..3 {
+            let dist = 1.5;
+            let strafe = match i {
+                1 => -STRAFE_M,
+                2 => STRAFE_M,
+                _ => 0.0,
+            };
+            let sheet = if i == 0 { &warrior } else { &minion };
+            let mob_id = if i == 0 {
+                "skeleton_warrior"
+            } else {
+                "skeleton_minion"
+            };
+            combat.hostiles.push(hostile_from_sheet(
+                i,
+                player_x + fx * dist + sx * strafe,
+                player_z + fz * dist + sz * strafe,
+                sheet,
+                mob_id,
+            ));
+        }
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::Bones;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.skull_tele.clear();
+        self.mage_tele.clear();
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
+    }
+
+    /// One Mage_Staff 1.5 m in front of the player.
+    pub fn install_mage_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let sheet = skeleton_mage_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.hostiles.push(hostile_from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "skeleton_mage",
+        ));
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::Mage;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.skull_tele.clear();
+        self.mage_tele.clear();
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
+    }
+
     /// Soft lock + auto. Does not touch camera, Esc, or E.
     pub fn press_tab(
         &mut self,
@@ -549,6 +715,12 @@ impl CombatLayer {
                 .hostiles
                 .iter()
                 .filter(|h| h.mob_id == "orc_skull")
+                .map(|h| (h.idx, h.hp))
+                .collect();
+            let mage_hp: HashMap<i32, f64> = combat
+                .hostiles
+                .iter()
+                .filter(|h| h.mob_id == "skeleton_mage")
                 .map(|h| (h.idx, h.hp))
                 .collect();
             combat.tick_verbs(player_x, player_z, TICK);
@@ -610,6 +782,7 @@ impl CombatLayer {
                 }
             }
             self.tick_skull_bolts(combat, player_x, player_z, &skull_hp);
+            self.tick_mage_bolts(combat, player_x, player_z, &mage_hp);
         }
         just
     }
@@ -689,6 +862,104 @@ impl CombatLayer {
         }
     }
 
+    fn tick_mage_bolts(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        mage_hp: &HashMap<i32, f64>,
+    ) {
+        if combat.dead {
+            self.mage_tele.clear();
+            return;
+        }
+        let grit = combat.player.stats.attrs.grit;
+        let ids: Vec<i32> = combat
+            .hostiles
+            .iter()
+            .filter(|h| h.mob_id == "skeleton_mage")
+            .map(|h| h.idx)
+            .collect();
+        for idx in ids {
+            let Some(slot) = combat.hostiles.iter().position(|h| h.idx == idx) else {
+                self.mage_tele.remove(&idx);
+                continue;
+            };
+            let took_hp = mage_hp
+                .get(&idx)
+                .is_some_and(|hp| combat.hostiles[slot].hp < *hp);
+            let alive = combat.hostiles[slot].alive;
+            let stun_s = combat.hostiles[slot].stun_s;
+            let hx = combat.hostiles[slot].x;
+            let hz = combat.hostiles[slot].z;
+            if !alive || stun_s > 0.0 || took_hp {
+                self.mage_tele.remove(&idx);
+                continue;
+            }
+            let dx = player_x - hx;
+            let dz = player_z - hz;
+            if (dx * dx + dz * dz).sqrt() > MAGE_BOLT_RANGE_M {
+                continue;
+            }
+            if let Some(rem) = self.mage_tele.get(&idx).copied() {
+                let next = rem - TICK;
+                if next > 1e-12 {
+                    self.mage_tele.insert(idx, next);
+                    continue;
+                }
+                self.mage_tele.remove(&idx);
+                let dealt = mitigation(f64::from(MAGE_BOLT_DMG), grit);
+                combat.player.resources.hp =
+                    (combat.player.resources.hp - f64::from(dealt)).max(0.0);
+                let killed = combat.player.resources.hp <= 0.0;
+                let name = combat.hostiles[slot].name.clone();
+                combat.log.push(format!("{name} hits you for {dealt}"));
+                self.incoming_hit = true;
+                self.hurt_flash_s = 0.15;
+                self.pending_sfx.push(CombatSfx::Hurt);
+                if killed {
+                    combat.dead = true;
+                    combat.lock = None;
+                    combat.auto_cd = 999.0;
+                    combat.slain_by = Some(name);
+                    combat.slain_hold_s = crate::combat::math::SLAIN_HOLD_S;
+                    combat.log.push("You are slain");
+                    break;
+                }
+            } else {
+                self.mage_tele.insert(idx, MAGE_TELE_S);
+                let h = &combat.hostiles[slot];
+                let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
+                    panic!(
+                        "{}",
+                        EngineError::Model(format!(
+                            "tick_mage_bolts: no mesh spec for '{}'",
+                            h.mob_id
+                        ))
+                    )
+                });
+                let clip = spec.anim_weapon.unwrap_or_else(|| {
+                    panic!(
+                        "{}",
+                        EngineError::Model(format!(
+                            "tick_mage_bolts: '{}' has no anim_weapon",
+                            h.mob_id
+                        ))
+                    )
+                });
+                if clip != "Spellcast_Shoot" {
+                    panic!(
+                        "{}",
+                        EngineError::Model(format!(
+                            "tick_mage_bolts: want Spellcast_Shoot, got '{clip}'"
+                        ))
+                    );
+                }
+                self.pending_melee = Some((h.entity, clip));
+            }
+        }
+    }
+
     /// Play catalog anim_melee on the locked mesh only.
     pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
         let Some(lock) = combat.lock else {
@@ -722,6 +993,49 @@ impl CombatLayer {
             panic!(
                 "{}",
                 EngineError::Model(format!("melee clip speed failed: {err}"))
+            );
+        }
+    }
+
+    /// Play catalog anim_weapon (Spellcast_Shoot) on the locked mesh. Fail-loud.
+    pub fn replay_weapon(&mut self, world: &mut World, combat: &WorldCombat) {
+        let Some(lock) = combat.lock else {
+            panic!("{}", EngineError::Model("replay_weapon: no lock".into()));
+        };
+        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+            panic!("{}", EngineError::Model("replay_weapon: lock not in hostiles".into()));
+        };
+        let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
+            panic!(
+                "{}",
+                EngineError::Model(format!("replay_weapon: no mesh spec for '{}'", h.mob_id))
+            )
+        });
+        let clip = spec.anim_weapon.unwrap_or_else(|| {
+            panic!(
+                "{}",
+                EngineError::Model(format!("replay_weapon: '{}' has no anim_weapon", h.mob_id))
+            )
+        });
+        let id = h
+            .entity
+            .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}",
+                    EngineError::Model("replay_weapon: locked mesh has no entity".into())
+                )
+            });
+        if let Err(err) = world.play_animation(id, clip) {
+            panic!(
+                "{}",
+                EngineError::Model(format!("weapon clip '{clip}' failed: {err}"))
+            );
+        }
+        if let Err(err) = world.set_animation_speed(id, 1.0) {
+            panic!(
+                "{}",
+                EngineError::Model(format!("weapon clip speed failed: {err}"))
             );
         }
     }
@@ -1078,6 +1392,13 @@ fn is_wolf_mesh(mob_id: &str) -> bool {
     matches!(mob_id, "crawler_spider_wolf" | "wolf" | "wolf-spider")
 }
 
+pub fn is_bone_id(mob_id: &str) -> bool {
+    matches!(
+        mob_id,
+        "skeleton_warrior" | "skeleton_minion" | "skeleton_mage"
+    )
+}
+
 fn queue_clip(
     pending: &mut Option<(Option<EntityId>, &'static str)>,
     models: &HashMap<String, Arc<AnimatedModel>>,
@@ -1243,6 +1564,68 @@ pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
 
 pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
     combat.hostiles.retain(|h| h.mob_id != "orc_skull");
+    if let Some(lock) = combat.lock {
+        if !combat.hostiles.iter().any(|h| h.idx == lock) {
+            combat.lock = None;
+        }
+    }
+}
+
+pub fn seat_dungeon_bones(
+    combat: &mut WorldCombat,
+    spots: &[GlobalXZ],
+    heart: Option<GlobalXZ>,
+) {
+    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    let warrior = skeleton_warrior_sheet();
+    let minion = skeleton_minion_sheet();
+    let mage = skeleton_mage_sheet();
+    let (fx, fz) = (1.0, 0.0);
+    let (sx, sz) = (-fz, fx);
+    for p in spots {
+        combat.hostiles.push(hostile_from_sheet(
+            idx,
+            p.x,
+            p.z,
+            &warrior,
+            "skeleton_warrior",
+        ));
+        idx += 1;
+        combat.hostiles.push(hostile_from_sheet(
+            idx,
+            p.x + sx * -STRAFE_M,
+            p.z + sz * -STRAFE_M,
+            &minion,
+            "skeleton_minion",
+        ));
+        idx += 1;
+        combat.hostiles.push(hostile_from_sheet(
+            idx,
+            p.x + sx * STRAFE_M,
+            p.z + sz * STRAFE_M,
+            &minion,
+            "skeleton_minion",
+        ));
+        idx += 1;
+    }
+    let mage_at = spots.iter().find(|p| {
+        heart
+            .map(|h| (p.x - h.x).hypot(p.z - h.z) > 0.05)
+            .unwrap_or(spots.len() > 1)
+    });
+    if let Some(p) = mage_at {
+        combat.hostiles.push(hostile_from_sheet(
+            idx,
+            p.x + fx * STRAFE_M,
+            p.z + fz * STRAFE_M,
+            &mage,
+            "skeleton_mage",
+        ));
+    }
+}
+
+pub fn clear_dungeon_bones(combat: &mut WorldCombat) {
+    combat.hostiles.retain(|h| !is_bone_id(&h.mob_id));
     if let Some(lock) = combat.lock {
         if !combat.hostiles.iter().any(|h| h.idx == lock) {
             combat.lock = None;
@@ -1512,6 +1895,70 @@ mod tests {
             lines.iter().any(|l| l.starts_with("You Ember wolf-spider for ")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn mage_bolt_telegraphs_spellcast_shoot_then_deals_mitigated_15() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.hostiles.clear();
+        let sheet = skeleton_mage_sheet();
+        combat
+            .hostiles
+            .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "skeleton_mage"));
+        let hp0 = combat.player.resources.hp;
+        let mut layer = CombatLayer::install();
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
+        assert!(
+            layer.mage_tele.contains_key(&0),
+            "mage telegraph should start on first tick"
+        );
+        assert_eq!(
+            layer.pending_melee.as_ref().map(|(_, clip)| *clip),
+            Some("Spellcast_Shoot"),
+            "Spellcast_Shoot queued"
+        );
+        assert_eq!(combat.player.resources.hp, hp0);
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
+        let want = mitigation(f64::from(MAGE_BOLT_DMG), combat.player.stats.attrs.grit);
+        let skull = mitigation(f64::from(SKULL_BOLT_DMG), combat.player.stats.attrs.grit);
+        assert_ne!(want, skull, "mage bolt 15 is not skull bolt 14");
+        assert_eq!(combat.player.resources.hp, hp0 - f64::from(want));
+    }
+
+    #[test]
+    fn seat_dungeon_bones_is_warrior_two_minions_and_one_non_heart_mage() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.hostiles.clear();
+        let spots = [
+            GlobalXZ::at(0.0, 0.0),
+            GlobalXZ::at(10.0, 0.0),
+        ];
+        let heart = Some(GlobalXZ::at(10.0, 0.0));
+        seat_dungeon_bones(&mut combat, &spots, heart);
+        let warriors: Vec<_> = combat
+            .hostiles
+            .iter()
+            .filter(|h| h.mob_id == "skeleton_warrior")
+            .collect();
+        let minions: Vec<_> = combat
+            .hostiles
+            .iter()
+            .filter(|h| h.mob_id == "skeleton_minion")
+            .collect();
+        let mages: Vec<_> = combat
+            .hostiles
+            .iter()
+            .filter(|h| h.mob_id == "skeleton_mage")
+            .collect();
+        assert_eq!(warriors.len(), 2);
+        assert_eq!(minions.len(), 4);
+        assert_eq!(mages.len(), 1);
+        assert!((mages[0].x - STRAFE_M).abs() < 1e-9);
+        assert!((mages[0].z).abs() < 1e-9);
+        assert_eq!(mages[0].name, "Mage");
+        assert_eq!(warriors[0].name, "Warrior");
+        assert_eq!(minions[0].name, "Minion");
+        assert!((minions[0].z + STRAFE_M).abs() < 1e-9 || (minions[0].z - STRAFE_M).abs() < 1e-9);
     }
 
     #[test]

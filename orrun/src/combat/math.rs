@@ -169,6 +169,21 @@ pub const SKULL_BOLT_DMG: i32 = 14;
 pub const SKULL_TELE_S: f64 = 1.2;
 pub const SKULL_BOLT_RANGE_M: f64 = 24.0;
 
+// L8 Brood bones. Wolf ruler HP 70+18*(8-1)=196, atk 10+2*(8-1)=24, xp 35+12*(8-1)=119.
+pub const BONE_LEVEL: i32 = 8;
+pub const WARRIOR_HP: i32 = 196;
+pub const WARRIOR_DMG: i32 = 24;
+pub const WARRIOR_SWING_S: f64 = 2.0;
+pub const WARRIOR_REACH_M: f64 = 1.8;
+pub const WARRIOR_SPEED: f64 = 5.2;
+pub const WARRIOR_ARMOR: i32 = 8;
+pub const WARRIOR_XP: i32 = 119;
+pub const MINION_HP: i32 = 137;
+pub const MAGE_HP: i32 = 137;
+pub const MAGE_BOLT_DMG: i32 = 15;
+pub const MAGE_TELE_S: f64 = 1.2;
+pub const MAGE_BOLT_RANGE_M: f64 = 24.0;
+
 pub const YETI_LEVEL: i32 = 6;
 pub const YETI_HP: i32 = 240;
 pub const YETI_DMG: i32 = 14;

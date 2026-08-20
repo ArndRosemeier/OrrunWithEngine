@@ -341,6 +341,73 @@ pub fn orc_skull_sheet() -> MobSheet {
     }
 }
 
+pub fn skeleton_warrior_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "skeleton_warrior".into(),
+        name: "Warrior".into(),
+        level: BONE_LEVEL,
+        hp: WARRIOR_HP,
+        armor: WARRIOR_ARMOR,
+        damage: WARRIOR_DMG,
+        swing_s: WARRIOR_SWING_S,
+        slam_damage: None,
+        slam_every_s: None,
+        telegraph_s: None,
+        reach_m: WARRIOR_REACH_M,
+        speed_mps: WARRIOR_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: WARRIOR_XP,
+        token_brood: 0,
+        specials: vec![],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
+pub fn skeleton_minion_sheet() -> MobSheet {
+    let mut sheet = skeleton_warrior_sheet();
+    sheet.id = "skeleton_minion".into();
+    sheet.name = "Minion".into();
+    sheet.hp = MINION_HP;
+    sheet
+}
+
+pub fn skeleton_mage_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "skeleton_mage".into(),
+        name: "Mage".into(),
+        level: BONE_LEVEL,
+        hp: MAGE_HP,
+        armor: WARRIOR_ARMOR,
+        damage: WARRIOR_DMG,
+        swing_s: WARRIOR_SWING_S,
+        slam_damage: Some(MAGE_BOLT_DMG),
+        slam_every_s: Some(0.0),
+        telegraph_s: Some(MAGE_TELE_S),
+        reach_m: WARRIOR_REACH_M,
+        speed_mps: WARRIOR_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: WARRIOR_XP,
+        token_brood: 0,
+        specials: vec![
+            "punch_a".into(),
+            "staff_bolt_24m_1.2s_telegraph_interruptible".into(),
+        ],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
 pub fn yeti_sheet() -> MobSheet {
     let (sight, hear, leash, social) = aggro_fields();
     MobSheet {
@@ -380,6 +447,9 @@ pub fn resolve_mob_id(name: &str) -> Result<String, String> {
         "orc" => Ok("orc".into()),
         "tribal" => Ok("tribal".into()),
         "orc_skull" | "orc-skull" | "skull" => Ok("orc_skull".into()),
+        "skeleton_warrior" | "Warrior" | "warrior" => Ok("skeleton_warrior".into()),
+        "skeleton_minion" | "Minion" | "minion" => Ok("skeleton_minion".into()),
+        "skeleton_mage" | "Mage" | "mage" => Ok("skeleton_mage".into()),
         "yeti" => Ok("yeti".into()),
         other => Err(format!("unknown mob: {other}")),
     }
@@ -395,6 +465,9 @@ pub fn mob_sheet(id: &str, level: Option<i32>) -> Result<MobSheet, String> {
         "orc" => orc_sheet(),
         "tribal" => tribal_sheet(),
         "orc_skull" => orc_skull_sheet(),
+        "skeleton_warrior" => skeleton_warrior_sheet(),
+        "skeleton_minion" => skeleton_minion_sheet(),
+        "skeleton_mage" => skeleton_mage_sheet(),
         "yeti" => yeti_sheet(),
         other => return Err(format!("unknown mob: {other}")),
     })
@@ -719,6 +792,9 @@ pub fn mob_sheets_json() -> Value {
         "orc": orc_sheet(),
         "tribal": tribal_sheet(),
         "orc_skull": orc_skull_sheet(),
+        "skeleton_warrior": skeleton_warrior_sheet(),
+        "skeleton_minion": skeleton_minion_sheet(),
+        "skeleton_mage": skeleton_mage_sheet(),
         "yeti": yeti_sheet(),
     })
 }

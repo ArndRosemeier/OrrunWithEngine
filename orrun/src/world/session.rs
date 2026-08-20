@@ -454,6 +454,11 @@ impl WorldSession {
         self.combat_layer.replay_melee(world, &self.combat);
     }
 
+    /// Replay catalog anim_weapon (Spellcast_Shoot) on the locked mesh. Fail-loud.
+    pub fn replay_weapon(&mut self, world: &mut World) {
+        self.combat_layer.replay_weapon(world, &self.combat);
+    }
+
     pub fn hurt_flash(&self) -> bool {
         self.combat_layer.hurt_flash()
     }
@@ -539,6 +544,24 @@ impl WorldSession {
         self.combat_layer.request_orc_fixture();
         self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
+        self.dungeon_skulls_for = None;
+    }
+
+    pub fn rearm_bones_fixture(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        self.combat_layer.request_bones_fixture();
+        self.combat_layer.skip_roster_pins();
+        self.combat_layer.rearm();
+        self.combat.lock = None;
+        self.dungeon_skulls_for = None;
+    }
+
+    pub fn rearm_mage_fixture(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        self.combat_layer.request_mage_fixture();
+        self.combat_layer.skip_roster_pins();
+        self.combat_layer.rearm();
+        self.combat.lock = None;
         self.dungeon_skulls_for = None;
     }
 
@@ -1295,7 +1318,7 @@ impl WorldSession {
     }
 
     fn hostile_feet_y(&self, world: &World, player: &Player, h: &crate::combat::WorldHostile) -> f64 {
-        if h.mob_id == "orc_skull" {
+        if h.mob_id == "orc_skull" || super::combat_layer::is_bone_id(&h.mob_id) {
             if let Some(y) = self
                 .dungeons
                 .as_ref()
@@ -1339,6 +1362,7 @@ impl WorldSession {
         if live_id.is_none() {
             if self.dungeon_skulls_for.take().is_some() {
                 super::combat_layer::clear_dungeon_skulls(&mut self.combat);
+                super::combat_layer::clear_dungeon_bones(&mut self.combat);
                 if self.combat_layer.fixture_ready() {
                     self.respawn_hostile_meshes(world, player)?;
                 }
@@ -1351,14 +1375,17 @@ impl WorldSession {
         }
         if self.dungeon_skulls_for.is_some() {
             super::combat_layer::clear_dungeon_skulls(&mut self.combat);
+            super::combat_layer::clear_dungeon_bones(&mut self.combat);
         }
         let spots = self
             .dungeons
             .as_ref()
             .map(DungeonLayer::live_skulls)
             .unwrap_or_default();
+        let heart = self.dungeons.as_ref().and_then(DungeonLayer::live_heart);
         if !spots.is_empty() {
             super::combat_layer::seat_dungeon_skulls(&mut self.combat, &spots);
+            super::combat_layer::seat_dungeon_bones(&mut self.combat, &spots, heart);
             if self.combat_layer.fixture_ready() {
                 self.respawn_hostile_meshes(world, player)?;
             }
@@ -1380,6 +1407,22 @@ impl WorldSession {
             if !self.combat_layer.fixture_ready() {
                 if self.combat_layer.wants_orc() {
                     self.combat_layer.install_orc_fixture(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else if self.combat_layer.wants_bones() {
+                    self.combat_layer.install_bones_fixture(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else if self.combat_layer.wants_mage() {
+                    self.combat_layer.install_mage_fixture(
                         &mut self.combat,
                         player.position.x,
                         player.position.z,

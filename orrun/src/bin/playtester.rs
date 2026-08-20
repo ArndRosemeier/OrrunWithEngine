@@ -6,7 +6,7 @@
 //! not as an absolute setLook.
 //!
 //! Usage:
-//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls,combat_body`
+//! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls,combat_body,combat_bones,combat_mage`
 
 use std::fs;
 use std::path::PathBuf;
@@ -67,6 +67,10 @@ fn main() {
         "controls.json",
         "combat_body.json",
         "combat_body.png",
+        "combat_bones.json",
+        "combat_bones.png",
+        "combat_mage.json",
+        "combat_mage.png",
         "village.json",
         "village.png",
     ] {
@@ -129,6 +133,8 @@ fn main() {
         incoming_hp: None,
         combat_orc_punch_at: None,
         combat_body_melee_at: None,
+        combat_bones_melee_at: None,
+        combat_mage_cast_at: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -308,6 +314,8 @@ enum Phase {
     CombatLive,
     CombatOrcLive,
     CombatBodyLive,
+    CombatBonesLive,
+    CombatMageLive,
     ControlsLive,
     VillageTravel,
     VillageLive,
@@ -356,6 +364,8 @@ struct Driver {
     incoming_hp: Option<f64>,
     combat_orc_punch_at: Option<f32>,
     combat_body_melee_at: Option<f32>,
+    combat_bones_melee_at: Option<f32>,
+    combat_mage_cast_at: Option<f32>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -531,6 +541,34 @@ impl Driver {
                     }
                 }
             }
+            Phase::CombatBonesLive => {
+                if !self.combat_tab_sent {
+                    input.tab = true;
+                } else if let (Some(pos), Some(stand)) = (
+                    self.session.player_position(),
+                    bone_body_view_stand(&self.session),
+                ) {
+                    if pos.horizontal().distance(stand) > 0.45 {
+                        input = walk_toward(pos.horizontal(), stand, dt);
+                        input.yaw_delta_degrees = self.pending_yaw_delta;
+                        input.pitch_delta_degrees = self.pending_pitch_delta;
+                    }
+                }
+            }
+            Phase::CombatMageLive => {
+                if !self.combat_tab_sent || self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if let (Some(pos), Some(stand)) = (
+                    self.session.player_position(),
+                    mage_view_stand(&self.session),
+                ) {
+                    if pos.horizontal().distance(stand) > 0.45 {
+                        input = walk_toward(pos.horizontal(), stand, dt);
+                        input.yaw_delta_degrees = self.pending_yaw_delta;
+                        input.pitch_delta_degrees = self.pending_pitch_delta;
+                    }
+                }
+            }
             Phase::ControlsLive => {
                 match self.controls_stage {
                     ControlsStage::Tab => input.tab = true,
@@ -657,6 +695,8 @@ impl Driver {
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
+            Phase::CombatBonesLive => self.tick_combat_bones(world, frame),
+            Phase::CombatMageLive => self.tick_combat_mage(world, frame),
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::VillageTravel => self.tick_village_travel(world, frame),
             Phase::VillageLive => self.tick_village_live(world, frame),
@@ -685,6 +725,8 @@ impl Driver {
             "combat" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
+            "combat_bones" => self.start_combat_bones(world, frame),
+            "combat_mage" => self.start_combat_mage(world, frame),
             "controls" => self.start_controls(world, frame),
             "village" => self.start_village(world, frame),
             "faction_overlay" => {
@@ -1474,6 +1516,296 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
+
+    fn start_combat_bones(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_bones_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_bones_melee_at = None;
+        self.phase = Phase::CombatBonesLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_bones(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_bones: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(pos) = self.session.player_position() {
+            if !self.session.stream().required_ready(pos.horizontal()) {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_bones: required_ready stayed false");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        if !self.combat_tab_sent {
+            self.combat_tab_sent = true;
+        }
+        self.aim_at_bone_body();
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if !self.looking_at_bone_body() {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current(&format!(
+                    "combat_bones: eye-height look at bone body failed, pitch={pitch} (not floor)"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_bones: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        if (lock_name != "Warrior" && lock_name != "Minion") || lock_hp <= 0.0 {
+            self.fail_current(&format!(
+                "combat_bones: lock want Warrior or Minion + HP>0, got {lock_name} hp={lock_hp}"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        let mesh_visible = self.session.fixture_mesh_visible(world);
+        if !mesh_visible {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_bones: bone mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(stand) = bone_body_view_stand(&self.session) {
+            if let Some(pos) = self.session.player_position() {
+                if pos.horizontal().distance(stand) >= 0.45 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat_bones: never reached bone view stand");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+            }
+        }
+        let melee_at = *self.combat_bones_melee_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        if frame.time - melee_at < 0.50 {
+            return;
+        }
+        self.write_json(
+            "combat_bones",
+            json!({
+                "status": "ok",
+                "name": lock_name,
+                "lock_name": lock_name,
+                "hp": lock_hp,
+                "mesh_visible": true,
+                "mesh": "monsters/kaykit/Skeleton_Warrior.glb or Skeleton_Minion.glb",
+                "clip": "Unarmed_Melee_Attack_Punch_A",
+                "horizon": false,
+                "look_down": false,
+                "eye_height_body": true,
+                "shot": "combat_bones.png",
+            }),
+        );
+        self.ok_hook("combat_bones");
+        world.mark_ready();
+        self.queue_shot(world, frame, "combat_bones");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn start_combat_mage(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_mage_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_mage_cast_at = None;
+        self.phase = Phase::CombatMageLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_mage(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_mage: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(pos) = self.session.player_position() {
+            if !self.session.stream().required_ready(pos.horizontal()) {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_mage: required_ready stayed false");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        if !self.combat_tab_sent {
+            self.combat_tab_sent = true;
+        }
+        self.aim_at_mage_body();
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if !self.looking_at_mage_body() {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current(&format!(
+                    "combat_mage: eye-height look at mage body failed, pitch={pitch} (not floor)"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_mage: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        if lock_name != "Mage" || lock_hp <= 0.0 {
+            self.fail_current(&format!(
+                "combat_mage: lock want Mage + HP>0, got {lock_name} hp={lock_hp}"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        let mesh_visible = self.session.fixture_mesh_visible(world);
+        if !mesh_visible {
+            if frame.time - self.phase_t0 > 8.0 {
+                self.fail_current("combat_mage: mage mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if let Some(stand) = mage_view_stand(&self.session) {
+            if let Some(pos) = self.session.player_position() {
+                if pos.horizontal().distance(stand) >= 0.45 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat_mage: never reached mage view stand");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+            }
+        }
+        let cast_at = *self.combat_mage_cast_at.get_or_insert_with(|| {
+            self.session.replay_weapon(world);
+            frame.time
+        });
+        if frame.time - cast_at < 0.45 {
+            return;
+        }
+        self.write_json(
+            "combat_mage",
+            json!({
+                "status": "ok",
+                "name": lock_name,
+                "lock_name": lock_name,
+                "hp": lock_hp,
+                "mesh_visible": true,
+                "mesh": "monsters/kaykit/Skeleton_Mage_Staff.glb",
+                "clip": "Spellcast_Shoot",
+                "horizon": false,
+                "look_down": false,
+                "eye_height_body": true,
+                "shot": "combat_mage.png",
+            }),
+        );
+        self.ok_hook("combat_mage");
+        world.mark_ready();
+        self.queue_shot(world, frame, "combat_mage");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn aim_at_bone_body(&mut self) {
+        self.aim_at_humanoid(1.6, 1.15);
+    }
+
+    fn looking_at_bone_body(&self) -> bool {
+        self.looking_at_humanoid(1.6, 1.15)
+    }
+
+    fn aim_at_mage_body(&mut self) {
+        self.aim_at_humanoid(1.6, 1.15);
+    }
+
+    fn looking_at_mage_body(&self) -> bool {
+        self.looking_at_humanoid(1.6, 1.15)
+    }
+
+    fn aim_at_humanoid(&mut self, behind_m: f64, chest_m: f32) {
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let lock = self.session.lock_id();
+        let Some(h) = self
+            .session
+            .combat()
+            .hostiles
+            .iter()
+            .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
+            .or_else(|| self.session.combat().hostiles.first())
+        else {
+            return;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let dx = h.x - pos.x;
+        let dz = h.z - pos.z;
+        let len = (dx * dx + dz * dz).sqrt();
+        let (ux, uz) = if len > 1e-6 {
+            (dx / len, dz / len)
+        } else {
+            (1.0, 0.0)
+        };
+        let target = Vec3::new(
+            (h.x + ux * behind_m) as f32,
+            pos.y as f32 + chest_m,
+            (h.z + uz * behind_m) as f32,
+        );
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
+    }
+
+    fn looking_at_humanoid(&self, behind_m: f64, chest_m: f32) -> bool {
+        let Some(pos) = self.session.player_position() else {
+            return false;
+        };
+        let lock = self.session.lock_id();
+        let Some(h) = self
+            .session
+            .combat()
+            .hostiles
+            .iter()
+            .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
+            .or_else(|| self.session.combat().hostiles.first())
+        else {
+            return false;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let dx = h.x - pos.x;
+        let dz = h.z - pos.z;
+        let len = (dx * dx + dz * dz).sqrt();
+        let (ux, uz) = if len > 1e-6 {
+            (dx / len, dz / len)
+        } else {
+            (1.0, 0.0)
+        };
+        let target = Vec3::new(
+            (h.x + ux * behind_m) as f32,
+            pos.y as f32 + chest_m,
+            (h.z + uz * behind_m) as f32,
+        );
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        view_angle_degrees(eye, yaw, pitch, target) < 18.0 && pitch > -55.0
+    }
 
     fn aim_at_wolf_body(&mut self) {
         let Some(pos) = self.session.player_position() else {
@@ -2624,6 +2956,44 @@ fn locomotion_name(mode: Option<Locomotion>) -> &'static str {
     }
 }
 
+
+
+fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    const STAND_M: f64 = 5.0;
+    const SIDE_M: f64 = 2.2;
+    let hs = &session.combat().hostiles;
+    if hs.len() < 3 {
+        return None;
+    }
+    let a = &hs[0];
+    let left_x = hs[2].x - hs[1].x;
+    let left_z = hs[2].z - hs[1].z;
+    let ll = (left_x * left_x + left_z * left_z).sqrt();
+    if ll < 1e-6 {
+        return None;
+    }
+    let (sx, sz) = (left_x / ll, left_z / ll);
+    let (fx, fz) = (sz, -sx);
+    Some(GlobalXZ::at(
+        a.x - fx * STAND_M + sx * SIDE_M,
+        a.z - fz * STAND_M + sz * SIDE_M,
+    ))
+}
+
+fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    const STAND_M: f64 = 5.5;
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let dx = pos.x - h.x;
+    let dz = pos.z - h.z;
+    let len = (dx * dx + dz * dz).sqrt();
+    let (ux, uz) = if len > 1e-6 {
+        (dx / len, dz / len)
+    } else {
+        (-1.0, 0.0)
+    };
+    Some(GlobalXZ::at(h.x + ux * STAND_M, h.z + uz * STAND_M))
+}
 
 fn wolf_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     // Stable vs player motion: back along L1 facing, then a sidestep for 3/4 body.

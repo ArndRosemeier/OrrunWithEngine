@@ -43,6 +43,30 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             anim_weapon: None,
             weapon_node: None,
         },
+        "skeleton_warrior" => CombatMesh {
+            id: "skeleton_warrior",
+            source: "monsters/kaykit/Skeleton_Warrior.glb",
+            anim_idle: "Idle",
+            anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_weapon: None,
+            weapon_node: None,
+        },
+        "skeleton_minion" => CombatMesh {
+            id: "skeleton_minion",
+            source: "monsters/kaykit/Skeleton_Minion.glb",
+            anim_idle: "Idle",
+            anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_weapon: None,
+            weapon_node: None,
+        },
+        "skeleton_mage" => CombatMesh {
+            id: "skeleton_mage",
+            source: "monsters/kaykit/Skeleton_Mage_Staff.glb",
+            anim_idle: "Idle",
+            anim_melee: "Unarmed_Melee_Attack_Punch_A",
+            anim_weapon: Some("Spellcast_Shoot"),
+            weapon_node: None,
+        },
         _ => return None,
     })
 }
@@ -54,7 +78,14 @@ mod tests {
 
     #[test]
     fn mesh_spec_big_roster_files_exist() {
-        for id in ["orc", "tribal", "orc_skull"] {
+        for id in [
+            "orc",
+            "tribal",
+            "orc_skull",
+            "skeleton_warrior",
+            "skeleton_minion",
+            "skeleton_mage",
+        ] {
             let spec = mesh_spec(id).expect(id);
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("assets")

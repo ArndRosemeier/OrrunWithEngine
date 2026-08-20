@@ -82,6 +82,8 @@ struct OwnedLayout {
     mesh_err: Option<String>,
     /// Local-space chamber centres (5 m XZ clusters of placed meshes). T2+ only.
     skulls: Vec<Vec3>,
+    /// Farthest-from-mouth (tie: fattest) cluster. Mage pack excludes this.
+    heart: Option<Vec3>,
 }
 
 enum BuildMsg {
@@ -107,6 +109,7 @@ struct LiveDungeon {
     landing_yaw: f32,
     mouth_at: GlobalPosition,
     skulls: Vec<GlobalXZ>,
+    heart: Option<GlobalXZ>,
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +235,11 @@ impl DungeonLayer {
             .as_ref()
             .map(|live| live.skulls.clone())
             .unwrap_or_default()
+    }
+
+    /// Heart cluster (farthest from mouth, fattest on a tie). Mage pack excludes it.
+    pub fn live_heart(&self) -> Option<GlobalXZ> {
+        self.live.as_ref().and_then(|live| live.heart)
     }
 
     pub fn pin_seated(&self, id: i32) -> bool {
@@ -602,6 +610,10 @@ impl DungeonLayer {
                 GlobalXZ::at(at.x, at.z)
             })
             .collect();
+        let heart = layout.heart.map(|local| {
+            let at = placement.at(local);
+            GlobalXZ::at(at.x, at.z)
+        });
         self.live = Some(LiveDungeon {
             pin_id: pin.id,
             space,
@@ -613,6 +625,7 @@ impl DungeonLayer {
             landing_yaw,
             mouth_at: placement.mouth_world,
             skulls,
+            heart,
         });
         let _ = layout.used_seed;
         Ok(())
@@ -785,7 +798,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unknown panic".into())
 }
 
-fn chamber_skulls(positions: impl IntoIterator<Item = Vec3>) -> Vec<Vec3> {
+fn chamber_clusters(positions: impl IntoIterator<Item = Vec3>) -> Vec<(Vec3, u32)> {
     const CELL: f32 = 5.0;
     let mut buckets: HashMap<(i32, i32), (Vec3, u32)> = HashMap::new();
     for p in positions {
@@ -796,8 +809,25 @@ fn chamber_skulls(positions: impl IntoIterator<Item = Vec3>) -> Vec<Vec3> {
     }
     buckets
         .into_values()
-        .map(|(sum, n)| sum / n as f32)
+        .map(|(sum, n)| (sum / n as f32, n))
         .collect()
+}
+
+fn pick_heart(clusters: &[(Vec3, u32)], mouth: Option<Vec3>) -> Option<Vec3> {
+    clusters
+        .iter()
+        .max_by(|(a, an), (b, bn)| {
+            let da = mouth
+                .map(|m| (a.x - m.x).hypot(a.z - m.z))
+                .unwrap_or(0.0);
+            let db = mouth
+                .map(|m| (b.x - m.x).hypot(b.z - m.z))
+                .unwrap_or(0.0);
+            da.partial_cmp(&db)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(an.cmp(bn))
+        })
+        .map(|(c, _)| *c)
 }
 
 fn generate_layout(pin: DungeonPin) -> OwnedLayout {
@@ -820,10 +850,20 @@ fn generate_layout(pin: DungeonPin) -> OwnedLayout {
         let placed = assembly
             .places()
             .unwrap_or_else(|err| panic!("dungeon {} places: {err}", pin.id));
-        let skulls = if pin.tier >= 2 {
-            chamber_skulls(placed.iter().map(|item| item.place.position))
+        let clusters = if pin.tier >= 2 {
+            chamber_clusters(placed.iter().map(|item| item.place.position))
         } else {
             Vec::new()
+        };
+        let skulls: Vec<Vec3> = clusters.iter().map(|(c, _)| *c).collect();
+        let heart = if pin.tier >= 2 {
+            let mouth = placed
+                .iter()
+                .find(|item| item.piece.as_str() == "mouth")
+                .map(|item| item.place.position);
+            pick_heart(&clusters, mouth)
+        } else {
+            None
         };
         return OwnedLayout {
             placed,
@@ -831,6 +871,7 @@ fn generate_layout(pin: DungeonPin) -> OwnedLayout {
             meshes: HashMap::new(),
             mesh_err: None,
             skulls,
+            heart,
         };
     }
     panic!(
@@ -935,7 +976,7 @@ mod tests {
 
     #[test]
     fn five_metre_cells_yield_one_skull_per_cluster() {
-        let skulls = chamber_skulls([
+        let skulls = chamber_clusters([
             Vec3::new(0.1, 1.0, 0.2),
             Vec3::new(1.0, 1.0, 1.0),
             Vec3::new(20.0, 0.0, 20.0),
