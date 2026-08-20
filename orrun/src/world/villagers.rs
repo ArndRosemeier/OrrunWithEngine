@@ -494,8 +494,44 @@ fn load_human(rel: &str) -> EngineResult<Arc<AnimatedModel>> {
         )));
     }
     let root = path.parent().unwrap_or(&assets).to_path_buf();
-    let model = AnimatedModel::load_with(&path, &root, &engine::EngineLimits::default())?;
+    let mut model = AnimatedModel::load_with(&path, &root, &engine::EngineLimits::default())?;
+    dress_human_meshes(&mut model);
     Ok(Arc::new(model))
+}
+
+/// Force opaque albedo/vertex alpha so clothes do not punch through as holes.
+fn dress_human_meshes(model: &mut AnimatedModel) {
+    let mut tris = Vec::new();
+    for mesh in &model.meshes {
+        let tri_count = mesh.indices.len() / 3;
+        tris.push(tri_count);
+        let (mut mn, mut mx) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+        for p in &mesh.positions {
+            mn = mn.min(*p);
+            mx = mx.max(*p);
+        }
+        let albedo = mesh
+            .albedo
+            .as_ref()
+            .map(|a| format!("{}x{}", a.width, a.height))
+            .unwrap_or_else(|| "none".into());
+        eprintln!(
+            "human mesh tris={tri_count} aabb=({:.3},{:.3},{:.3})-({:.3},{:.3},{:.3}) albedo={albedo}",
+            mn.x, mn.y, mn.z, mx.x, mx.y, mx.z
+        );
+    }
+    eprintln!("human meshes={} tris={:?}", model.meshes.len(), tris);
+
+    for mesh in &mut model.meshes {
+        for color in &mut mesh.colors {
+            color.w = 1.0;
+        }
+        if let Some(albedo) = &mut mesh.albedo {
+            for px in albedo.rgba.chunks_exact_mut(4) {
+                px[3] = 255;
+            }
+        }
+    }
 }
 
 fn assets_dir() -> EngineResult<PathBuf> {
