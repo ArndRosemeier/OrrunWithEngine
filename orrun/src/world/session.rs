@@ -557,6 +557,18 @@ impl WorldSession {
         self.dungeon_skulls_for = None;
     }
 
+    /// Reseats one published yeti on the next world tick. Meshes despawn now.
+    pub fn rearm_yeti_fixture(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
+        self.combat_layer.request_yeti_fixture();
+        self.combat_layer.skip_roster_pins();
+        self.combat_layer.rearm();
+        self.dungeon_skulls_for = None;
+    }
+
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
@@ -1478,6 +1490,14 @@ impl WorldSession {
             if !self.combat_layer.fixture_ready() {
                 if self.combat_layer.wants_orc() {
                     self.combat_layer.install_orc_fixture(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else if self.combat_layer.wants_yeti() {
+                    self.combat_layer.install_yeti_fixture(
                         &mut self.combat,
                         player.position.x,
                         player.position.z,

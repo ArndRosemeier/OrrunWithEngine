@@ -14,7 +14,7 @@ use crate::combat::math::{
 };
 use crate::combat::sheets::{
     orc_sheet, orc_skull_sheet, skeleton_mage_sheet, skeleton_minion_sheet,
-    skeleton_warrior_sheet, wolf_sheet, MobSheet,
+    skeleton_warrior_sheet, wolf_sheet, yeti_sheet, MobSheet,
 };
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::combat::Discipline;
@@ -65,6 +65,7 @@ enum FixtureKind {
     Orc,
     Bones,
     Mage,
+    Yeti,
 }
 
 struct MeshAnchor {
@@ -158,6 +159,10 @@ impl CombatLayer {
         self.fixture_kind = FixtureKind::Mage;
     }
 
+    pub fn request_yeti_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::Yeti;
+    }
+
     /// Playtester HOLD rearms stay fixture-only: no overland sites, no roster pins.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
@@ -192,6 +197,10 @@ impl CombatLayer {
 
     pub fn wants_mage(&self) -> bool {
         self.fixture_kind == FixtureKind::Mage
+    }
+
+    pub fn wants_yeti(&self) -> bool {
+        self.fixture_kind == FixtureKind::Yeti
     }
 
     pub fn first_auto(&self) -> Option<i32> {
@@ -522,6 +531,80 @@ impl CombatLayer {
         combat.second_wind_used = false;
         combat.last_rank_gate = None;
         self.fixture_kind = FixtureKind::Orc;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.skull_tele.clear();
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
+    }
+
+    /// One published yeti 1.5 m in front of the player. First Punch after swing_s.
+    /// Live slam tell is HOLD. Melee clip is Punch.
+    pub fn install_yeti_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let sheet = yeti_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.hostiles.push(WorldHostile {
+            idx: 0,
+            x: player_x + fx * 1.5,
+            z: player_z + fz * 1.5,
+            hp: f64::from(sheet.hp),
+            max_hp: f64::from(sheet.hp),
+            armor: sheet.armor,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: sheet.name.clone(),
+            mob_id: "yeti".into(),
+            entity: None,
+            damage: sheet.damage,
+            swing_s: sheet.swing_s,
+            swing_cd: sheet.swing_s,
+            reach_m: sheet.reach_m,
+        });
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::Yeti;
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
@@ -1652,6 +1735,23 @@ mod tests {
         assert!((h.reach_m - 2.0).abs() < 1e-9);
         assert_eq!(h.max_hp, 130.0);
         assert!(layer.wants_orc());
+        assert!(layer.fixture_ready());
+    }
+
+    #[test]
+    fn yeti_sheet_fixture_is_one_yeti_with_swing_cd_armed() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_yeti_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        assert_eq!(combat.hostiles.len(), 1);
+        let h = &combat.hostiles[0];
+        assert_eq!(h.mob_id, "yeti");
+        assert_eq!(h.name, "yeti");
+        assert!((h.x - 1.5).abs() < 1e-9);
+        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
+        assert!((h.reach_m - 2.2).abs() < 1e-9);
+        assert_eq!(h.max_hp, 240.0);
+        assert!(layer.wants_yeti());
         assert!(layer.fixture_ready());
     }
 

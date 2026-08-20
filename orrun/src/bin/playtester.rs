@@ -80,6 +80,8 @@ fn main() {
         "overworld_hut.json",
         "overworld_cairn.png",
         "overworld_hut.png",
+        "yeti.json",
+        "yeti.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -139,6 +141,7 @@ fn main() {
         combat_death_sent: false,
         incoming_hp: None,
         combat_orc_punch_at: None,
+        combat_yeti_punch_at: None,
         combat_body_melee_at: None,
         combat_bones_melee_at: None,
         combat_mage_cast_at: None,
@@ -324,6 +327,7 @@ enum Phase {
     BindWrite,
     CombatLive,
     CombatOrcLive,
+    CombatYetiLive,
     CombatBodyLive,
     CombatBonesLive,
     CombatMageLive,
@@ -378,6 +382,7 @@ struct Driver {
     combat_death_sent: bool,
     incoming_hp: Option<f64>,
     combat_orc_punch_at: Option<f32>,
+    combat_yeti_punch_at: Option<f32>,
     combat_body_melee_at: Option<f32>,
     combat_bones_melee_at: Option<f32>,
     combat_mage_cast_at: Option<f32>,
@@ -430,11 +435,18 @@ impl Driver {
         self.pending_yaw_delta = 0.0;
         self.pending_pitch_delta = 0.0;
 
-        let paint_combat_hud = matches!(self.phase, Phase::CombatLive | Phase::CombatOrcLive)
-            || matches!(
-                self.awaiting_shot.as_deref(),
-                Some("combat") | Some("hurt") | Some("slain") | Some("hud") | Some("roster")
-            );
+        let paint_combat_hud = matches!(
+            self.phase,
+            Phase::CombatLive | Phase::CombatOrcLive | Phase::CombatYetiLive
+        ) || matches!(
+            self.awaiting_shot.as_deref(),
+            Some("combat")
+                | Some("hurt")
+                | Some("slain")
+                | Some("hud")
+                | Some("roster")
+                | Some("yeti")
+        );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
         }
@@ -445,7 +457,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -534,6 +546,25 @@ impl Driver {
             Phase::CombatOrcLive => {
                 // Stay in the 1.5 m stand until Punch connects (reach 2.0).
                 // Then walk back to the human viewing stand so roster.png
+                // shows a creature, not a torso wall.
+                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if self.session.incoming_hit() {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        orc_view_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                }
+            }
+            Phase::CombatYetiLive => {
+                // Stay in the 1.5 m stand until Punch connects (reach 2.2).
+                // Then walk back to the human viewing stand so yeti.png
                 // shows a creature, not a torso wall.
                 if self.combat_tab_sent && self.session.lock_id().is_none() {
                     input.tab = true;
@@ -747,6 +778,7 @@ impl Driver {
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
+            Phase::CombatYetiLive => self.tick_combat_yeti(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::CombatBonesLive => self.tick_combat_bones(world, frame),
             Phase::CombatMageLive => self.tick_combat_mage(world, frame),
@@ -779,6 +811,7 @@ impl Driver {
             "bind" => self.start_bind(world, frame),
             "combat" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
+            "combat_yeti" => self.start_combat_yeti(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
             "combat_bones" => self.start_combat_bones(world, frame),
             "combat_mage" => self.start_combat_mage(world, frame),
@@ -2066,6 +2099,116 @@ impl Driver {
         self.ok_hook("combat_orc");
         world.mark_ready();
         self.queue_shot(world, frame, "roster");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn start_combat_yeti(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_yeti_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_shot_sent = false;
+        self.combat_yeti_punch_at = None;
+        self.phase = Phase::CombatYetiLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_yeti(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: yeti mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_orc();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = orc_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 14.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_yeti: never looked at yeti");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        self.combat_tab_sent = true;
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: lock unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let name = name.to_string();
+        if name != "yeti" {
+            self.fail_current(&format!("combat_yeti: want yeti lock, got {name}"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.incoming_hit() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: incoming Punch never landed");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(stand) = orc_view_stand(&self.session) else {
+            self.fail_current("combat_yeti: no yeti view stand");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_yeti: never reached yeti view stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let punch_at = *self.combat_yeti_punch_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        if frame.time - punch_at < 0.35 {
+            return;
+        }
+        self.write_json(
+            "yeti",
+            json!({
+                "status": "ok",
+                "name": name,
+                "hp": hp,
+                "punch": true,
+                "shot": "yeti.png",
+            }),
+        );
+        self.ok_hook("combat_yeti");
+        world.mark_ready();
+        self.queue_shot(world, frame, "yeti");
         self.phase = Phase::NextHook;
         self.phase_t0 = frame.time;
     }

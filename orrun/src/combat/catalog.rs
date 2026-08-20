@@ -75,6 +75,14 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             anim_weapon: Some("Spellcast_Shoot"),
             weapon_node: None,
         },
+        "yeti" => CombatMesh {
+            id: "yeti",
+            source: "monsters/big/Yeti.glb",
+            anim_idle: "Idle",
+            anim_melee: "Punch",
+            anim_weapon: None,
+            weapon_node: None,
+        },
         _ => return None,
     })
 }
@@ -94,6 +102,7 @@ mod tests {
             "skeleton_minion",
             "skeleton_mage",
             "bandit",
+            "yeti",
         ] {
             let spec = mesh_spec(id).expect(id);
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -123,6 +132,29 @@ mod tests {
         assert!(
             model.find_clip(spec.anim_melee).is_some(),
             "Attack missing on bandit"
+        );
+    }
+
+    #[test]
+    fn yeti_glb_loads_idle_and_punch() {
+        let spec = mesh_spec("yeti").expect("yeti");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(spec.source);
+        let root = path.parent().unwrap();
+        let model = engine::anim::AnimatedModel::load_with(
+            &path,
+            root,
+            &engine::EngineLimits::default(),
+        )
+        .unwrap_or_else(|err| panic!("yeti glb load: {err}"));
+        assert!(
+            model.find_clip(spec.anim_idle).is_some(),
+            "Idle missing on yeti"
+        );
+        assert!(
+            model.find_clip(spec.anim_melee).is_some(),
+            "Punch missing on yeti"
         );
     }
 
