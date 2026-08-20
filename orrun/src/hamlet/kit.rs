@@ -49,6 +49,9 @@ pub const PIECE_GLBS: &[(&str, &str)] = &[
     ("plinth_b", "med_plinth_b.glb"),
     ("door_plank", "door_plank.glb"),
     ("door_sturdy", "door_sturdy.glb"),
+    ("wall_blind", "med_wall_blind.glb"),
+    ("wall_halftimber", "med_wall_halftimber.glb"),
+    ("roof_thatch_hip", "med_roof_thatch_hip.glb"),
 ];
 
 /// `med_door` / `med_door_b` opening and `door_plank` / `door_sturdy` leaf.
@@ -198,6 +201,39 @@ pub fn assemble_dwelling(
     places.extend(door_leaf_meshes(catalog, &assembly, catalog_id));
     shift_xz(&mut places, origin);
     Ok(places)
+}
+
+/// One-cell woods hut for overland sites only. Not a village dwelling.
+///
+/// Village `house_hut_thatch` is a 12x8 `ring_3x2` plaster box. This layout is
+/// a 4 m cell: buried plinth ring, timber/blind walls, plank door, thatch hip.
+pub fn assemble_woods_hut() -> Vec<PlacedMesh> {
+    const STOREY: f32 = 2.7;
+    const HALF: f32 = 2.0;
+    let at = |piece: &str, y: f32, yaw: f32| PlacedMesh {
+        piece: pid(piece),
+        place: Place::new(0.0, y, 0.0).with_yaw_deg(yaw),
+    };
+    vec![
+        at("door", 0.0, 0.0),
+        at("wall_halftimber", 0.0, 90.0),
+        at("wall_blind", 0.0, 180.0),
+        at("wall_halftimber", 0.0, 270.0),
+        at("plinth", -STOREY, 0.0),
+        at("plinth", -STOREY, 90.0),
+        at("plinth", -STOREY, 180.0),
+        at("plinth", -STOREY, 270.0),
+        at("roof_thatch_hip", STOREY, 0.0),
+        PlacedMesh {
+            piece: pid("door_plank"),
+            place: Place::new(
+                door_opening_width("door") * 0.5 - JAMB_PROUD - HINGE_INSET,
+                THRESHOLD_TOP,
+                -(HALF - WALL_THICKNESS * 0.5),
+            )
+            .with_yaw_deg(180.0),
+        },
+    ]
 }
 
 /// Seeded layouts kept per dwelling catalog id.
@@ -859,5 +895,26 @@ mod tests {
                 assemble_dwelling(&catalog, id, 0).unwrap().len()
             );
         }
+    }
+
+    #[test]
+    fn woods_hut_is_a_small_thatch_cell_not_a_village_box() {
+        let places = assemble_woods_hut();
+        let names: Vec<_> = places.iter().map(|p| p.piece.as_str()).collect();
+        assert!(names.contains(&"roof_thatch_hip"));
+        assert!(names.contains(&"plinth"));
+        assert!(names.contains(&"wall_halftimber"));
+        assert!(names.contains(&"wall_blind"));
+        assert!(!names.contains(&"roof") && !names.contains(&"roof_b"));
+        let max_xz = places
+            .iter()
+            .map(|p| p.place.position.x.abs().max(p.place.position.z.abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_xz < 2.5,
+            "woods hut must stay a 4 m cell, max xz {max_xz}"
+        );
+        let village = assemble_dwelling(&catalog(), "house_hut_thatch", 1).unwrap();
+        assert_ne!(places.len(), village.len());
     }
 }

@@ -62,8 +62,8 @@ impl OverlandSite {
                 ]
             }
             SiteKind::WoodsHut => {
-                // Door is local -Z. Stand the pack on the stoop, unstacked.
-                let (fx, fz) = kit::yaw_xz(0.0, -7.2, self.yaw_deg);
+                // Door is local -Z of the 4 m cell. Stand the pack on the stoop.
+                let (fx, fz) = kit::yaw_xz(0.0, -3.7, self.yaw_deg);
                 let (sx, sz) = kit::yaw_xz(STRAFE_M as f32, 0.0, self.yaw_deg);
                 [
                     (
@@ -443,8 +443,6 @@ pub fn spawn_site_props(
     let mut ids = Vec::new();
     let mut statics: HashMap<&str, Mesh> = HashMap::new();
     let mut hut_pieces: HashMap<String, Mesh> = HashMap::new();
-    let catalog = kit::catalog();
-    let world_seed = surface.world_seed();
     for site in sites {
         let before = ids.len();
         let ground = surface.column(site.at).ground();
@@ -478,9 +476,7 @@ pub fn spawn_site_props(
                 ids.push(world.spawn_anchored(mesh, place)?);
             }
             SiteKind::WoodsHut => {
-                let seed = site_hash(world_seed, site.pin_id);
-                let places = kit::assemble_dwelling(&catalog, "house_hut_thatch", seed)
-                    .map_err(|err| EngineError::Model(format!("woods hut kit: {err}")))?;
+                let places = kit::assemble_woods_hut();
                 for item in places {
                     let key = item.piece.to_string();
                     let mesh = if let Some(m) = hut_pieces.get(&key) {

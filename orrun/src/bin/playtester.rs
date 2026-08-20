@@ -3531,7 +3531,8 @@ fn site_camera_stand(session: &WorldSession, kind: Option<SiteKind>) -> Option<G
                 .unwrap_or(&cands[0])
         }
         SiteKind::WoodsHut => {
-            let (dx, dz) = yaw_xz(4.2, -13.0, site.yaw_deg);
+            // 3/4 off the door-right corner: thatch hip + plinth + 4 m mass.
+            let (dx, dz) = yaw_xz(8.8, -11.2, site.yaw_deg);
             GlobalXZ::at(site.at.x + f64::from(dx), site.at.z + f64::from(dz))
         }
     };
@@ -3546,10 +3547,10 @@ fn site_look(session: &WorldSession, site: OverlandSite) -> Option<(Vec3, Vec3)>
     let (tx, ty, tz) = match site.kind {
         SiteKind::TakenCairn => (site.at.x as f32, ground + 1.05, site.at.z as f32),
         SiteKind::WoodsHut => {
-            let (dx, dz) = yaw_xz(0.0, -6.4, site.yaw_deg);
+            let (dx, dz) = yaw_xz(0.15, -0.7, site.yaw_deg);
             (
                 site.at.x as f32 + dx,
-                ground + 1.45,
+                ground + 2.25,
                 site.at.z as f32 + dz,
             )
         }
