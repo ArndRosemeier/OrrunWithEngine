@@ -135,6 +135,7 @@ fn main() {
         combat_body_melee_at: None,
         combat_bones_melee_at: None,
         combat_mage_cast_at: None,
+        combat_mage_stand: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -366,6 +367,7 @@ struct Driver {
     combat_body_melee_at: Option<f32>,
     combat_bones_melee_at: Option<f32>,
     combat_mage_cast_at: Option<f32>,
+    combat_mage_stand: Option<GlobalXZ>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -442,7 +444,7 @@ impl Driver {
         self.hooks.get(self.hook_i).map(String::as_str)
     }
 
-    fn input_for_phase(&self, frame: &Frame) -> WalkInput {
+    fn input_for_phase(&mut self, frame: &Frame) -> WalkInput {
         let dt = frame.dt.max(0.0);
         let mut input = WalkInput {
             dt,
@@ -558,14 +560,19 @@ impl Driver {
             Phase::CombatMageLive => {
                 if !self.combat_tab_sent || self.session.lock_id().is_none() {
                     input.tab = true;
-                } else if let (Some(pos), Some(stand)) = (
-                    self.session.player_position(),
-                    mage_view_stand(&self.session),
-                ) {
-                    if pos.horizontal().distance(stand) > 0.45 {
-                        input = walk_toward(pos.horizontal(), stand, dt);
-                        input.yaw_delta_degrees = self.pending_yaw_delta;
-                        input.pitch_delta_degrees = self.pending_pitch_delta;
+                } else {
+                    if self.combat_mage_stand.is_none() {
+                        self.combat_mage_stand = mage_view_stand(&self.session);
+                    }
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        self.combat_mage_stand,
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
                     }
                 }
             }
@@ -1623,6 +1630,7 @@ impl Driver {
         self.session.rearm_mage_fixture(world);
         self.combat_tab_sent = false;
         self.combat_mage_cast_at = None;
+        self.combat_mage_stand = None;
         self.phase = Phase::CombatMageLive;
         self.phase_t0 = frame.time;
     }
@@ -1680,7 +1688,10 @@ impl Driver {
             }
             return;
         }
-        if let Some(stand) = mage_view_stand(&self.session) {
+        if self.combat_mage_stand.is_none() {
+            self.combat_mage_stand = mage_view_stand(&self.session);
+        }
+        if let Some(stand) = self.combat_mage_stand {
             if let Some(pos) = self.session.player_position() {
                 if pos.horizontal().distance(stand) >= 0.45 {
                     if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -1695,7 +1706,7 @@ impl Driver {
             self.session.replay_weapon(world);
             frame.time
         });
-        if frame.time - cast_at < 0.45 {
+        if frame.time - cast_at < 0.62 {
             return;
         }
         self.write_json(
@@ -2981,18 +2992,27 @@ fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
-    const STAND_M: f64 = 5.5;
+    // 3/4 from the mage's RIGHT (staff hand). Back along mage-to-player
+    // facing, then a right sidestep so the Z-baked shaft is not end-on.
+    // Snapshot this once: player motion would otherwise rotate the offset.
+    const STAND_M: f64 = 4.2;
+    const SIDE_M: f64 = 3.6;
     let pos = session.player_position()?;
     let h = session.combat().hostiles.first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
-    let (ux, uz) = if len > 1e-6 {
+    let (fx, fz) = if len > 1e-6 {
         (dx / len, dz / len)
     } else {
         (-1.0, 0.0)
     };
-    Some(GlobalXZ::at(h.x + ux * STAND_M, h.z + uz * STAND_M))
+    // Mage faces the player (fx,fz). Right-handed Y-up: right = (-fz, fx).
+    let (rx, rz) = (-fz, fx);
+    Some(GlobalXZ::at(
+        h.x + fx * STAND_M + rx * SIDE_M,
+        h.z + fz * STAND_M + rz * SIDE_M,
+    ))
 }
 
 fn wolf_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
