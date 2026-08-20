@@ -1741,6 +1741,7 @@ impl Driver {
     }
 
     fn aim_at_mage_body(&mut self) {
+        // Mesh sits ORC_MESH_BEHIND 1.6 m behind the hitbox. Look at that chest.
         self.aim_at_humanoid(1.6, 1.15);
     }
 
@@ -2992,11 +2993,12 @@ fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
-    // 3/4 from the mage's RIGHT (staff hand). Back along mage-to-player
-    // facing, then a right sidestep so the Z-baked shaft is not end-on.
-    // Snapshot this once: player motion would otherwise rotate the offset.
-    const STAND_M: f64 = 4.2;
-    const SIDE_M: f64 = 3.6;
+    // Close crop of head+torso+hands. Mesh is 1.6 m behind the hitbox;
+    // stand just in front of the hitbox so the mage fills the frame and
+    // hamlet trees/bushes are not what a reviewer samples as a staff.
+    // Snapshot once: player motion would otherwise rotate the offset.
+    const STAND_M: f64 = 1.0;
+    const SIDE_M: f64 = 0.0;
     let pos = session.player_position()?;
     let h = session.combat().hostiles.first()?;
     let dx = pos.x - h.x;
