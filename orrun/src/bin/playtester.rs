@@ -86,6 +86,8 @@ fn main() {
         "demon.png",
         "bluedemon.json",
         "bluedemon.png",
+        "tribal_veteran.json",
+        "tribal_veteran.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -149,6 +151,7 @@ fn main() {
         combat_demon_punch_at: None,
         combat_demon_stand: None,
         combat_bluedemon_punch_at: None,
+        combat_tribal_veteran_punch_at: None,
         combat_body_melee_at: None,
         combat_bones_melee_at: None,
         combat_mage_cast_at: None,
@@ -337,6 +340,7 @@ enum Phase {
     CombatYetiLive,
     CombatDemonLive,
     CombatBlueDemonLive,
+    CombatTribalVeteranLive,
     CombatBodyLive,
     CombatBonesLive,
     CombatMageLive,
@@ -395,6 +399,7 @@ struct Driver {
     combat_demon_punch_at: Option<f32>,
     combat_demon_stand: Option<GlobalXZ>,
     combat_bluedemon_punch_at: Option<f32>,
+    combat_tribal_veteran_punch_at: Option<f32>,
     combat_body_melee_at: Option<f32>,
     combat_bones_melee_at: Option<f32>,
     combat_mage_cast_at: Option<f32>,
@@ -454,6 +459,7 @@ impl Driver {
                 | Phase::CombatYetiLive
                 | Phase::CombatDemonLive
                 | Phase::CombatBlueDemonLive
+                | Phase::CombatTribalVeteranLive
         ) || matches!(
             self.awaiting_shot.as_deref(),
             Some("combat")
@@ -464,6 +470,7 @@ impl Driver {
                 | Some("yeti")
                 | Some("demon")
                 | Some("bluedemon")
+                | Some("tribal_veteran")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -603,6 +610,25 @@ impl Driver {
                 // Stay in the 1.5 m stand until Punch connects (reach 2.0).
                 // Then walk back to the human viewing stand so bluedemon.png
                 // shows a BLUE body, not a torso wall. Not Demon 3/4 Trident.
+                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if self.session.incoming_hit() {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        orc_view_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                }
+            }
+            Phase::CombatTribalVeteranLive => {
+                // Stay in the 1.5 m stand until Punch connects (reach 1.6).
+                // Then walk back to the human viewing stand so tribal_veteran.png
+                // shows mask + bone necklace + left-shoulder pelt, not a torso wall.
                 if self.combat_tab_sent && self.session.lock_id().is_none() {
                     input.tab = true;
                 } else if self.session.incoming_hit() {
@@ -840,6 +866,7 @@ impl Driver {
             Phase::CombatYetiLive => self.tick_combat_yeti(world, frame),
             Phase::CombatDemonLive => self.tick_combat_demon(world, frame),
             Phase::CombatBlueDemonLive => self.tick_combat_bluedemon(world, frame),
+            Phase::CombatTribalVeteranLive => self.tick_combat_tribal_veteran(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::CombatBonesLive => self.tick_combat_bones(world, frame),
             Phase::CombatMageLive => self.tick_combat_mage(world, frame),
@@ -875,6 +902,7 @@ impl Driver {
             "combat_yeti" => self.start_combat_yeti(world, frame),
             "combat_demon" => self.start_combat_demon(world, frame),
             "combat_bluedemon" => self.start_combat_bluedemon(world, frame),
+            "combat_tribal_veteran" => self.start_combat_tribal_veteran(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
             "combat_bones" => self.start_combat_bones(world, frame),
             "combat_mage" => self.start_combat_mage(world, frame),
@@ -2493,9 +2521,120 @@ impl Driver {
                 "shot": "bluedemon.png",
             }),
         );
+
         self.ok_hook("combat_bluedemon");
         world.mark_ready();
         self.queue_shot(world, frame, "bluedemon");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn start_combat_tribal_veteran(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_tribal_veteran_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_shot_sent = false;
+        self.combat_tribal_veteran_punch_at = None;
+        self.phase = Phase::CombatTribalVeteranLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_tribal_veteran(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: tribal_veteran mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_orc();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = orc_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 14.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_tribal_veteran: never looked at tribal_veteran");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        self.combat_tab_sent = true;
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: lock unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let name = name.to_string();
+        if name != "tribal_veteran" {
+            self.fail_current(&format!("combat_tribal_veteran: want tribal_veteran lock, got {name}"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.incoming_hit() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: incoming Punch never landed");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(stand) = orc_view_stand(&self.session) else {
+            self.fail_current("combat_tribal_veteran: no tribal_veteran view stand");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_tribal_veteran: never reached tribal_veteran view stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let punch_at = *self.combat_tribal_veteran_punch_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        if frame.time - punch_at < 0.35 {
+            return;
+        }
+        self.write_json(
+            "tribal_veteran",
+            json!({
+                "status": "ok",
+                "name": name,
+                "hp": hp,
+                "punch": true,
+                "shot": "tribal_veteran.png",
+            }),
+        );
+        self.ok_hook("combat_tribal_veteran");
+        world.mark_ready();
+        self.queue_shot(world, frame, "tribal_veteran");
         self.phase = Phase::NextHook;
         self.phase_t0 = frame.time;
     }

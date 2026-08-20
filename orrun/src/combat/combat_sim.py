@@ -202,6 +202,16 @@ BLUE_DEMON_REACH_M = 2.0
 BLUE_DEMON_SPEED = 3.6
 BLUE_DEMON_XP = 140
 
+# Tribal Veteran - L10 melee, Punch only. Pin/slow HOLD (no clip).
+TRIBAL_VETERAN_LEVEL = 10
+TRIBAL_VETERAN_HP = 210
+TRIBAL_VETERAN_ARMOR = 10
+TRIBAL_VETERAN_DMG = 22
+TRIBAL_VETERAN_SWING_S = 1.8
+TRIBAL_VETERAN_REACH_M = 1.6
+TRIBAL_VETERAN_SPEED = 5.0
+TRIBAL_VETERAN_XP = 130
+
 # XP to go from N → N+1 (N=1..9). Tuned so the locked dungeon path
 # D1→L4, D2→L8, T2/Mother→L10 lands in 90–150 minutes.
 XP_TO_NEXT = {
@@ -402,6 +412,27 @@ def blue_demon_sheet() -> Dict[str, Any]:
     }
 
 
+def tribal_veteran_sheet() -> Dict[str, Any]:
+    return {
+        "id": "tribal_veteran",
+        "name": "tribal_veteran",
+        "level": TRIBAL_VETERAN_LEVEL,
+        "hp": TRIBAL_VETERAN_HP,
+        "armor": TRIBAL_VETERAN_ARMOR,
+        "damage": TRIBAL_VETERAN_DMG,
+        "swing_s": TRIBAL_VETERAN_SWING_S,
+        "reach_m": TRIBAL_VETERAN_REACH_M,
+        "speed_mps": TRIBAL_VETERAN_SPEED,
+        "sight_m": SIGHT_AGGRO_M,
+        "hear_m": HEAR_AGGRO_M,
+        "leash_m": LEASH_M,
+        "social_m": SOCIAL_M,
+        "xp": TRIBAL_VETERAN_XP,
+        "token_brood": 0,
+        "specials": [],
+    }
+
+
 def yeti_sheet() -> Dict[str, Any]:
     return {
         "id": "yeti",
@@ -435,6 +466,7 @@ MOB_BUILDERS = {
     "yeti": lambda lvl=None: yeti_sheet(),
     "demon": lambda lvl=None: demon_sheet(),
     "blue_demon": lambda lvl=None: blue_demon_sheet(),
+    "tribal_veteran": lambda lvl=None: tribal_veteran_sheet(),
 }
 
 MOB_ALIASES = {
@@ -447,6 +479,7 @@ MOB_ALIASES = {
     "GreenBlob": "green_blob",
     "greenblob": "green_blob",
     "BlueDemon": "blue_demon",
+    "TribalVeteran": "tribal_veteran",
 }
 
 
@@ -1655,6 +1688,7 @@ def run_all(seed: int = 1) -> Dict[str, Any]:
             "yeti": yeti_sheet(),
             "demon": demon_sheet(),
             "blue_demon": blue_demon_sheet(),
+            "tribal_veteran": tribal_veteran_sheet(),
         },
         "player_specialists": {
             f"L{lv}_{d}": player_stats(lv, d)

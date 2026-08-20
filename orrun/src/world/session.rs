@@ -593,6 +593,18 @@ impl WorldSession {
         self.dungeon_skulls_for = None;
     }
 
+    /// Reseats one published tribal_veteran on the next world tick. Meshes despawn now.
+    pub fn rearm_tribal_veteran_fixture(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
+        self.combat_layer.request_tribal_veteran_fixture();
+        self.combat_layer.skip_roster_pins();
+        self.combat_layer.rearm();
+        self.dungeon_skulls_for = None;
+    }
+
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
@@ -1538,6 +1550,14 @@ impl WorldSession {
                     );
                 } else if self.combat_layer.wants_bluedemon() {
                     self.combat_layer.install_bluedemon_fixture(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else if self.combat_layer.wants_tribal_veteran() {
+                    self.combat_layer.install_tribal_veteran_fixture(
                         &mut self.combat,
                         player.position.x,
                         player.position.z,

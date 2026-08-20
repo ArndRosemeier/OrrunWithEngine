@@ -14,7 +14,8 @@ use crate::combat::math::{
 };
 use crate::combat::sheets::{
     blue_demon_sheet, demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet,
-    skeleton_minion_sheet, skeleton_warrior_sheet, wolf_sheet, yeti_sheet, MobSheet,
+    skeleton_minion_sheet, skeleton_warrior_sheet, tribal_veteran_sheet, wolf_sheet,
+    yeti_sheet, MobSheet,
 };
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::combat::Discipline;
@@ -68,6 +69,7 @@ enum FixtureKind {
     Yeti,
     Demon,
     BlueDemon,
+    TribalVeteran,
 }
 
 struct MeshAnchor {
@@ -173,6 +175,10 @@ impl CombatLayer {
         self.fixture_kind = FixtureKind::BlueDemon;
     }
 
+    pub fn request_tribal_veteran_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::TribalVeteran;
+    }
+
     /// Playtester HOLD rearms stay fixture-only: no overland sites, no roster pins.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
@@ -219,6 +225,10 @@ impl CombatLayer {
 
     pub fn wants_bluedemon(&self) -> bool {
         self.fixture_kind == FixtureKind::BlueDemon
+    }
+
+    pub fn wants_tribal_veteran(&self) -> bool {
+        self.fixture_kind == FixtureKind::TribalVeteran
     }
 
     pub fn first_auto(&self) -> Option<i32> {
@@ -771,6 +781,81 @@ impl CombatLayer {
         combat.second_wind_used = false;
         combat.last_rank_gate = None;
         self.fixture_kind = FixtureKind::BlueDemon;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.skull_tele.clear();
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
+    }
+
+
+    /// One published tribal_veteran 1.5 m in front of the player. First Punch after swing_s.
+    /// Pin/slow tells are HOLD (no clip). Melee clip is Punch. Empty hands.
+    pub fn install_tribal_veteran_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let sheet = tribal_veteran_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.hostiles.push(WorldHostile {
+            idx: 0,
+            x: player_x + fx * 1.5,
+            z: player_z + fz * 1.5,
+            hp: f64::from(sheet.hp),
+            max_hp: f64::from(sheet.hp),
+            armor: sheet.armor,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: sheet.name.clone(),
+            mob_id: "tribal_veteran".into(),
+            entity: None,
+            damage: sheet.damage,
+            swing_s: sheet.swing_s,
+            swing_cd: sheet.swing_s,
+            reach_m: sheet.reach_m,
+        });
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::TribalVeteran;
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
@@ -1939,6 +2024,26 @@ mod tests {
         assert!(layer.wants_bluedemon());
         assert!(layer.fixture_ready());
         assert!(!layer.wants_demon());
+    }
+
+
+    #[test]
+    fn tribal_veteran_sheet_fixture_is_one_tribal_veteran_with_swing_cd_armed() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_tribal_veteran_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        assert_eq!(combat.hostiles.len(), 1);
+        let h = &combat.hostiles[0];
+        assert_eq!(h.mob_id, "tribal_veteran");
+        assert_eq!(h.name, "tribal_veteran");
+        assert!((h.x - 1.5).abs() < 1e-9);
+        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
+        assert!((h.reach_m - 1.6).abs() < 1e-9);
+        assert_eq!(h.max_hp, 210.0);
+        assert_eq!(h.damage, 22);
+        assert!(layer.wants_tribal_veteran());
+        assert!(layer.fixture_ready());
+        assert!(!layer.wants_bluedemon());
     }
 
     #[test]

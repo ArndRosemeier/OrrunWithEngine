@@ -492,6 +492,34 @@ pub fn blue_demon_sheet() -> MobSheet {
     }
 }
 
+pub fn tribal_veteran_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "tribal_veteran".into(),
+        name: "tribal_veteran".into(),
+        level: TRIBAL_VETERAN_LEVEL,
+        hp: TRIBAL_VETERAN_HP,
+        armor: TRIBAL_VETERAN_ARMOR,
+        damage: TRIBAL_VETERAN_DMG,
+        swing_s: TRIBAL_VETERAN_SWING_S,
+        slam_damage: None,
+        slam_every_s: None,
+        telegraph_s: None,
+        reach_m: TRIBAL_VETERAN_REACH_M,
+        speed_mps: TRIBAL_VETERAN_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: TRIBAL_VETERAN_XP,
+        token_brood: 0,
+        specials: vec![],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
 pub fn yeti_sheet() -> MobSheet {
     let (sight, hear, leash, social) = aggro_fields();
     MobSheet {
@@ -537,6 +565,7 @@ pub fn resolve_mob_id(name: &str) -> Result<String, String> {
         "yeti" => Ok("yeti".into()),
         "demon" => Ok("demon".into()),
         "blue_demon" | "BlueDemon" => Ok("blue_demon".into()),
+        "tribal_veteran" | "TribalVeteran" => Ok("tribal_veteran".into()),
         "bandit" | "male_bandit" => Ok("bandit".into()),
         other => Err(format!("unknown mob: {other}")),
     }
@@ -558,6 +587,7 @@ pub fn mob_sheet(id: &str, level: Option<i32>) -> Result<MobSheet, String> {
         "yeti" => yeti_sheet(),
         "demon" => demon_sheet(),
         "blue_demon" => blue_demon_sheet(),
+        "tribal_veteran" => tribal_veteran_sheet(),
         "bandit" => bandit_sheet(),
         other => return Err(format!("unknown mob: {other}")),
     })
@@ -888,6 +918,7 @@ pub fn mob_sheets_json() -> Value {
         "yeti": yeti_sheet(),
         "demon": demon_sheet(),
         "blue_demon": blue_demon_sheet(),
+        "tribal_veteran": tribal_veteran_sheet(),
         "bandit": bandit_sheet(),
     })
 }

@@ -99,6 +99,14 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             anim_weapon: None,
             weapon_node: None,
         },
+        "tribal_veteran" | "TribalVeteran" => CombatMesh {
+            id: "tribal_veteran",
+            source: "monsters/big/Tribal_Veteran.glb",
+            anim_idle: "Idle",
+            anim_melee: "Punch",
+            anim_weapon: None,
+            weapon_node: None,
+        },
         _ => return None,
     })
 }
@@ -121,6 +129,7 @@ mod tests {
             "yeti",
             "demon",
             "blue_demon",
+            "tribal_veteran",
         ] {
             let spec = mesh_spec(id).expect(id);
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -226,6 +235,56 @@ mod tests {
         assert!(
             !json.contains("\"name\":\"Trident\""),
             "BlueDemon.glb must not carry a Trident node"
+        );
+    }
+
+    #[test]
+    fn tribal_veteran_glb_loads_idle_and_punch() {
+        let spec = mesh_spec("tribal_veteran").expect("tribal_veteran");
+        assert_eq!(spec.source, "monsters/big/Tribal_Veteran.glb");
+        assert_eq!(spec.anim_idle, "Idle");
+        assert_eq!(spec.anim_melee, "Punch");
+        assert_eq!(spec.anim_weapon, None);
+        assert_eq!(spec.weapon_node, None);
+        let alias = mesh_spec("TribalVeteran").expect("TribalVeteran");
+        assert_eq!(alias.id, "tribal_veteran");
+        assert_eq!(alias.weapon_node, None);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(spec.source);
+        let root = path.parent().unwrap();
+        let model = engine::anim::AnimatedModel::load_with(
+            &path,
+            root,
+            &engine::EngineLimits::default(),
+        )
+        .unwrap_or_else(|err| panic!("tribal_veteran glb load: {err}"));
+        assert!(
+            model.find_clip(spec.anim_idle).is_some(),
+            "Idle missing on tribal_veteran"
+        );
+        assert!(
+            model.find_clip(spec.anim_melee).is_some(),
+            "Punch missing on tribal_veteran"
+        );
+        let bytes = std::fs::read(&path).expect("read Tribal_Veteran.glb");
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let json = std::str::from_utf8(&bytes[20..20 + json_len]).expect("glb json");
+        assert!(
+            json.contains("\"name\":\"Tribal_Veteran\""),
+            "Tribal_Veteran node missing in Tribal_Veteran.glb"
+        );
+        assert!(
+            json.contains("\"name\":\"VeteranBones\""),
+            "VeteranBones node missing in Tribal_Veteran.glb"
+        );
+        assert!(
+            json.contains("\"name\":\"VeteranPelt\""),
+            "VeteranPelt node missing in Tribal_Veteran.glb"
+        );
+        assert!(
+            !json.contains("\"name\":\"Trident\""),
+            "Tribal_Veteran.glb must not carry a Trident node"
         );
     }
 
