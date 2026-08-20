@@ -34,7 +34,9 @@ Live roster through L10: Yeti L6 Punch `2ef0de5`, Demon L8 Punch+trident `6476cd
 
 ## M6 Village life 2 - NEXT
 
-Kill death pose SHIP: Engine `6ef3042` play-once holds last frame, Orrun `f275831` (Playtester PASS + Reviewer). Bandit/villagers skip (no Death clip). Player slain path unchanged. No loot sparkle.
+Kill death pose SHIP: Engine `6ef3042` play-once holds last frame, Orrun `f275831` (Playtester PASS + Reviewer). Bandit/villagers skip (no Death clip). Player slain path unchanged.
+
+Loot first slice SHIP: I bag, click-corpse loot modal, sparkle on Death pose. No shop, no chest. Playtester PASS sparkle `17ab92a` + modal/bag `bf00fdb`. Reviewer SHIP `17ab92a`. Prior yellow-floor HOLD closed.
 
 Walker/door/alley already live. Status icons belong on M7. Fire ring and tents wait for a mesh (indoor furn_hearth is not a campfire).
 
