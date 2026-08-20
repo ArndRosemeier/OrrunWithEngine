@@ -28,11 +28,11 @@ Packs sit on a visible site. First stamp: Taken Cairn + Woods Hut (L5 bandits). 
 
 Later stamps (not this close): berry theft, ford, silk yard, cut landing, Ash Hold, Sour Well.
 
-## M5 Path to 20 - NEXT
+## M5 Path to 20 - SHIP (2026-08-20)
 
-Yeti L6 Punch fixture SHIP `2ef0de5`. Demon L8 Punch+trident SHIP `6476cd8`. BlueDemon L7 Punch SHIP `43abc77` (Playtester PASS + Reviewer). Slam/Shout/caster HOLD (no clips). Remaining: tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
+Live roster through L10: Yeti L6 Punch `2ef0de5`, Demon L8 Punch+trident `6476cd8`, BlueDemon L7 Punch `43abc77`, tribal veteran L10 Punch `fc224da`. Playtester PASS + Reviewer on each. Slam/Shout/caster/Pin HOLD (no clips). No fake bows. Hinterland bandit already live on M4 sites.
 
-## M6 Village life 2 — LATER
+## M6 Village life 2 - NEXT
 
 Fire ring and tents if we get meshes. More civilian loops. Status icons. Kill death pose.
 
