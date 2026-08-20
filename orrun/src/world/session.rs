@@ -2451,24 +2451,42 @@ impl WorldSession {
         self.settlements.as_ref()?.hamlet_camp(hamlet.at)
     }
 
-    /// Camera stand pulled in on the yard pair (tent canvas + ring stones).
+    /// Stand at the well/plaza, three-quarter off the cut like village.png.
+    /// Houses stay in frame; tent canvas + ring sit in the yard. Not a dirt crane.
     pub fn village_camp_stand(&self) -> Option<GlobalPosition> {
         let (tent, ring) = self.village_camp_pair()?;
+        let hamlet = self.nearest_tier0_hamlet()?;
+        let plaza = hamlet
+            .cut
+            .last()
+            .map(|p| GlobalXZ::at(f64::from(p.x), f64::from(p.y)))
+            .unwrap_or(hamlet.at);
         let mid_x = (tent.x + ring.x) * 0.5;
         let mid_z = (tent.z + ring.z) * 0.5;
-        let ax = (ring.x - tent.x) as f32;
-        let az = (ring.z - tent.z) as f32;
-        let len = (ax * ax + az * az).sqrt().max(1e-6);
-        let px = -az / len;
-        let pz = ax / len;
+        let (along_x, along_z) = if hamlet.cut.len() >= 2 {
+            let a = hamlet.cut[0];
+            let b = hamlet.cut[hamlet.cut.len() - 1];
+            let tx = b.x - a.x;
+            let tz = b.y - a.y;
+            let len = (tx * tx + tz * tz).sqrt().max(1e-6);
+            (tx / len, tz / len)
+        } else {
+            let tx = (mid_x - plaza.x) as f32;
+            let tz = (mid_z - plaza.z) as f32;
+            let len = (tx * tx + tz * tz).sqrt().max(1e-6);
+            (tx / len, tz / len)
+        };
+        // Back along the street from the well, then 3.6 m off the cut (village three-quarter).
         let stand = GlobalXZ::at(
-            mid_x + f64::from(px * 4.6 - (ax / len) * 1.3),
-            mid_z + f64::from(pz * 4.6 - (az / len) * 1.3),
+            plaza.x - f64::from(along_x * 3.2 + (-along_z) * 3.6),
+            plaza.z - f64::from(along_z * 3.2 + along_x * 3.6),
         );
-        let ground = self
-            .contact_height(stand)
-            .unwrap_or_else(|| self.surface.column(stand).ground());
-        Some(GlobalPosition::at(stand.x, f64::from(ground + 1.85), stand.z))
+        let ground = self.surface.column(stand).ground();
+        Some(GlobalPosition::at(
+            stand.x,
+            f64::from(ground + EYE_HEIGHT_M),
+            stand.z,
+        ))
     }
 
     pub fn village_camp_look(&self) -> Option<(Vec3, Vec3)> {
@@ -2477,7 +2495,7 @@ impl WorldSession {
         let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
         let target = Vec3::new(
             ((tent.x + ring.x) * 0.5) as f32,
-            ((tent.y + ring.y) * 0.5) as f32 + 0.7,
+            ((tent.y + ring.y) * 0.5) as f32 + 1.35,
             ((tent.z + ring.z) * 0.5) as f32,
         );
         Some((eye, target))

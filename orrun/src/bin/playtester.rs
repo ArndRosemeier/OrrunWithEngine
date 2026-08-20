@@ -4019,7 +4019,7 @@ impl Driver {
         }
         let dwelling_count = hamlet.houses.len();
         let cut: Vec<glam::Vec2> = hamlet.cut.clone();
-        let _pin = hamlet.at;
+        let pin = hamlet.at;
         let ribbon_faces = self.session.ribbon_faces();
         let human_count = self.session.village_human_mesh_count(world);
         let human_on_corridor = self.session.village_human_on_corridor();
@@ -4110,6 +4110,7 @@ impl Driver {
             "village",
             json!({
                 "status": "ok",
+                "pin": { "x": pin.x, "z": pin.z },
                 "cut_len": cut.len(),
                 "cut_samples": samples.len(),
                 "cut_blocked": 0,
@@ -4244,7 +4245,12 @@ impl Driver {
             }
             return;
         }
-        let pin = self.session.village_well().unwrap_or(tent.horizontal());
+        // Same pin village writes: seated tier-0 hamlet.at, not a hinterland well/tent.
+        let pin = self
+            .session
+            .nearest_tier0_hamlet()
+            .map(|h| h.at)
+            .unwrap_or(tent.horizontal());
         self.write_json(
             "camp",
             json!({
