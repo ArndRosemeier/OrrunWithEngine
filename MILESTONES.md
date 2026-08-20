@@ -44,4 +44,6 @@ Walker/door/alley already live. Status icons belong on M7. Fire ring and tents s
 
 Hotbar CD radial sweep SHIP: radial pie on Strike, not a curtain. Playtester PASS + Reviewer SHIP `cd_sweep.png` on `947f918`.
 
-Cast bar / con color / status icons still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
+Cast bar SHIP: Ember remaining-time bar above the hotbar. Pie left alone. Playtester PASS + Reviewer SHIP `cast_bar.png` on `c8403d7`.
+
+Con color / status icons / nameplates still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
