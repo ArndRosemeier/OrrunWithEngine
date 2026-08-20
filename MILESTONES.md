@@ -38,8 +38,10 @@ Kill death pose SHIP: Engine `6ef3042` play-once holds last frame, Orrun `f27583
 
 Loot first slice SHIP: I bag, click-corpse loot modal, sparkle on Death pose. No shop, no chest. Playtester PASS sparkle `17ab92a` + modal/bag `bf00fdb`. Reviewer SHIP `17ab92a`. Prior yellow-floor HOLD closed.
 
-Walker/door/alley already live. Status icons belong on M7. Fire ring and tents wait for a mesh (indoor furn_hearth is not a campfire).
+Walker/door/alley already live. Status icons belong on M7. Fire ring and tents still HOLD (wait for a mesh; indoor furn_hearth is not a campfire).
 
 ## M7 Ability HUD — LATER
 
-Hotbar CD sweep, cast bars, auto-attack pip, con color when levels mix. Floating combat text and a first-person weapon stay off this board unless we put them on.
+Hotbar CD radial sweep SHIP: radial pie on Strike, not a curtain. Playtester PASS + Reviewer SHIP `cd_sweep.png` on `947f918`.
+
+Cast bar / con color / status icons still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
