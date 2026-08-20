@@ -40,9 +40,9 @@ use orrun::controls::{is_reserved, Action};
 use orrun::hud;
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
-    best_settlement_entry, install_daylight, install_materials, Ambience, AtlasBounds, AtlasCell,
-    ContinentProxySpec, ContinentalSurface, Heading, Locomotion, MapPoint, PondField, SessionState,
-    WorldEntryRequest, WorldSession,
+    best_settlement_entry, install_daylight, install_materials, plan_overland_sites, Ambience,
+    AtlasBounds, AtlasCell, ContinentProxySpec, ContinentalSurface, Heading, Locomotion, MapPoint,
+    OverlandSite, PondField, SessionState, SiteKind, WorldEntryRequest, WorldSession,
 };
 
 const MIN_ZOOM: f32 = 0.15;
@@ -1067,6 +1067,9 @@ fn draw_atlas(
         .show(&ctx, |ui| {
             let mut go_largest = false;
             let mut go_dungeon = false;
+            let mut go_hamlet = false;
+            let mut go_cairn = false;
+            let mut go_hut = false;
             let travel_btns = egui::Area::new(egui::Id::new("atlas_travel_btns"))
                 .anchor(Align2::RIGHT_TOP, [-12.0, 12.0])
                 .order(egui::Order::Foreground)
@@ -1080,6 +1083,15 @@ fn draw_atlas(
                                 }
                                 if ui.button("Go to nearest dungeon").clicked() {
                                     go_dungeon = true;
+                                }
+                                if ui.button("Go to hamlet yard").clicked() {
+                                    go_hamlet = true;
+                                }
+                                if ui.button("Go to Taken Cairn").clicked() {
+                                    go_cairn = true;
+                                }
+                                if ui.button("Go to Woods Hut").clicked() {
+                                    go_hut = true;
                                 }
                             });
                         });
@@ -1150,6 +1162,15 @@ fn draw_atlas(
             }
             if go_dungeon {
                 travel_to_nearest_dungeon(viewer, session, world);
+            }
+            if go_hamlet {
+                travel_to_hamlet_yard(viewer, session, world);
+            }
+            if go_cairn {
+                travel_to_taken_cairn(viewer, session, world);
+            }
+            if go_hut {
+                travel_to_woods_hut(viewer, session, world);
             }
 
             // Enter still travels to the last pick, and M puts a summoned map
@@ -1307,6 +1328,101 @@ fn travel_to_nearest_dungeon(
         }
         Err(err) => {
             viewer.note = Some(format!("cannot land at the nearest dungeon: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn travel_to_hamlet_yard(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+    let from = session
+        .player_position()
+        .map(|p| GlobalXZ::at(p.x, p.z))
+        .or_else(|| viewer.selection.map(|point| point.to_global()))
+        .unwrap_or_else(|| {
+            let half = viewer.bounds.metres() * 0.5;
+            GlobalXZ::at(half, half)
+        });
+    let Some(pin) = session.nearest_tier0_pin(from) else {
+        viewer.note = Some("this continent has no hamlet yard".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, pin.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("hamlet yard is off the map: {err}"));
+            return;
+        }
+    };
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some("travelling to the hamlet yard".into());
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at the hamlet yard: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn resolve_overland_site(session: &WorldSession, kind: SiteKind) -> Option<OverlandSite> {
+    session.overland_site(kind).or_else(|| {
+        plan_overland_sites(
+            session.surface(),
+            session.surface().settlements(),
+            session.hamlets(),
+        )
+        .into_iter()
+        .find(|site| site.kind == kind)
+    })
+}
+
+fn travel_to_taken_cairn(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+    let Some(site) = resolve_overland_site(session, SiteKind::TakenCairn) else {
+        viewer.note = Some("this continent has no Taken Cairn".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, site.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("Taken Cairn is off the map: {err}"));
+            return;
+        }
+    };
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some("travelling to Taken Cairn".into());
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at Taken Cairn: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn travel_to_woods_hut(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
+    let Some(site) = resolve_overland_site(session, SiteKind::WoodsHut) else {
+        viewer.note = Some("this continent has no Woods Hut".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, site.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("Woods Hut is off the map: {err}"));
+            return;
+        }
+    };
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some("travelling to Woods Hut".into());
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at Woods Hut: {err}"));
             eprintln!("entry refused: {err}");
         }
     }
