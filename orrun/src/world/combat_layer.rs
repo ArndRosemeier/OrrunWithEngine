@@ -367,13 +367,21 @@ impl CombatLayer {
         combat.lock = None;
         combat.cycle.clear();
         combat.auto_cd = crate::combat::MELEE_SWING_S;
-        // First at 1.5 m so wolf reach (1.8 m) connects. Then +0.12 m, still in reach.
+        // First at 1.5 m so wolf reach (1.8 m) connects. The other two sit
+        // beside it (strafe, metres not centimetres) so Tab can pick one mesh.
+        let (sx, sz) = (-fz, fx);
+        const STRAFE_M: f64 = 1.8;
         for i in 0..3 {
-            let dist = 1.5 + f64::from(i) * 0.12;
+            let dist = 1.5;
+            let strafe = match i {
+                1 => -STRAFE_M,
+                2 => STRAFE_M,
+                _ => 0.0,
+            };
             combat.hostiles.push(WorldHostile {
                 idx: i,
-                x: player_x + fx * dist,
-                z: player_z + fz * dist,
+                x: player_x + fx * dist + sx * strafe,
+                z: player_z + fz * dist + sz * strafe,
                 hp: f64::from(sheet.hp),
                 max_hp: f64::from(sheet.hp),
                 armor: sheet.armor,
@@ -681,14 +689,24 @@ impl CombatLayer {
         }
     }
 
-    /// Play catalog anim_melee on hostiles that have the clip.
+    /// Play catalog anim_melee on the locked mesh only.
     pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
-        for h in &combat.hostiles {
-            let mut pending = None;
-            queue_connecting_melee(&mut pending, &self.models, h);
-            if let Some((id, clip)) = pending {
-                if let Some(id) = id {
-                    let _ = world.play_animation(id, clip);
+        let Some(lock) = combat.lock else {
+            return;
+        };
+        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+            return;
+        };
+        let mut pending = None;
+        queue_connecting_melee(&mut pending, &self.models, h);
+        if let Some((id, clip)) = pending {
+            if let Some(id) = id {
+                let _ = world.set_animation_speed(id, 1.0);
+                if let Err(err) = world.play_animation(id, clip) {
+                    panic!(
+                        "{}",
+                        EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
+                    );
                 }
             }
         }
@@ -717,7 +735,9 @@ impl CombatLayer {
     ) -> EngineResult<()> {
         if let Some((id, clip)) = self.pending_melee.take() {
             if let Some(id) = id {
-                let _ = world.play_animation(id, clip);
+                world.play_animation(id, clip).map_err(|err| {
+                    EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
+                })?;
             }
         }
         self.sync_lock_ring(world, combat, &mut ground_y)?;
@@ -1421,6 +1441,10 @@ mod tests {
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
         assert_eq!(combat.hostiles.len(), 3);
         assert!(combat.hostiles.iter().all(|h| h.name == "wolf-spider"));
+        assert!((combat.hostiles[0].x - 1.5).abs() < 1e-9);
+        assert!(combat.hostiles[0].z.abs() < 1e-9);
+        assert!((combat.hostiles[1].z + 1.8).abs() < 1e-9);
+        assert!((combat.hostiles[2].z - 1.8).abs() < 1e-9);
         let catalog = FaunaCatalog::load().expect("fauna catalog");
         let spec = catalog.spec("wolf");
         assert_eq!(spec.source, "wolf/wolf.gltf");

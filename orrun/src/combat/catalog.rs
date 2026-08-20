@@ -39,7 +39,7 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             id: "crawler_spider_wolf",
             source: "fauna/wolf/wolf.gltf",
             anim_idle: "Idle",
-            anim_melee: "Idle",
+            anim_melee: "Attack",
             anim_weapon: None,
             weapon_node: None,
         },

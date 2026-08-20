@@ -128,6 +128,7 @@ fn main() {
         combat_death_sent: false,
         incoming_hp: None,
         combat_orc_punch_at: None,
+        combat_body_melee_at: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -354,6 +355,7 @@ struct Driver {
     combat_death_sent: bool,
     incoming_hp: Option<f64>,
     combat_orc_punch_at: Option<f32>,
+    combat_body_melee_at: Option<f32>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -518,6 +520,15 @@ impl Driver {
             Phase::CombatBodyLive => {
                 if !self.combat_tab_sent {
                     input.tab = true;
+                } else if let (Some(pos), Some(stand)) = (
+                    self.session.player_position(),
+                    wolf_body_view_stand(&self.session),
+                ) {
+                    if pos.horizontal().distance(stand) > 0.45 {
+                        input = walk_toward(pos.horizontal(), stand, dt);
+                        input.yaw_delta_degrees = self.pending_yaw_delta;
+                        input.pitch_delta_degrees = self.pending_pitch_delta;
+                    }
                 }
             }
             Phase::ControlsLive => {
@@ -1363,6 +1374,7 @@ impl Driver {
     fn start_combat_body(&mut self, world: &mut World, frame: &Frame) {
         self.session.rearm_combat_fixtures(world);
         self.combat_tab_sent = false;
+        self.combat_body_melee_at = None;
         self.phase = Phase::CombatBodyLive;
         self.phase_t0 = frame.time;
     }
@@ -1405,9 +1417,9 @@ impl Driver {
             }
             return;
         };
-        if lock_name != "Wolf" || lock_hp <= 0.0 {
+        if lock_name != "wolf-spider" || lock_hp <= 0.0 {
             self.fail_current(&format!(
-                "combat_body: lock want name Wolf + HP>0, got {lock_name} hp={lock_hp}"
+                "combat_body: lock want name wolf-spider + HP>0, got {lock_name} hp={lock_hp}"
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -1420,8 +1432,23 @@ impl Driver {
             }
             return;
         }
-        // Let the wolf body land in the GPU view (horizon/eye, not floor).
-        if frame.time - self.phase_t0 < 0.45 {
+        if let Some(stand) = wolf_body_view_stand(&self.session) {
+            if let Some(pos) = self.session.player_position() {
+                if pos.horizontal().distance(stand) >= 0.45 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat_body: never reached wolf view stand");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+            }
+        }
+        let melee_at = *self.combat_body_melee_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        // Attack is 1.333 s; mid-swing reads around 0.45 s.
+        if frame.time - melee_at < 0.45 {
             return;
         }
         self.write_json(
@@ -1464,7 +1491,20 @@ impl Driver {
             return;
         };
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
-        let target = Vec3::new(h.x as f32, pos.y as f32 + 0.7, h.z as f32);
+        let dx = h.x - pos.x;
+        let dz = h.z - pos.z;
+        let len = (dx * dx + dz * dz).sqrt();
+        let (ux, uz) = if len > 1e-6 {
+            (dx / len, dz / len)
+        } else {
+            (1.0, 0.0)
+        };
+        // Mesh sits WOLF_MESH_BEHIND_M behind the combat point.
+        let target = Vec3::new(
+            (h.x + ux * 2.55) as f32,
+            pos.y as f32 + 0.85,
+            (h.z + uz * 2.55) as f32,
+        );
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
@@ -1480,7 +1520,19 @@ impl Driver {
             return false;
         };
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
-        let target = Vec3::new(h.x as f32, pos.y as f32 + 0.7, h.z as f32);
+        let dx = h.x - pos.x;
+        let dz = h.z - pos.z;
+        let len = (dx * dx + dz * dz).sqrt();
+        let (ux, uz) = if len > 1e-6 {
+            (dx / len, dz / len)
+        } else {
+            (1.0, 0.0)
+        };
+        let target = Vec3::new(
+            (h.x + ux * 2.55) as f32,
+            pos.y as f32 + 0.85,
+            (h.z + uz * 2.55) as f32,
+        );
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         view_angle_degrees(eye, yaw, pitch, target) < 18.0 && pitch > -55.0
@@ -2572,6 +2624,29 @@ fn locomotion_name(mode: Option<Locomotion>) -> &'static str {
     }
 }
 
+
+fn wolf_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    // Stable vs player motion: back along L1 facing, then a sidestep for 3/4 body.
+    const STAND_M: f64 = 7.5;
+    const SIDE_M: f64 = 2.6;
+    let hs = &session.combat().hostiles;
+    if hs.len() < 3 {
+        return None;
+    }
+    let a = &hs[0];
+    let left_x = hs[2].x - hs[1].x;
+    let left_z = hs[2].z - hs[1].z;
+    let ll = (left_x * left_x + left_z * left_z).sqrt();
+    if ll < 1e-6 {
+        return None;
+    }
+    let (sx, sz) = (left_x / ll, left_z / ll);
+    let (fx, fz) = (sz, -sx);
+    Some(GlobalXZ::at(
+        a.x - fx * STAND_M + sx * SIDE_M,
+        a.z - fz * STAND_M + sz * SIDE_M,
+    ))
+}
 
 fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
     let hs = &session.combat().hostiles;
