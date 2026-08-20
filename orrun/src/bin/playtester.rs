@@ -144,6 +144,8 @@ fn main() {
         combat_tab_sent: false,
         combat_shot_sent: false,
         combat_hurt_sent: false,
+        combat_cd_sweep_at: None,
+        combat_cd_sweep_sent: false,
         combat_fail_armed: false,
         combat_fail_sent: false,
         combat_death_sent: false,
@@ -398,6 +400,8 @@ struct Driver {
     combat_tab_sent: bool,
     combat_shot_sent: bool,
     combat_hurt_sent: bool,
+    combat_cd_sweep_at: Option<f32>,
+    combat_cd_sweep_sent: bool,
     combat_fail_armed: bool,
     combat_fail_sent: bool,
     combat_death_sent: bool,
@@ -489,6 +493,7 @@ impl Driver {
                 | Some("demon")
                 | Some("bluedemon")
                 | Some("tribal_veteran")
+                | Some("cd_sweep")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -509,7 +514,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -944,7 +949,7 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
             "loot_sparkle" => self.start_loot_sparkle(world, frame),
@@ -3134,6 +3139,8 @@ impl Driver {
                 self.session.rearm_combat_fixtures(world);
                 self.combat_tab_sent = false;
                 self.combat_shot_sent = false;
+                self.combat_cd_sweep_at = None;
+                self.combat_cd_sweep_sent = false;
                 self.phase = Phase::CombatLive;
                 self.phase_t0 = frame.time;
             }
@@ -3420,6 +3427,63 @@ impl Driver {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                     self.fail_current("combat: log missing a live hit line");
                     self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            if self.combat_cd_sweep_at.is_none() {
+                let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+                let facing = Camera::facing_xz(yaw);
+                let Some(pos) = self.session.player_position() else {
+                    return;
+                };
+                let armed = self.session.combat_mut().press_verb(
+                    Action::Strike,
+                    pos.x,
+                    pos.z,
+                    facing.x as f64,
+                    facing.z as f64,
+                );
+                let frac = self.session.combat().verb_cd_frac(Action::Strike);
+                if !armed || frac <= 0.0 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current("combat: in-range Strike never started CD");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                self.combat_cd_sweep_at = Some(frame.time);
+                return;
+            }
+            if !self.combat_cd_sweep_sent {
+                let since = frame.time - self.combat_cd_sweep_at.unwrap();
+                let frac = self.session.combat().verb_cd_frac(Action::Strike);
+                if since < 2.0 {
+                    return;
+                }
+                if frac <= 0.05 || frac >= 0.99 {
+                    if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                        self.fail_current(&format!(
+                            "combat: Strike CD not mid-pie after {since:.2}s (frac={frac})"
+                        ));
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                self.combat_cd_sweep_sent = true;
+                world.mark_ready();
+                self.queue_shot(world, frame, "cd_sweep");
+                if self.current_hook() == Some("cd_sweep") {
+                    self.write_json(
+                        "cd_sweep",
+                        json!({
+                            "status": "ok",
+                            "shot": "cd_sweep.png",
+                            "strike_cd_frac": frac,
+                            "hotbar_visible": true,
+                        }),
+                    );
+                    self.ok_hook("cd_sweep");
+                    self.phase = Phase::NextHook;
                 }
                 return;
             }

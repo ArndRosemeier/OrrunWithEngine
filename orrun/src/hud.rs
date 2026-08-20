@@ -53,10 +53,29 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(slot, slot), Sense::hover());
                     ui.painter().rect_filled(rect, 4.0, fill);
                     if cd > 0.0 {
-                        let mut cover = rect;
-                        cover.set_height(rect.height() * cd);
-                        ui.painter()
-                            .rect_filled(cover, 0.0, Color32::from_rgba_unmultiplied(20, 20, 40, 170));
+                        // Remaining-time pie: verb_cd_frac is left/max (1.0 just used, 0.0 ready).
+                        let center = rect.center();
+                        let radius = rect.width() * 0.5;
+                        let color = Color32::from_rgba_unmultiplied(20, 20, 40, 170);
+                        if cd >= 0.999 {
+                            ui.painter().circle_filled(center, radius, color);
+                        } else {
+                            let steps = ((cd * 48.0).ceil() as i32).max(3);
+                            let mut pts = Vec::with_capacity((steps + 2) as usize);
+                            pts.push(center);
+                            let start = -std::f32::consts::FRAC_PI_2;
+                            let sweep = cd * std::f32::consts::TAU;
+                            for i in 0..=steps {
+                                let t = i as f32 / steps as f32;
+                                let a = start + sweep * t;
+                                pts.push(center + radius * egui::vec2(a.cos(), a.sin()));
+                            }
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                pts,
+                                color,
+                                egui::Stroke::NONE,
+                            ));
+                        }
                     }
                     ui.painter().rect_stroke(
                         rect,
