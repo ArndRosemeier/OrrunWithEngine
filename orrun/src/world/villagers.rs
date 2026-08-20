@@ -17,7 +17,13 @@ use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 
 const FOOT_CLEARANCE_M: f32 = 0.05;
+/// Human walk, not a sprint. Metres per second along the cut.
 const WALK_MPS: f32 = 1.35;
+/// Hitch frames must not teleport a walker; 20 Hz is still a walk.
+const MAX_STEP_DT: f32 = 1.0 / 20.0;
+/// Mixamo in-place Walk reads ~1.5 m/s at 1.0; scale to WALK_MPS.
+const WALK_ANIM_RATE: f32 = 0.90;
+const IDLE_ANIM_RATE: f32 = 1.0;
 const END_PAUSE_S: f32 = 0.9;
 const CORRIDOR_M: f32 = 2.5;
 const MIN_PEOPLE: usize = 5;
@@ -47,6 +53,7 @@ struct Person {
     dir: f32,
     pause_left: f32,
     pace_t: f32,
+    speed_mps: f32,
 }
 
 /// People standing and walking in seated tier-0 hamlets.
@@ -77,6 +84,17 @@ impl VillagerLayer {
 
     pub fn human_count(&self) -> usize {
         self.people.len()
+    }
+
+    pub fn walk_mps() -> f32 {
+        WALK_MPS
+    }
+
+    pub fn walker_speed_mps(&self) -> Option<f32> {
+        self.people
+            .iter()
+            .find(|p| p.role == Role::Walker && p.walking)
+            .map(|p| p.speed_mps)
     }
 
     pub fn entities(&self) -> impl Iterator<Item = EntityId> + '_ {
@@ -338,6 +356,7 @@ impl VillagerLayer {
         let place = place_of(world, pos, yaw)?;
         let entity = world.spawn_animated_shared(model, place)?;
         world.play_animation(entity, &clip)?;
+        world.set_animation_speed(entity, if walking { WALK_ANIM_RATE } else { IDLE_ANIM_RATE })?;
         self.people.push(Person {
             entity,
             hamlet,
@@ -350,6 +369,7 @@ impl VillagerLayer {
             dir,
             pause_left: 0.0,
             pace_t: 0.0,
+            speed_mps: 0.0,
         });
         Ok(true)
     }
@@ -389,8 +409,10 @@ impl VillagerLayer {
         if cut.len() < 2 {
             return Ok(());
         }
+        let dt = dt.min(MAX_STEP_DT);
         if self.people[i].pause_left > 0.0 {
             self.people[i].pause_left -= dt;
+            self.people[i].speed_mps = 0.0;
             if self.people[i].walking {
                 self.set_clip(world, i, false)?;
             }
@@ -398,6 +420,7 @@ impl VillagerLayer {
         }
         let len = polyline_len(cut).max(0.5);
         let step = (WALK_MPS * dt) / len;
+        let prev = self.people[i].pos;
         self.people[i].along += self.people[i].dir * step;
         if self.people[i].along >= 1.0 {
             self.people[i].along = 1.0;
@@ -415,6 +438,11 @@ impl VillagerLayer {
         if let Some((pos, yaw)) = point_on_cut(cut, self.people[i].along, stream) {
             self.people[i].pos = pos;
             self.people[i].yaw = yaw;
+        }
+        if dt > 1e-5 {
+            let dx = (self.people[i].pos.x - prev.x) as f32;
+            let dz = (self.people[i].pos.z - prev.z) as f32;
+            self.people[i].speed_mps = (dx * dx + dz * dz).sqrt() / dt;
         }
         self.sync_place(world, i)
     }
@@ -467,6 +495,14 @@ impl VillagerLayer {
             want[0].to_string()
         };
         world.play_animation(entity, &clip)?;
+        world.set_animation_speed(
+            entity,
+            if walking {
+                WALK_ANIM_RATE
+            } else {
+                IDLE_ANIM_RATE
+            },
+        )?;
         self.people[i].clip = clip;
         self.people[i].walking = walking;
         Ok(())
@@ -744,5 +780,16 @@ mod tests {
         assert!((well - cut[1]).length() < 1e-4);
         let rim = sample_polyline(&cut, 0.0).expect("rim");
         assert!((rim - cut[0]).length() < 1e-4);
+    }
+
+    #[test]
+    fn walker_step_is_a_human_walk() {
+        assert!((1.2..=1.5).contains(&WALK_MPS));
+        let cut = [Vec2::new(0.0, 0.0), Vec2::new(40.0, 0.0)];
+        let len = polyline_len(&cut);
+        let dt: f32 = 1.0 / 60.0;
+        let step = (WALK_MPS * dt.min(MAX_STEP_DT)) / len;
+        let moved = step * len;
+        assert!((moved - WALK_MPS * dt).abs() < 1e-5);
     }
 }

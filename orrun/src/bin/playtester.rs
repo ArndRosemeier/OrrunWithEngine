@@ -183,6 +183,7 @@ fn main() {
         },
         site_kind: None,
         site_melee_at: None,
+        village_speed_sample: None,
     };
 
     driver.write_running_report();
@@ -437,6 +438,7 @@ struct Driver {
     ambience: Option<Ambience>,
     site_kind: Option<SiteKind>,
     site_melee_at: Option<f32>,
+    village_speed_sample: Option<(f64, f64, f32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,7 +533,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" || name == "village" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -3956,6 +3958,7 @@ impl Driver {
     }
 
     fn start_village(&mut self, world: &mut World, frame: &Frame) {
+        self.village_speed_sample = None;
         let from = self
             .session
             .player_position()
@@ -4083,6 +4086,24 @@ impl Driver {
             }
             return;
         };
+        let measured_mps = match self.village_speed_sample {
+            None => {
+                self.village_speed_sample = Some((person.x, person.z, frame.time));
+                return;
+            }
+            Some((x0, z0, t0)) => {
+                let elapsed = frame.time - t0;
+                if elapsed < 0.35 {
+                    return;
+                }
+                let dist = ((person.x - x0).hypot(person.z - z0)) as f32;
+                if dist > 4.0 {
+                    self.village_speed_sample = Some((person.x, person.z, frame.time));
+                    return;
+                }
+                dist / elapsed.max(1e-4)
+            }
+        };
         let horiz = stand.distance(person.horizontal());
         let high_enough = (pos.y - cam.y).abs() < 1.6;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
@@ -4091,6 +4112,7 @@ impl Driver {
             view_angle_degrees(eye, yaw, pitch, target) < 16.0
         });
         if horiz > 5.5 || !high_enough || !looking {
+            self.village_speed_sample = None;
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
                     "village: camera never sat on a walker (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
@@ -4138,6 +4160,9 @@ impl Driver {
                 "ribbon_faces": ribbon_faces,
                 "human_count": human_count,
                 "human_on_corridor": human_on_corridor,
+                "configured_walk_mps": WorldSession::village_walk_mps(),
+                "speed_mps": self.session.village_walker_speed_mps(),
+                "sampled_speed_mps": measured_mps,
                 "pose": {
                     "x": pos.x,
                     "y": pos.y,

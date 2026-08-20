@@ -2521,6 +2521,14 @@ impl WorldSession {
         self.villagers.as_ref().and_then(|v| v.corridor_human(cut))
     }
 
+    pub fn village_walk_mps() -> f32 {
+        VillagerLayer::walk_mps()
+    }
+
+    pub fn village_walker_speed_mps(&self) -> Option<f32> {
+        self.villagers.as_ref().and_then(VillagerLayer::walker_speed_mps)
+    }
+
     pub fn ribbon_faces(&self) -> usize {
         self.paths.as_ref().map_or(0, |p| p.ribbon_faces())
     }
