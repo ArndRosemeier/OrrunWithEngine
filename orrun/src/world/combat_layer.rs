@@ -168,6 +168,16 @@ impl CombatLayer {
         self.fixture = true;
     }
 
+    /// Stream reset already dropped the bodies. Forget ids so a later
+    /// despawn does not poke a recycled entity.
+    pub fn forget_meshes(&mut self) {
+        self.mesh_ids.clear();
+        self.mesh_anchors.clear();
+        self.lock_ring = None;
+        self.ring_on = None;
+        self.flash = None;
+    }
+
     pub fn roster_pins_skipped(&self) -> bool {
         self.skip_roster_pins
     }

@@ -80,27 +80,6 @@ impl OverlandSite {
     }
 }
 
-pub fn fixture_in_front(kind: SiteKind, player: GlobalXZ, yaw_deg: f32) -> OverlandSite {
-    let at = match kind {
-        SiteKind::TakenCairn => {
-            let yaw = yaw_deg.to_radians();
-            let fx = f64::from(yaw.sin());
-            let fz = f64::from(yaw.cos());
-            GlobalXZ::at(player.x + fx * 11.0, player.z + fz * 11.0)
-        }
-        SiteKind::WoodsHut => {
-            let (dx, dz) = kit::yaw_xz(4.2, -13.0, yaw_deg);
-            GlobalXZ::at(player.x - f64::from(dx), player.z - f64::from(dz))
-        }
-    };
-    OverlandSite {
-        kind,
-        pin_id: -1,
-        at,
-        yaw_deg,
-    }
-}
-
 fn site_hash(world_seed: i32, pin_id: i32) -> u64 {
     let mut x = (world_seed as u64)
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)

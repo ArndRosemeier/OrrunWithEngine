@@ -330,7 +330,9 @@ enum Phase {
     ControlsLive,
     VillageTravel,
     VillageLive,
+    CairnTravel,
     CairnLive,
+    HutTravel,
     HutLive,
     NextHook,
     Done,
@@ -652,7 +654,7 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
-            Phase::VillageTravel => {
+            Phase::VillageTravel | Phase::CairnTravel | Phase::HutTravel => {
                 input.skip_travel = true;
             }
             Phase::CairnLive | Phase::HutLive => {
@@ -751,6 +753,7 @@ impl Driver {
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::VillageTravel => self.tick_village_travel(world, frame),
             Phase::VillageLive => self.tick_village_live(world, frame),
+            Phase::CairnTravel | Phase::HutTravel => self.tick_site_travel(world, frame),
             Phase::CairnLive | Phase::HutLive => self.tick_site_live(world, frame),
             Phase::NextHook => {
                 self.hook_i += 1;
@@ -2891,19 +2894,69 @@ impl Driver {
         self.site_melee_at = None;
         self.combat_tab_sent = false;
         let name = kind.as_str();
-        // Procgen hinterland sites are often >80 m away; travel/skip then
-        // reports absent. Stamp the prop + two bandits in front of the
-        // player like combat_body. Do not skip_roster_pins.
-        if let Err(err) = self.session.install_site_fixture(world, kind) {
-            self.fail_current(&format!("{name}: fixture failed: {err}"));
+        let site = self.session.overland_site(kind).or_else(|| {
+            let pins = self.session.surface().settlements();
+            let hamlets = self.session.hamlets();
+            plan_overland_sites(self.session.surface(), pins, hamlets)
+                .into_iter()
+                .find(|s| s.kind == kind)
+        });
+        let Some(site) = site else {
+            self.fail_current(&format!("{name}: no site on this atlas (seed world must stamp both)"));
             self.advance_after_fail(world, frame);
             return;
-        }
-        self.phase = match kind {
-            SiteKind::TakenCairn => Phase::CairnLive,
-            SiteKind::WoodsHut => Phase::HutLive,
         };
-        self.phase_t0 = frame.time;
+        let from = self
+            .session
+            .player_position()
+            .map(|p| p.horizontal())
+            .or_else(|| self.session.spawn().map(|s| s.ground()))
+            .unwrap_or(GlobalXZ::at(0.0, 0.0));
+        let dist = site.at.distance(from);
+        if dist > 80.0 || self.session.state() != SessionState::World {
+            match WorldEntryRequest::at_global(self.session.surface().bounds(), site.at) {
+                Ok(request) => match self.session.begin_entry(world, request) {
+                    Ok(()) => {
+                        self.phase = match kind {
+                            SiteKind::TakenCairn => Phase::CairnTravel,
+                            SiteKind::WoodsHut => Phase::HutTravel,
+                        };
+                        self.phase_t0 = frame.time;
+                    }
+                    Err(err) => {
+                        self.fail_current(&format!("{name} entry failed: {err}"));
+                        self.advance_after_fail(world, frame);
+                    }
+                },
+                Err(err) => {
+                    self.fail_current(&format!("{name} is not a valid entry: {err}"));
+                    self.advance_after_fail(world, frame);
+                }
+            }
+        } else {
+            self.phase = match kind {
+                SiteKind::TakenCairn => Phase::CairnLive,
+                SiteKind::WoodsHut => Phase::HutLive,
+            };
+            self.phase_t0 = frame.time;
+        }
+    }
+
+    fn tick_site_travel(&mut self, world: &mut World, frame: &Frame) {
+        let name = self.site_kind.map(SiteKind::as_str).unwrap_or("site");
+        if self.session.state() == SessionState::World {
+            self.phase = match self.site_kind {
+                Some(SiteKind::TakenCairn) => Phase::CairnLive,
+                Some(SiteKind::WoodsHut) => Phase::HutLive,
+                None => Phase::NextHook,
+            };
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+            self.fail_current(&format!("{name}: timed out travelling to the site"));
+            self.advance_after_fail(world, frame);
+        }
     }
 
     fn tick_site_live(&mut self, world: &mut World, frame: &Frame) {
@@ -3449,7 +3502,13 @@ fn wolf_near(session: &WorldSession, p: &GlobalXZ) -> f64 {
 
 fn site_camera_stand(session: &WorldSession, kind: Option<SiteKind>) -> Option<GlobalPosition> {
     let kind = kind?;
-    let site = session.overland_site(kind)?;
+    let site = session.overland_site(kind).or_else(|| {
+        let pins = session.surface().settlements();
+        let hamlets = session.hamlets();
+        plan_overland_sites(session.surface(), pins, hamlets)
+            .into_iter()
+            .find(|s| s.kind == kind)
+    })?;
     let site_ground = session.surface().column(site.at).ground();
     let stand = match kind {
         SiteKind::TakenCairn => {

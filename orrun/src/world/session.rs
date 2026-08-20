@@ -581,30 +581,6 @@ impl WorldSession {
         self.dungeon_skulls_for = None;
     }
 
-    /// Stamp a cairn or woods hut in front of the player. Playtester
-    /// overworld_* hooks use this when procgen skip/travel would miss.
-    /// Does not call skip_roster_pins.
-    pub fn install_site_fixture(
-        &mut self,
-        world: &mut World,
-        kind: super::sites::SiteKind,
-    ) -> Result<(), SessionError> {
-        let player = self.player.ok_or(SessionError::NoWorld)?;
-        let site = super::sites::fixture_in_front(kind, player.position.horizontal(), player.yaw_degrees);
-        self.combat.hostiles.clear();
-        self.combat.lock = None;
-        self.overland_sites.clear();
-        self.overland_sites.push(site);
-        super::sites::seat_overland_sites(&mut self.combat, &self.overland_sites);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        self.site_prop_ids =
-            super::sites::spawn_site_props(world, &self.surface, &self.overland_sites)?;
-        self.roster_pins_seated = true;
-        self.combat_layer.hold_fixture();
-        self.respawn_hostile_meshes(world, &player)?;
-        Ok(())
-    }
-
     pub fn key_binds(&self) -> &KeyBinds {
         &self.key_binds
     }
@@ -1019,6 +995,9 @@ impl WorldSession {
         self.player = None;
         self.entering = Some(request);
         self.overworld = None;
+        // Bodies died with the stream. Keep planned sites + bandit XZ.
+        self.site_prop_ids.clear();
+        self.combat_layer.forget_meshes();
         let travel = self.travel.as_mut().expect("travel");
         travel.handed_off = true;
         travel.handoffs += 1;
@@ -1434,6 +1413,46 @@ impl WorldSession {
         Ok(())
     }
 
+    fn ensure_overland_sites(
+        &mut self,
+        world: &mut World,
+        player_pos: engine::space::GlobalPosition,
+    ) -> Result<bool, SessionError> {
+        if self.combat_layer.roster_pins_skipped() {
+            return Ok(false);
+        }
+        let overland = self
+            .dungeons
+            .as_ref()
+            .and_then(|d| d.indoor_floor_y(world, player_pos))
+            .is_none();
+        if !overland {
+            return Ok(false);
+        }
+        if !self.roster_pins_seated {
+            let pins = self.surface.settlements();
+            let hamlets = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::hamlets)
+                .unwrap_or(&[]);
+            let sites = super::sites::plan_overland_sites(&self.surface, pins, hamlets);
+            super::sites::seat_overland_sites(&mut self.combat, &sites);
+            super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+            self.site_prop_ids =
+                super::sites::spawn_site_props(world, &self.surface, &sites)?;
+            self.overland_sites = sites;
+            self.roster_pins_seated = true;
+            return Ok(true);
+        }
+        if self.site_prop_ids.is_empty() && !self.overland_sites.is_empty() {
+            self.site_prop_ids =
+                super::sites::spawn_site_props(world, &self.surface, &self.overland_sites)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
@@ -1469,7 +1488,7 @@ impl WorldSession {
                         facing.x as f64,
                         facing.z as f64,
                     );
-                } else {
+                } else if self.combat_layer.roster_pins_skipped() {
                     self.combat_layer.install_l1_wolf_line(
                         &mut self.combat,
                         player.position.x,
@@ -1477,35 +1496,10 @@ impl WorldSession {
                         facing.x as f64,
                         facing.z as f64,
                     );
-                    if !self.combat_layer.roster_pins_skipped() && !self.roster_pins_seated {
-                        let overland = self
-                            .dungeons
-                            .as_ref()
-                            .and_then(|d| d.indoor_floor_y(world, player.position))
-                            .is_none();
-                        if overland {
-                            let pins = self.surface.settlements();
-                            let hamlets = self
-                                .settlements
-                                .as_ref()
-                                .map(SettlementLayer::hamlets)
-                                .unwrap_or(&[]);
-                            let sites = super::sites::plan_overland_sites(
-                                &self.surface,
-                                pins,
-                                hamlets,
-                            );
-                            super::sites::seat_overland_sites(&mut self.combat, &sites);
-                            super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-                            self.site_prop_ids = super::sites::spawn_site_props(
-                                world,
-                                &self.surface,
-                                &sites,
-                            )?;
-                            self.overland_sites = sites;
-                        }
-                        self.roster_pins_seated = true;
-                    }
+                } else {
+                    // Taken Cairn / Woods Hut: do not wipe site hostiles with L1 wolves.
+                    self.ensure_overland_sites(world, player.position)?;
+                    self.combat_layer.hold_fixture();
                 }
                 let feet: Vec<f64> = self
                     .combat
@@ -1526,6 +1520,14 @@ impl WorldSession {
                     self.combat_layer.rearm();
                     return Err(err.into());
                 }
+            }
+        }
+        if self.combat_layer.fixture_ready()
+            && !self.combat_layer.roster_pins_skipped()
+        {
+            let restamped = self.ensure_overland_sites(world, player.position)?;
+            if restamped {
+                self.respawn_hostile_meshes(world, &player)?;
             }
         }
         if input.tab || (input.capture_look && world.pointer_lock()) {
