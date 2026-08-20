@@ -1447,8 +1447,8 @@ impl Driver {
             self.session.replay_melee(world);
             frame.time
         });
-        // Attack is 1.333 s; mid-swing reads around 0.45 s.
-        if frame.time - melee_at < 0.45 {
+        // Attack is 1.333 s; mid-lunge reads around 0.60 s at speed 1.
+        if frame.time - melee_at < 0.60 {
             return;
         }
         self.write_json(

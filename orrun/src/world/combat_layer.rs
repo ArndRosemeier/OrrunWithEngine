@@ -692,23 +692,37 @@ impl CombatLayer {
     /// Play catalog anim_melee on the locked mesh only.
     pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
         let Some(lock) = combat.lock else {
-            return;
+            panic!("{}", EngineError::Model("replay_melee: no lock".into()));
         };
         let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
-            return;
+            panic!("{}", EngineError::Model("replay_melee: lock not in hostiles".into()));
         };
-        let mut pending = None;
-        queue_connecting_melee(&mut pending, &self.models, h);
-        if let Some((id, clip)) = pending {
-            if let Some(id) = id {
-                let _ = world.set_animation_speed(id, 1.0);
-                if let Err(err) = world.play_animation(id, clip) {
-                    panic!(
-                        "{}",
-                        EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
-                    );
-                }
-            }
+        let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
+            panic!(
+                "{}",
+                EngineError::Model(format!("replay_melee: no mesh spec for '{}'", h.mob_id))
+            )
+        });
+        let id = h
+            .entity
+            .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}",
+                    EngineError::Model("replay_melee: locked mesh has no entity".into())
+                )
+            });
+        if let Err(err) = world.play_animation(id, spec.anim_melee) {
+            panic!(
+                "{}",
+                EngineError::Model(format!("melee clip '{}' failed: {err}", spec.anim_melee))
+            );
+        }
+        if let Err(err) = world.set_animation_speed(id, 1.0) {
+            panic!(
+                "{}",
+                EngineError::Model(format!("melee clip speed failed: {err}"))
+            );
         }
     }
 
