@@ -340,6 +340,8 @@ pub struct WorldSession {
     key_binds: KeyBinds,
     /// Overland SettlementPin roster mobs are seated once after the default L1 wolves.
     roster_pins_seated: bool,
+    overland_sites: Vec<super::sites::OverlandSite>,
+    site_prop_ids: Vec<EntityId>,
     /// Live dungeon pin whose orc_skull hostiles are already in the list.
     dungeon_skulls_for: Option<i32>,
 }
@@ -374,6 +376,8 @@ impl WorldSession {
             last_shrine: None,
             key_binds: KeyBinds::default(),
             roster_pins_seated: false,
+            overland_sites: Vec::new(),
+            site_prop_ids: Vec::new(),
             dungeon_skulls_for: None,
         }
     }
@@ -532,6 +536,9 @@ impl WorldSession {
     /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
     pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
         self.combat_layer.request_wolf_fixture();
         self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
@@ -541,6 +548,9 @@ impl WorldSession {
     /// Reseats one published orc on the next world tick. Meshes despawn now.
     pub fn rearm_orc_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
         self.combat_layer.request_orc_fixture();
         self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
@@ -549,6 +559,9 @@ impl WorldSession {
 
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
         self.combat_layer.request_bones_fixture();
         self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
@@ -558,6 +571,9 @@ impl WorldSession {
 
     pub fn rearm_mage_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        super::sites::clear_overland_sites(&mut self.combat);
+        self.overland_sites.clear();
         self.combat_layer.request_mage_fixture();
         self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
@@ -1450,7 +1466,19 @@ impl WorldSession {
                                 .as_ref()
                                 .map(SettlementLayer::hamlets)
                                 .unwrap_or(&[]);
-                            super::combat_layer::seat_roster_pins(&mut self.combat, pins, hamlets);
+                            let sites = super::sites::plan_overland_sites(
+                                &self.surface,
+                                pins,
+                                hamlets,
+                            );
+                            super::sites::seat_overland_sites(&mut self.combat, &sites);
+                            super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+                            self.site_prop_ids = super::sites::spawn_site_props(
+                                world,
+                                &self.surface,
+                                &sites,
+                            )?;
+                            self.overland_sites = sites;
                         }
                         self.roster_pins_seated = true;
                     }
@@ -1596,6 +1624,11 @@ impl WorldSession {
 
         let t = Instant::now();
         let rebased = self.stream.maybe_rebase(world, foot)?;
+        if rebased && self.combat_layer.fixture_ready() {
+            if let Some(player) = self.player {
+                self.respawn_hostile_meshes(world, &player)?;
+            }
+        }
         let rebuilt = if let Some(settlements) = self.settlements.as_mut() {
             settlements.follow(
                 world,
@@ -2120,6 +2153,18 @@ impl WorldSession {
     }
 
     /// Closest hamlet/village pin (tier 0, or atlas leftover tier 1).
+    pub fn overland_sites(&self) -> &[super::sites::OverlandSite] {
+        &self.overland_sites
+    }
+
+    pub fn overland_site(&self, kind: super::sites::SiteKind) -> Option<super::sites::OverlandSite> {
+        self.overland_sites.iter().copied().find(|s| s.kind == kind)
+    }
+
+    pub fn site_prop_count(&self) -> usize {
+        self.site_prop_ids.len()
+    }
+
     pub fn nearest_tier0_pin(&self, from: GlobalXZ) -> Option<super::surface::SettlementPin> {
         self.surface
             .settlements()

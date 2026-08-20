@@ -59,6 +59,14 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             anim_weapon: None,
             weapon_node: None,
         },
+        "bandit" | "male_bandit" => CombatMesh {
+            id: "bandit",
+            source: "humans/male_bandit_01.glb",
+            anim_idle: "Idle",
+            anim_melee: "Attack",
+            anim_weapon: None,
+            weapon_node: None,
+        },
         "skeleton_mage" => CombatMesh {
             id: "skeleton_mage",
             source: "monsters/kaykit/Skeleton_Mage_Staff.glb",
@@ -85,6 +93,7 @@ mod tests {
             "skeleton_warrior",
             "skeleton_minion",
             "skeleton_mage",
+            "bandit",
         ] {
             let spec = mesh_spec(id).expect(id);
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -92,5 +101,38 @@ mod tests {
                 .join(spec.source);
             assert!(path.is_file(), "{} missing at {}", id, path.display());
         }
+    }
+
+    #[test]
+    fn bandit_glb_loads_idle_and_attack() {
+        let spec = mesh_spec("bandit").expect("bandit");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(spec.source);
+        let root = path.parent().unwrap();
+        let model = engine::anim::AnimatedModel::load_with(
+            &path,
+            root,
+            &engine::EngineLimits::default(),
+        )
+        .unwrap_or_else(|err| panic!("bandit glb load: {err}"));
+        assert!(
+            model.find_clip(spec.anim_idle).is_some(),
+            "Idle missing on bandit"
+        );
+        assert!(
+            model.find_clip(spec.anim_melee).is_some(),
+            "Attack missing on bandit"
+        );
+    }
+
+    #[test]
+    fn crate_small_glb_loads() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("props")
+            .join("crate_small.glb");
+        engine::model::Model::load(&path)
+            .unwrap_or_else(|err| panic!("crate_small glb load: {err}"));
     }
 }

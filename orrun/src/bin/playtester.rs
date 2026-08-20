@@ -23,6 +23,7 @@ use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, HousePlot, Locomotion,
     Ambience, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
+    OverlandSite, SiteKind, plan_overland_sites,
 };
 use serde_json::{json, Value};
 
@@ -73,6 +74,10 @@ fn main() {
         "combat_mage.png",
         "village.json",
         "village.png",
+        "cairn.json",
+        "hut.json",
+        "overworld_cairn.png",
+        "overworld_hut.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -145,6 +150,8 @@ fn main() {
                 None
             }
         },
+        site_kind: None,
+        site_melee_at: None,
     };
 
     driver.write_running_report();
@@ -321,6 +328,10 @@ enum Phase {
     ControlsLive,
     VillageTravel,
     VillageLive,
+    CairnTravel,
+    CairnLive,
+    HutTravel,
+    HutLive,
     NextHook,
     Done,
 }
@@ -372,6 +383,8 @@ struct Driver {
     combat_mage_look: Option<Vec3>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
+    site_kind: Option<SiteKind>,
+    site_melee_at: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -429,6 +442,10 @@ impl Driver {
             if path.is_file() {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
+                }
+                if name == "overworld_cairn" || name == "overworld_hut" {
+                    let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
+                    let _ = fs::copy(&path, dest);
                 }
                 self.awaiting_shot = None;
             } else if frame.time - self.phase_t0 > 8.0 {
@@ -635,8 +652,32 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
-            Phase::VillageTravel => {
+            Phase::VillageTravel | Phase::CairnTravel | Phase::HutTravel => {
                 input.skip_travel = true;
+            }
+            Phase::CairnLive | Phase::HutLive => {
+                if self.session.locomotion() != Some(Locomotion::Fly) {
+                    input.toggle_fly = true;
+                }
+                if self.session.lock_id().is_none() {
+                    input.tab = true;
+                }
+                if let (Some(stand), Some(pos)) = (
+                    site_camera_stand(&self.session, self.site_kind),
+                    self.session.player_position(),
+                ) {
+                    let dx = (stand.x - pos.x) as f32;
+                    let dz = (stand.z - pos.z) as f32;
+                    let dy = (stand.y - pos.y) as f32;
+                    let mut direction = Vec3::new(dx, dy, dz);
+                    if direction.length_squared() > 1e-6 {
+                        direction = direction.normalize();
+                    } else {
+                        direction = Vec3::Y;
+                    }
+                    input.direction = direction;
+                    input.step_m = FLY_SPEED * dt;
+                }
             }
             Phase::VillageLive => {
                 if self.session.locomotion() != Some(Locomotion::Fly) {
@@ -710,6 +751,8 @@ impl Driver {
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::VillageTravel => self.tick_village_travel(world, frame),
             Phase::VillageLive => self.tick_village_live(world, frame),
+            Phase::CairnTravel | Phase::HutTravel => self.tick_site_travel(world, frame),
+            Phase::CairnLive | Phase::HutLive => self.tick_site_live(world, frame),
             Phase::NextHook => {
                 self.hook_i += 1;
                 self.start_current_hook(world, frame);
@@ -739,6 +782,8 @@ impl Driver {
             "combat_mage" => self.start_combat_mage(world, frame),
             "controls" => self.start_controls(world, frame),
             "village" => self.start_village(world, frame),
+            "cairn" | "taken_cairn" => self.start_site(world, frame, SiteKind::TakenCairn),
+            "hut" | "woods_hut" => self.start_site(world, frame, SiteKind::WoodsHut),
             "faction_overlay" => {
                 self.write_json(&name, json!({ "status": "absent" }));
                 self.reports
@@ -2837,6 +2882,240 @@ impl Driver {
         self.phase = Phase::NextHook;
     }
 
+
+    fn start_site(&mut self, world: &mut World, frame: &Frame, kind: SiteKind) {
+        self.site_kind = Some(kind);
+        self.site_melee_at = None;
+        self.combat_tab_sent = false;
+        let name = kind.as_str();
+        let site = self.session.overland_site(kind).or_else(|| {
+            let pins = self.session.surface().settlements();
+            let hamlets = self.session.hamlets();
+            plan_overland_sites(self.session.surface(), pins, hamlets)
+                .into_iter()
+                .find(|s| s.kind == kind)
+        });
+        let Some(site) = site else {
+            self.fail_current(&format!("{name}: no site on this atlas (seed world must stamp both)"));
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let from = self
+            .session
+            .player_position()
+            .map(|p| p.horizontal())
+            .or_else(|| self.session.spawn().map(|s| s.ground()))
+            .unwrap_or(GlobalXZ::at(0.0, 0.0));
+        let dist = site.at.distance(from);
+        if dist > 80.0 || self.session.state() != SessionState::World {
+            match WorldEntryRequest::at_global(self.session.surface().bounds(), site.at) {
+                Ok(request) => match self.session.begin_entry(world, request) {
+                    Ok(()) => {
+                        self.phase = match kind {
+                            SiteKind::TakenCairn => Phase::CairnTravel,
+                            SiteKind::WoodsHut => Phase::HutTravel,
+                        };
+                        self.phase_t0 = frame.time;
+                    }
+                    Err(err) => {
+                        self.fail_current(&format!("{name} entry failed: {err}"));
+                        self.advance_after_fail(world, frame);
+                    }
+                },
+                Err(err) => {
+                    self.fail_current(&format!("{name} is not a valid entry: {err}"));
+                    self.advance_after_fail(world, frame);
+                }
+            }
+        } else {
+            self.phase = match kind {
+                SiteKind::TakenCairn => Phase::CairnLive,
+                SiteKind::WoodsHut => Phase::HutLive,
+            };
+            self.phase_t0 = frame.time;
+        }
+    }
+
+    fn tick_site_travel(&mut self, world: &mut World, frame: &Frame) {
+        let name = self.site_kind.map(SiteKind::as_str).unwrap_or("site");
+        if self.session.state() == SessionState::World {
+            self.phase = match self.site_kind {
+                Some(SiteKind::TakenCairn) => Phase::CairnLive,
+                Some(SiteKind::WoodsHut) => Phase::HutLive,
+                None => Phase::NextHook,
+            };
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+            self.fail_current(&format!("{name}: timed out travelling to the site"));
+            self.advance_after_fail(world, frame);
+        }
+    }
+
+    fn tick_site_live(&mut self, world: &mut World, frame: &Frame) {
+        let kind = match self.site_kind {
+            Some(k) => k,
+            None => {
+                self.fail_current("site hook missing kind");
+                self.advance_after_fail(world, frame);
+                return;
+            }
+        };
+        let name = kind.as_str();
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{name}: never reached World"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{name}: required_ready stayed false"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(site) = self.session.overland_site(kind).or_else(|| {
+            let pins = self.session.surface().settlements();
+            let hamlets = self.session.hamlets();
+            plan_overland_sites(self.session.surface(), pins, hamlets)
+                .into_iter()
+                .find(|s| s.kind == kind)
+        }) else {
+            self.fail_current(&format!("{name}: site missing after travel"));
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let (bandit_n, gap) = {
+            let hostiles = &self.session.combat().hostiles;
+            let at_site: Vec<_> = hostiles
+                .iter()
+                .filter(|h| h.mob_id == "bandit" && h.alive)
+                .filter(|h| (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0)
+                .collect();
+            let n = at_site.len();
+            let gap = if n >= 2 {
+                (at_site[0].x - at_site[1].x).hypot(at_site[0].z - at_site[1].z)
+            } else {
+                0.0
+            };
+            (n, gap)
+        };
+        if bandit_n < 2 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "{name}: want 2 unstacked bandits at the prop, got {bandit_n}"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if gap < 1.0 {
+            self.fail_current(&format!("{name}: bandits stacked (gap={gap:.2} m)"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if self.session.site_prop_count() == 0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{name}: site props were not spawned"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_site(site);
+        let Some(stand) = site_camera_stand(&self.session, Some(kind)) else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{name}: no camera stand"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let horiz = pos.horizontal().distance(stand.horizontal());
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let looking = site_look(&self.session, site).is_some_and(|(eye, target)| {
+            view_angle_degrees(eye, yaw, pitch, target) < 16.0
+        });
+        if horiz > 3.5 || !looking {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "{name}: camera never sat on the site (horiz={horiz:.1} pitch={pitch:.1})"
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.session.lock_id().is_none() {
+            if let Some(idx) = self
+                .session
+                .combat()
+                .hostiles
+                .iter()
+                .find(|h| h.mob_id == "bandit" && h.alive && (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0)
+                .map(|h| h.idx)
+            {
+                self.session.combat_mut().lock = Some(idx);
+            }
+        }
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{name}: never locked a bandit"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let melee_at = if let Some(t) = self.site_melee_at {
+            t
+        } else {
+            self.session.replay_melee(world);
+            self.site_melee_at = Some(frame.time);
+            frame.time
+        };
+        // Attack is a one-shot clip; mid-swing reads around 0.45 s.
+        if frame.time - melee_at < 0.45 {
+            return;
+        }
+        self.write_json(
+            name,
+            json!({
+                "status": "ok",
+                "kind": name,
+                "pin_id": site.pin_id,
+                "at": { "x": site.at.x, "z": site.at.z },
+                "bandits": bandit_n,
+                "bandit_gap_m": gap,
+                "props": self.session.site_prop_count(),
+                "pose": {
+                    "x": pos.x,
+                    "y": pos.y,
+                    "z": pos.z,
+                    "yaw_degrees": yaw,
+                    "pitch_degrees": pitch,
+                },
+            }),
+        );
+        self.ok_hook(name);
+        world.mark_ready();
+        self.queue_shot(world, frame, &format!("overworld_{name}"));
+        self.phase = Phase::NextHook;
+    }
+
+    fn aim_site(&mut self, site: OverlandSite) {
+        let Some((eye, target)) = site_look(&self.session, site) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
+    }
+
     fn write_json(&self, name: &str, value: Value) {
         let path = self.shots.join(format!("{name}.json"));
         fs::write(
@@ -3190,6 +3469,75 @@ fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
     let target = Vec3::new(mid_x as f32, ground + 0.85, mid_z as f32);
     Some((eye, target))
+}
+
+
+fn yaw_xz(x: f32, z: f32, yaw_deg: f32) -> (f32, f32) {
+    let rad = yaw_deg.to_radians();
+    let (sin, cos) = (rad.sin(), rad.cos());
+    (x * cos + z * sin, -x * sin + z * cos)
+}
+
+
+fn wolf_near(session: &WorldSession, p: &GlobalXZ) -> f64 {
+    session
+        .combat()
+        .hostiles
+        .iter()
+        .filter(|h| h.alive && h.mob_id != "bandit")
+        .map(|h| (h.x - p.x).hypot(h.z - p.z))
+        .fold(f64::MAX, f64::min)
+}
+
+fn site_camera_stand(session: &WorldSession, kind: Option<SiteKind>) -> Option<GlobalPosition> {
+    let kind = kind?;
+    let site = session.overland_site(kind)?;
+    let site_ground = session.surface().column(site.at).ground();
+    let stand = match kind {
+        SiteKind::TakenCairn => {
+            let yaw = site.yaw_deg.to_radians();
+            let fx = f64::from(yaw.sin());
+            let fz = f64::from(yaw.cos());
+            let cands = [
+                GlobalXZ::at(site.at.x - fx * 11.0, site.at.z - fz * 11.0),
+                GlobalXZ::at(site.at.x + fx * 11.0, site.at.z + fz * 11.0),
+                GlobalXZ::at(site.at.x - fz * 11.0, site.at.z + fx * 11.0),
+                GlobalXZ::at(site.at.x + fz * 11.0, site.at.z - fx * 11.0),
+            ];
+            *cands
+                .iter()
+                .max_by(|a, b| {
+                    wolf_near(session, a)
+                        .partial_cmp(&wolf_near(session, b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(&cands[0])
+        }
+        SiteKind::WoodsHut => {
+            let (dx, dz) = yaw_xz(4.2, -13.0, site.yaw_deg);
+            GlobalXZ::at(site.at.x + f64::from(dx), site.at.z + f64::from(dz))
+        }
+    };
+    let y = site_ground.max(session.surface().column(stand).ground()) + 1.7;
+    Some(GlobalPosition::at(stand.x, f64::from(y), stand.z))
+}
+
+fn site_look(session: &WorldSession, site: OverlandSite) -> Option<(Vec3, Vec3)> {
+    let pos = session.player_position()?;
+    let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+    let ground = session.surface().column(site.at).ground();
+    let (tx, ty, tz) = match site.kind {
+        SiteKind::TakenCairn => (site.at.x as f32, ground + 1.05, site.at.z as f32),
+        SiteKind::WoodsHut => {
+            let (dx, dz) = yaw_xz(0.0, -6.4, site.yaw_deg);
+            (
+                site.at.x as f32 + dx,
+                ground + 1.45,
+                site.at.z as f32 + dz,
+            )
+        }
+    };
+    Some((eye, Vec3::new(tx, ty, tz)))
 }
 
 fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {

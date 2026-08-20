@@ -14,11 +14,9 @@ use crate::combat::math::{
 };
 use crate::combat::sheets::{
     orc_sheet, orc_skull_sheet, skeleton_mage_sheet, skeleton_minion_sheet,
-    skeleton_warrior_sheet, tribal_sheet, wolf_sheet, MobSheet,
+    skeleton_warrior_sheet, wolf_sheet, MobSheet,
 };
 use crate::combat::types::{WorldCombat, WorldHostile};
-use crate::world::settlement::{HamletStand, HAMLET_ROAD_PAD_M};
-use crate::world::surface::SettlementPin;
 use crate::combat::Discipline;
 use engine::anim::AnimatedModel;
 use engine::color::Color;
@@ -45,8 +43,6 @@ const GOLD: Color = Color {
     b: 0.12,
     a: 1.0,
 };
-/// Overland roster mob sits this far +Z from the atlas settlement pin.
-const PIN_SPAWN_OFFSET_M: f64 = 18.0;
 const FLASH_S: f32 = 6.0;
 const FLASH: Color = Color {
     r: 1.0,
@@ -162,7 +158,7 @@ impl CombatLayer {
         self.fixture_kind = FixtureKind::Mage;
     }
 
-    /// Playtester HOLD rearms must stay three-wolves / one-orc.
+    /// Playtester HOLD rearms stay fixture-only: no overland sites, no roster pins.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
     }
@@ -1497,15 +1493,6 @@ fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
 }
 
 
-/// +Z offset from the atlas pin. Rejected when a seated hamlet covers the point.
-pub fn pin_spawn_xz(pin: &SettlementPin) -> GlobalXZ {
-    GlobalXZ::at(pin.at.x, pin.at.z + PIN_SPAWN_OFFSET_M)
-}
-
-pub fn pin_spawn_accepted(p: GlobalXZ, hamlets: &[HamletStand]) -> bool {
-    !hamlets.iter().any(|h| h.covers(p, HAMLET_ROAD_PAD_M))
-}
-
 fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) -> WorldHostile {
     WorldHostile {
         idx,
@@ -1525,29 +1512,6 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) 
         swing_s: sheet.swing_s,
         swing_cd: sheet.swing_s,
         reach_m: sheet.reach_m,
-    }
-}
-
-pub fn seat_roster_pins(
-    combat: &mut WorldCombat,
-    pins: &[SettlementPin],
-    hamlets: &[HamletStand],
-) {
-    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
-    for pin in pins {
-        let p = pin_spawn_xz(pin);
-        if !pin_spawn_accepted(p, hamlets) {
-            continue;
-        }
-        let (sheet, mob_id) = if pin.tier <= 1 {
-            (tribal_sheet(), "tribal")
-        } else {
-            (orc_sheet(), "orc")
-        };
-        combat
-            .hostiles
-            .push(hostile_from_sheet(idx, p.x, p.z, &sheet, mob_id));
-        idx += 1;
     }
 }
 
@@ -1670,70 +1634,6 @@ mod tests {
         assert_eq!(h.max_hp, 130.0);
         assert!(layer.wants_orc());
         assert!(layer.fixture_ready());
-    }
-
-    #[test]
-    fn pin_spawn_inside_hamlet_disk_is_rejected() {
-        let hamlet = HamletStand {
-            at: GlobalXZ::at(0.0, 0.0),
-            radius: 20.0,
-            houses: vec![],
-            cut: Vec::new(),
-        };
-        let pin = SettlementPin {
-            id: 1,
-            at: GlobalXZ::at(0.0, 0.0),
-            tier: 0,
-            population: 3,
-        };
-        let p = pin_spawn_xz(&pin);
-        assert!(hamlet.covers(p, HAMLET_ROAD_PAD_M));
-        assert!(
-            !pin_spawn_accepted(p, &[hamlet.clone()]),
-            "a point inside the hamlet disk is not an accepted pin spawn"
-        );
-        let far = GlobalXZ::at(0.0, 80.0);
-        assert!(!hamlet.covers(far, HAMLET_ROAD_PAD_M));
-        assert!(pin_spawn_accepted(far, &[hamlet]));
-    }
-
-    #[test]
-    fn seat_roster_pins_tribal_hinterland_orc_town_covers_reject() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.hostiles.clear();
-        let hamlet = HamletStand {
-            at: GlobalXZ::at(0.0, 0.0),
-            radius: 20.0,
-            houses: vec![],
-            cut: Vec::new(),
-        };
-        let pins = [
-            SettlementPin {
-                id: 1,
-                at: GlobalXZ::at(0.0, 0.0),
-                tier: 0,
-                population: 3,
-            },
-            SettlementPin {
-                id: 2,
-                at: GlobalXZ::at(200.0, 200.0),
-                tier: 1,
-                population: 4,
-            },
-            SettlementPin {
-                id: 3,
-                at: GlobalXZ::at(400.0, 400.0),
-                tier: 2,
-                population: 12,
-            },
-        ];
-        seat_roster_pins(&mut combat, &pins, &[hamlet]);
-        assert_eq!(combat.hostiles.len(), 2);
-        assert_eq!(combat.hostiles[0].mob_id, "tribal");
-        assert_eq!(combat.hostiles[0].idx, 0);
-        assert_eq!(combat.hostiles[1].mob_id, "orc");
-        assert_eq!(combat.hostiles[1].idx, 1);
-        assert!((combat.hostiles[0].z - (200.0 + PIN_SPAWN_OFFSET_M)).abs() < 1e-9);
     }
 
     #[test]

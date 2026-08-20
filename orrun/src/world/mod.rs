@@ -26,6 +26,7 @@ mod rng;
 mod scatter;
 mod session;
 mod settlement;
+mod sites;
 mod surface;
 mod travel;
 mod villagers;
@@ -54,6 +55,7 @@ pub use scatter::{
 };
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
 pub use settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
+pub use sites::{plan_overland_sites, OverlandSite, SiteKind};
 pub use villagers::VillagerLayer;
 pub use surface::{
     classify_settlement, ContinentalSurface, DungeonPin, SettlementPin, SurfaceColumn,

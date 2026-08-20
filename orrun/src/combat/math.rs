@@ -157,6 +157,15 @@ pub const TRIBAL_SPEED: f64 = 5.0;
 pub const TRIBAL_REACH_M: f64 = 1.6;
 pub const TRIBAL_XP: i32 = 95;
 
+pub const BANDIT_LEVEL: i32 = 5;
+pub const BANDIT_HP: i32 = 156;
+pub const BANDIT_ARMOR: i32 = 8;
+pub const BANDIT_DMG: i32 = 18;
+pub const BANDIT_SWING_S: f64 = 1.8;
+pub const BANDIT_REACH_M: f64 = 2.2;
+pub const BANDIT_SPEED: f64 = 5.0;
+pub const BANDIT_XP: i32 = 83;
+
 pub const SKULL_LEVEL: i32 = 6;
 pub const SKULL_HP: i32 = 112;
 pub const SKULL_DMG: i32 = 20;
