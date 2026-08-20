@@ -96,6 +96,8 @@ fn main() {
         "incoming.png",
         "camp.json",
         "camp.png",
+        "status.json",
+        "status.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -508,6 +510,7 @@ impl Driver {
                 | Some("cd_sweep")
                 | Some("cast_bar")
                 | Some("incoming")
+                | Some("status")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -988,7 +991,7 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" | "cast_bar" | "incoming" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
             "loot_sparkle" => self.start_loot_sparkle(world, frame),
@@ -3423,9 +3426,25 @@ impl Driver {
                 );
                 self.combat_death_sent = true;
                 self.combat_shot_sent = true;
-                self.ok_hook("combat");
-                world.mark_ready();
-                self.queue_shot(world, frame, "slain");
+                if self.current_hook() == Some("status") {
+                    self.write_json(
+                        "status",
+                        json!({
+                            "status": "ok",
+                            "shot": "status.png",
+                            "shaken": self.session.is_shaken(),
+                            "player_hp": self.session.player_hp(),
+                            "player_hp_max": self.session.player_hp_max(),
+                        }),
+                    );
+                    self.ok_hook("status");
+                    world.mark_ready();
+                    self.queue_shot(world, frame, "status");
+                } else {
+                    self.ok_hook("combat");
+                    world.mark_ready();
+                    self.queue_shot(world, frame, "slain");
+                }
                 self.phase = Phase::NextHook;
                 self.phase_t0 = frame.time;
             }
@@ -5099,37 +5118,42 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("HP").size(18.0).color(Color32::WHITE));
-                    let (hp_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(360.0, 22.0), Sense::hover());
-                    ui.painter().rect_filled(
-                        hp_rect,
-                        2.0,
-                        Color32::from_rgb(40, 40, 40),
-                    );
-                    if let Some(ghost) = session.hp_ghost_frac() {
-                        if ghost > hp_frac {
-                            let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                    ui.horizontal(|ui| {
+                        let (hp_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(360.0, 22.0), Sense::hover());
+                        ui.painter().rect_filled(
+                            hp_rect,
+                            2.0,
+                            Color32::from_rgb(40, 40, 40),
+                        );
+                        if let Some(ghost) = session.hp_ghost_frac() {
+                            if ghost > hp_frac {
+                                let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        hp_rect.min,
+                                        egui::vec2(ghost_w, hp_rect.height()),
+                                    ),
+                                    2.0,
+                                    Color32::from_rgb(220, 24, 24),
+                                );
+                            }
+                        }
+                        if hp_frac > 0.0 {
+                            let fill_w = hp_rect.width() * hp_frac;
                             ui.painter().rect_filled(
                                 egui::Rect::from_min_size(
                                     hp_rect.min,
-                                    egui::vec2(ghost_w, hp_rect.height()),
+                                    egui::vec2(fill_w, hp_rect.height()),
                                 ),
                                 2.0,
-                                Color32::from_rgb(220, 24, 24),
+                                hp_color,
                             );
                         }
-                    }
-                    if hp_frac > 0.0 {
-                        let fill_w = hp_rect.width() * hp_frac;
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                hp_rect.min,
-                                egui::vec2(fill_w, hp_rect.height()),
-                            ),
-                            2.0,
-                            hp_color,
-                        );
-                    }
+                        if session.is_shaken() {
+                            hud::paint_shaken_icon(ui);
+                        }
+                    });
                     ui.label(egui::RichText::new("Mana").size(18.0).color(Color32::WHITE));
                     ui.add(
                         egui::ProgressBar::new(mana_frac)
@@ -5150,13 +5174,6 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                             egui::RichText::new(slain)
                                 .size(20.0)
                                 .color(Color32::from_rgb(230, 70, 70)),
-                        );
-                    }
-                    if session.is_shaken() {
-                        ui.label(
-                            egui::RichText::new("Shaken")
-                                .size(16.0)
-                                .color(Color32::from_rgb(200, 160, 80)),
                         );
                     }
                 });

@@ -241,7 +241,8 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
 }
 
 
-use crate::inventory::{load_icon, EquipSlot, Family, Item};
+use crate::inventory::{assets_dir, load_icon, EquipSlot, Family, Item};
+use engine::load_rgba8_png;
 use crate::world::WorldSession;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -252,6 +253,40 @@ const MUTED: Color32 = Color32::from_rgb(180, 188, 196);
 
 thread_local! {
     static ICON_TEX: RefCell<HashMap<&'static str, egui::TextureHandle>> = RefCell::new(HashMap::new());
+}
+
+fn shaken_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    ICON_TEX.with(|cell| {
+        let mut map = cell.borrow_mut();
+        if let Some(tex) = map.get("shaken.png") {
+            return Some(tex.clone());
+        }
+        let path = assets_dir()?.join("icons").join("status").join("shaken.png");
+        let (width, height, rgba) = load_rgba8_png(&path).ok()?;
+        let tex = ctx.load_texture(
+            "icon-shaken.png",
+            egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                &rgba,
+            ),
+            egui::TextureOptions::NEAREST,
+        );
+        map.insert("shaken.png", tex.clone());
+        Some(tex)
+    })
+}
+
+/// 48x48 cracked-shield next to the HP bar when Shaken.
+pub fn paint_shaken_icon(ui: &mut egui::Ui) {
+    if let Some(tex) = shaken_texture(ui.ctx()) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
 }
 
 fn icon_texture(ctx: &egui::Context, family: Family) -> Option<egui::TextureHandle> {

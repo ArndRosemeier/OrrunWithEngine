@@ -1697,50 +1697,48 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     } else {
                         Color32::from_rgb(40, 180, 64)
                     };
-                    let bar_h = ui.spacing().interact_size.y;
-                    let (hp_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(160.0, bar_h), Sense::hover());
-                    ui.painter().rect_filled(
-                        hp_rect,
-                        2.0,
-                        Color32::from_rgb(40, 40, 40),
-                    );
-                    if let Some(ghost) = session.hp_ghost_frac() {
-                        if ghost > hp_frac {
-                            let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                    ui.horizontal(|ui| {
+                        let bar_h = ui.spacing().interact_size.y;
+                        let (hp_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(160.0, bar_h), Sense::hover());
+                        ui.painter().rect_filled(
+                            hp_rect,
+                            2.0,
+                            Color32::from_rgb(40, 40, 40),
+                        );
+                        if let Some(ghost) = session.hp_ghost_frac() {
+                            if ghost > hp_frac {
+                                let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        hp_rect.min,
+                                        egui::vec2(ghost_w, hp_rect.height()),
+                                    ),
+                                    2.0,
+                                    Color32::from_rgb(220, 24, 24),
+                                );
+                            }
+                        }
+                        if hp_frac > 0.0 {
+                            let fill_w = hp_rect.width() * hp_frac;
                             ui.painter().rect_filled(
                                 egui::Rect::from_min_size(
                                     hp_rect.min,
-                                    egui::vec2(ghost_w, hp_rect.height()),
+                                    egui::vec2(fill_w, hp_rect.height()),
                                 ),
                                 2.0,
-                                Color32::from_rgb(220, 24, 24),
+                                hp_color,
                             );
                         }
-                    }
-                    if hp_frac > 0.0 {
-                        let fill_w = hp_rect.width() * hp_frac;
-                        ui.painter().rect_filled(
-                            egui::Rect::from_min_size(
-                                hp_rect.min,
-                                egui::vec2(fill_w, hp_rect.height()),
-                            ),
-                            2.0,
-                            hp_color,
-                        );
-                    }
+                        if session.is_shaken() {
+                            hud::paint_shaken_icon(ui);
+                        }
+                    });
                     if let Some(slain) = session.slain_line() {
                         ui.label(
                             egui::RichText::new(slain)
                                 .size(16.0)
                                 .color(Color32::from_rgb(230, 70, 70)),
-                        );
-                    }
-                    if session.is_shaken() {
-                        ui.label(
-                            egui::RichText::new("Shaken")
-                                .size(16.0)
-                                .color(Color32::from_rgb(200, 160, 80)),
                         );
                     }
                     ui.add(
