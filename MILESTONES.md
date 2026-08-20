@@ -50,4 +50,6 @@ Cast bar SHIP: Ember remaining-time bar above the hotbar. Pie left alone. Playte
 
 Incoming HP ghost SHIP: red leftover on the 160px bar. Pie/pip/cast bar unchanged. Playtester PASS + Reviewer SHIP `incoming.png` on `9bd8900`.
 
-Con color / status icons / nameplates still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
+Shaken status icon SHIP: cracked shield next to the HP bar, not the word. Playtester PASS + Reviewer SHIP `status.png` on `9eda930`.
+
+Con color / nameplates still later M7. Auto-attack pip. Floating combat text and a first-person weapon stay off this board unless we put them on.
