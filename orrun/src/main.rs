@@ -1743,6 +1743,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         });
     hud::draw_target_frame(&ctx, session.combat());
     hud::draw_hotbar(&ctx, session.combat(), session.key_binds());
+    hud::draw_cast_bar(&ctx, session.combat());
     hud::draw_combat_log(&ctx, session.combat());
     hud::draw_fail_toast(&ctx, session.combat());
     hud::draw_loot_windows(session, world, frame);

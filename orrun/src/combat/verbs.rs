@@ -34,6 +34,29 @@ impl WorldCombat {
         (left / max).clamp(0.0, 1.0) as f32
     }
 
+    /// Remaining-time fraction of the live cast. `1.0` just started, `0.0` gone.
+    /// Same remaining-visible convention as [`Self::verb_cd_frac`].
+    pub fn cast_frac(&self) -> Option<f32> {
+        let kind = self.cast_kind?;
+        let max = cast_duration_s(kind);
+        if max <= 0.0 || self.cast_t <= 0.0 {
+            return None;
+        }
+        Some((self.cast_t / max).clamp(0.0, 1.0) as f32)
+    }
+
+    pub fn cast_label(&self) -> Option<&'static str> {
+        Some(match self.cast_kind? {
+            "ember" => "Ember",
+            "mend" => "Mend",
+            "bind" => "Bind",
+            "bash" => "Bash",
+            "aimed" => "Aimed Shot",
+            "pin" => "Pin",
+            other => other,
+        })
+    }
+
     fn set_cd(&mut self, k: &'static str, v: f64) {
         self.cds.insert(k, v);
     }
@@ -414,6 +437,18 @@ impl WorldCombat {
 
 pub fn cd_max(kind: &str) -> f64 {
     cd_for(kind)
+}
+
+fn cast_duration_s(kind: &str) -> f64 {
+    match kind {
+        "bash" => BASH_ANIM_S,
+        "aimed" => AIMED_DRAW_S,
+        "pin" => BOW_DRAW_S,
+        "ember" => EMBER_CAST_S,
+        "bind" => BIND_CAST_S,
+        "mend" => MEND_CAST_S,
+        _ => 0.0,
+    }
 }
 
 fn cd_for(kind: &str) -> f64 {

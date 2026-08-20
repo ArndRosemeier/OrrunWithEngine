@@ -177,6 +177,43 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
+pub fn draw_cast_bar(ctx: &egui::Context, combat: &WorldCombat) {
+    let Some(frac) = combat.cast_frac() else {
+        return;
+    };
+    let Some(label) = combat.cast_label() else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    let slot = 64.0;
+    let hotbar_y = screen.height() - slot - 18.0;
+    let x = (screen.width() * 0.5 - 110.0).max(12.0);
+    // Sit just above the hotbar. Fail toast lives at 38% height — do not join it.
+    let y = hotbar_y - 56.0;
+    let fill = Color32::from_rgb(220, 150, 40);
+    egui::Area::new(egui::Id::new("cast_bar"))
+        .fixed_pos(egui::pos2(x, y))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(16.0)
+                            .color(Color32::from_rgb(240, 210, 80)),
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .fill(fill)
+                            .desired_width(200.0)
+                            .desired_height(16.0),
+                    );
+                });
+        });
+}
+
 pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
     let Some(line) = combat.fail_tell() else {
         return;
@@ -198,6 +235,7 @@ pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
 pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
     draw_target_frame(ctx, combat);
     draw_hotbar(ctx, combat, binds);
+    draw_cast_bar(ctx, combat);
     draw_combat_log(ctx, combat);
     draw_fail_toast(ctx, combat);
 }

@@ -90,6 +90,8 @@ fn main() {
         "tribal_veteran.png",
         "death.json",
         "death.png",
+        "cast_bar.json",
+        "cast_bar.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -146,6 +148,8 @@ fn main() {
         combat_hurt_sent: false,
         combat_cd_sweep_at: None,
         combat_cd_sweep_sent: false,
+        combat_cast_bar_at: None,
+        combat_cast_bar_sent: false,
         combat_fail_armed: false,
         combat_fail_sent: false,
         combat_death_sent: false,
@@ -402,6 +406,8 @@ struct Driver {
     combat_hurt_sent: bool,
     combat_cd_sweep_at: Option<f32>,
     combat_cd_sweep_sent: bool,
+    combat_cast_bar_at: Option<f32>,
+    combat_cast_bar_sent: bool,
     combat_fail_armed: bool,
     combat_fail_sent: bool,
     combat_death_sent: bool,
@@ -494,6 +500,7 @@ impl Driver {
                 | Some("bluedemon")
                 | Some("tribal_veteran")
                 | Some("cd_sweep")
+                | Some("cast_bar")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -514,7 +521,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -576,6 +583,8 @@ impl Driver {
                     // look only; fixture wolves spawn in melee in front of the player
                 } else if self.session.slain_line().is_none() && self.session.lock_id().is_none() {
                     input.tab = true;
+                } else if self.current_hook() == Some("cast_bar") {
+                    // Ember 28 m reaches the wolf line; stay put for the bar shot.
                 } else if self.combat_hurt_sent && !self.combat_fail_sent {
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
@@ -949,7 +958,7 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" | "cast_bar" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
             "loot_sparkle" => self.start_loot_sparkle(world, frame),
@@ -3103,6 +3112,72 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
+    fn tick_cast_bar(&mut self, world: &mut World, frame: &Frame) {
+        if self.combat_cast_bar_at.is_none() {
+            let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+            let facing = Camera::facing_xz(yaw);
+            let Some(pos) = self.session.player_position() else {
+                return;
+            };
+            let started = self.session.combat_mut().press_verb(
+                Action::Ember,
+                pos.x,
+                pos.z,
+                facing.x as f64,
+                facing.z as f64,
+            );
+            let t = self.session.combat().cast_t;
+            let kind = self.session.combat().cast_kind;
+            if !started || kind != Some("ember") || t <= 0.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current(&format!(
+                        "cast_bar: Ember never started (started={started} kind={kind:?} t={t})"
+                    ));
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+            self.combat_cast_bar_at = Some(frame.time);
+            return;
+        }
+        if self.combat_cast_bar_sent {
+            return;
+        }
+        let t = self.session.combat().cast_t;
+        let kind = self.session.combat().cast_kind;
+        if kind != Some("ember") || t <= 0.0 {
+            self.fail_current(&format!(
+                "cast_bar: Ember finished before mid-cast shot (kind={kind:?} t={t})"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        // remaining-time: 1.2 at start. Shoot ~0.5–0.75s in so the bar is mid.
+        if t > 0.70 {
+            return;
+        }
+        if t < 0.45 {
+            self.fail_current(&format!("cast_bar: missed mid-cast window (t={t})"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.combat_cast_bar_sent = true;
+        world.mark_ready();
+        self.queue_shot(world, frame, "cast_bar");
+        self.write_json(
+            "cast_bar",
+            json!({
+                "status": "ok",
+                "shot": "cast_bar.png",
+                "cast_kind": kind,
+                "cast_t": t,
+                "hotbar_visible": true,
+            }),
+        );
+        self.ok_hook("cast_bar");
+        self.phase = Phase::NextHook;
+    }
+
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
         match orrun::combat::fixture_l1_martial_wolf() {
             Ok(fight) => {
@@ -3141,6 +3216,8 @@ impl Driver {
                 self.combat_shot_sent = false;
                 self.combat_cd_sweep_at = None;
                 self.combat_cd_sweep_sent = false;
+                self.combat_cast_bar_at = None;
+                self.combat_cast_bar_sent = false;
                 self.phase = Phase::CombatLive;
                 self.phase_t0 = frame.time;
             }
@@ -3337,6 +3414,10 @@ impl Driver {
                 self.fail_current("combat: lock unset after Tab");
                 self.advance_after_fail(world, frame);
             }
+            return;
+        }
+        if self.current_hook() == Some("cast_bar") {
+            self.tick_cast_bar(world, frame);
             return;
         }
         match self.session.first_auto_hit() {
