@@ -493,9 +493,22 @@ impl Driver {
                 }
             }
             Phase::CombatOrcLive => {
-                // Stay in the 1.5 m stand. Orc reach is 2.0 m. Tab after look.
+                // Stay in the 1.5 m stand until Punch connects (reach 2.0).
+                // Then walk back to the human viewing stand so roster.png
+                // shows a creature, not a torso wall.
                 if self.combat_tab_sent && self.session.lock_id().is_none() {
                     input.tab = true;
+                } else if self.session.incoming_hit() {
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        orc_view_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
                 }
             }
             Phase::CombatBodyLive => {
@@ -1505,8 +1518,23 @@ impl Driver {
             }
             return;
         }
-        let punch_at = *self.combat_orc_punch_at.get_or_insert(frame.time);
-        if frame.time - punch_at < 0.3 {
+        let Some(stand) = orc_view_stand(&self.session) else {
+            self.fail_current("combat_orc: no orc view stand");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: never reached orc view stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let punch_at = *self.combat_orc_punch_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        if frame.time - punch_at < 0.35 {
             return;
         }
         self.write_json(
@@ -2348,6 +2376,21 @@ fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
     Some(GlobalXZ::at(a.x - fx * 1.2, a.z - fz * 1.2))
 }
 
+fn orc_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    const STAND_M: f64 = 5.5;
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let dx = pos.x - h.x;
+    let dz = pos.z - h.z;
+    let len = (dx * dx + dz * dz).sqrt();
+    let (ux, uz) = if len > 1e-6 {
+        (dx / len, dz / len)
+    } else {
+        (-1.0, 0.0)
+    };
+    Some(GlobalXZ::at(h.x + ux * STAND_M, h.z + uz * STAND_M))
+}
+
 fn orc_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     let pos = session.player_position()?;
     let h = session.combat().hostiles.first()?;
@@ -2355,8 +2398,8 @@ fn orc_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
         .contact_height(GlobalXZ::at(h.x, h.z))
         .unwrap_or(pos.y as f32);
     let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
-    // Chest / punching arms on the ~3.2 m orc so Punch reads in roster.png.
-    let target = Vec3::new(h.x as f32, ground + 1.45, h.z as f32);
+    // Mid / upper body of the ~3.2 m orc. A 1.45 m chest from 1.5 m is a torso wall.
+    let target = Vec3::new(h.x as f32, ground + 2.0, h.z as f32);
     Some((eye, target))
 }
 

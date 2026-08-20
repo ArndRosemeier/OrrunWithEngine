@@ -321,7 +321,7 @@ pub fn orc_skull_sheet() -> MobSheet {
         damage: SKULL_DMG,
         swing_s: SKULL_SWING_S,
         slam_damage: Some(SKULL_BOLT_DMG),
-        slam_every_s: None,
+        slam_every_s: Some(0.0),
         telegraph_s: Some(SKULL_TELE_S),
         reach_m: SKULL_REACH_M,
         speed_mps: SKULL_SPEED,

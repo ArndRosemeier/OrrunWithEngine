@@ -8,7 +8,9 @@
 //! There is no spider in the fauna catalog; do not route these through FaunaLayer.
 
 use crate::combat::catalog::mesh_spec;
-use crate::combat::math::{TICK, WALK_MPS};
+use crate::combat::math::{
+    mitigation, SKULL_BOLT_DMG, SKULL_BOLT_RANGE_M, SKULL_TELE_S, TICK, WALK_MPS,
+};
 use crate::combat::sheets::{orc_sheet, orc_skull_sheet, tribal_sheet, wolf_sheet, MobSheet};
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::world::settlement::{HamletStand, HAMLET_ROAD_PAD_M};
@@ -86,7 +88,8 @@ pub struct CombatLayer {
     wolf_model: Option<Arc<AnimatedModel>>,
     models: HashMap<String, Arc<AnimatedModel>>,
     fixture_kind: FixtureKind,
-    pending_melee: Option<(EntityId, &'static str)>,
+    pending_melee: Option<(Option<EntityId>, &'static str)>,
+    skull_tele: HashMap<i32, f64>,
     lock_ring: Option<EntityId>,
     ring_on: Option<i32>,
     attack_pip_s: f64,
@@ -114,6 +117,7 @@ impl CombatLayer {
             models: HashMap::new(),
             fixture_kind: FixtureKind::WolfLine,
             pending_melee: None,
+            skull_tele: HashMap::new(),
             lock_ring: None,
             ring_on: None,
             attack_pip_s: 0.0,
@@ -214,6 +218,7 @@ impl CombatLayer {
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.pending_melee = None;
+        self.skull_tele.clear();
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
@@ -261,8 +266,9 @@ impl CombatLayer {
     /// Visible fixture meshes on the live hostiles. Faces the player.
     ///
     /// Each hostile uses `catalog::mesh_spec(mob_id)`. Wolf stays
-    /// `fauna/wolf/wolf.gltf` with MESH_BEHIND_M 2.55. Orc/tribal/skull
-    /// sit on the combat XZ. Not FaunaLayer.
+    /// `fauna/wolf/wolf.gltf` with MESH_BEHIND 2.55. Orc/tribal/skull
+    /// sit MESH_BEHIND 1.6 m behind combat XZ so the camera is not
+    /// inside the volume during the melee step. Not FaunaLayer.
     pub fn spawn_hostile_meshes(
         &mut self,
         world: &mut World,
@@ -280,7 +286,8 @@ impl CombatLayer {
         let away = player_yaw_deg.to_radians();
         let ax = away.sin() as f64;
         let az = away.cos() as f64;
-        const MESH_BEHIND_M: f64 = 2.55;
+        const WOLF_MESH_BEHIND_M: f64 = 2.55;
+        const ORC_MESH_BEHIND_M: f64 = 1.6;
         for (i, h) in combat.hostiles.iter_mut().enumerate() {
             let spec = mesh_spec(&h.mob_id).ok_or_else(|| {
                 EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
@@ -288,9 +295,9 @@ impl CombatLayer {
             let model = self.model_for(&h.mob_id)?;
             let y = feet_y.get(i).copied().unwrap_or(0.0);
             let behind = if is_wolf_mesh(&h.mob_id) {
-                MESH_BEHIND_M
+                WOLF_MESH_BEHIND_M
             } else {
-                0.0
+                ORC_MESH_BEHIND_M
             };
             let pos = GlobalPosition::at(h.x + ax * behind, y, h.z + az * behind);
             let render = world.to_render(pos)?;
@@ -480,6 +487,7 @@ impl CombatLayer {
         self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
+        self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
     }
@@ -529,6 +537,12 @@ impl CombatLayer {
             });
             let player_hp = combat.player.resources.hp;
             let ward = combat.ward;
+            let skull_hp: HashMap<i32, f64> = combat
+                .hostiles
+                .iter()
+                .filter(|h| h.mob_id == "orc_skull")
+                .map(|h| (h.idx, h.hp))
+                .collect();
             combat.tick_verbs(player_x, player_z, TICK);
             log_finished_cast(
                 combat,
@@ -587,8 +601,97 @@ impl CombatLayer {
                     queue_connecting_melee(&mut self.pending_melee, &self.models, h);
                 }
             }
+            self.tick_skull_bolts(combat, player_x, player_z, &skull_hp);
         }
         just
+    }
+
+    fn tick_skull_bolts(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        skull_hp: &HashMap<i32, f64>,
+    ) {
+        if combat.dead {
+            self.skull_tele.clear();
+            return;
+        }
+        let grit = combat.player.stats.attrs.grit;
+        let ids: Vec<i32> = combat
+            .hostiles
+            .iter()
+            .filter(|h| h.mob_id == "orc_skull")
+            .map(|h| h.idx)
+            .collect();
+        for idx in ids {
+            let Some(slot) = combat.hostiles.iter().position(|h| h.idx == idx) else {
+                self.skull_tele.remove(&idx);
+                continue;
+            };
+            let took_hp = skull_hp
+                .get(&idx)
+                .is_some_and(|hp| combat.hostiles[slot].hp < *hp);
+            let alive = combat.hostiles[slot].alive;
+            let stun_s = combat.hostiles[slot].stun_s;
+            let hx = combat.hostiles[slot].x;
+            let hz = combat.hostiles[slot].z;
+            if !alive || stun_s > 0.0 || took_hp {
+                self.skull_tele.remove(&idx);
+                continue;
+            }
+            let dx = player_x - hx;
+            let dz = player_z - hz;
+            if (dx * dx + dz * dz).sqrt() > SKULL_BOLT_RANGE_M {
+                continue;
+            }
+            if let Some(rem) = self.skull_tele.get(&idx).copied() {
+                let next = rem - TICK;
+                if next > 1e-12 {
+                    self.skull_tele.insert(idx, next);
+                    continue;
+                }
+                self.skull_tele.remove(&idx);
+                let dealt = mitigation(f64::from(SKULL_BOLT_DMG), grit);
+                combat.player.resources.hp =
+                    (combat.player.resources.hp - f64::from(dealt)).max(0.0);
+                let killed = combat.player.resources.hp <= 0.0;
+                let name = combat.hostiles[slot].name.clone();
+                combat.log.push(format!("{name} hits you for {dealt}"));
+                self.incoming_hit = true;
+                self.hurt_flash_s = 0.15;
+                self.pending_sfx.push(CombatSfx::Hurt);
+                if killed {
+                    combat.dead = true;
+                    combat.lock = None;
+                    combat.auto_cd = 999.0;
+                    combat.slain_by = Some(name);
+                    combat.slain_hold_s = crate::combat::math::SLAIN_HOLD_S;
+                    combat.log.push("You are slain");
+                    break;
+                }
+            } else {
+                self.skull_tele.insert(idx, SKULL_TELE_S);
+                queue_weapon_anim(
+                    &mut self.pending_melee,
+                    &self.models,
+                    &combat.hostiles[slot],
+                );
+            }
+        }
+    }
+
+    /// Play catalog anim_melee on hostiles that have the clip.
+    pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
+        for h in &combat.hostiles {
+            let mut pending = None;
+            queue_connecting_melee(&mut pending, &self.models, h);
+            if let Some((id, clip)) = pending {
+                if let Some(id) = id {
+                    let _ = world.play_animation(id, clip);
+                }
+            }
+        }
     }
 
     /// Session hook: ring + flinch after the combat clock. `player_y` is the
@@ -613,7 +716,9 @@ impl CombatLayer {
         dt: f32,
     ) -> EngineResult<()> {
         if let Some((id, clip)) = self.pending_melee.take() {
-            let _ = world.play_animation(id, clip);
+            if let Some(id) = id {
+                let _ = world.play_animation(id, clip);
+            }
         }
         self.sync_lock_ring(world, combat, &mut ground_y)?;
         if self.pending_flinch {
@@ -939,27 +1044,50 @@ fn is_wolf_mesh(mob_id: &str) -> bool {
     matches!(mob_id, "crawler_spider_wolf" | "wolf" | "wolf-spider")
 }
 
+fn queue_clip(
+    pending: &mut Option<(Option<EntityId>, &'static str)>,
+    models: &HashMap<String, Arc<AnimatedModel>>,
+    h: &WorldHostile,
+    clip: &'static str,
+) {
+    let Some(spec) = mesh_spec(&h.mob_id) else {
+        return;
+    };
+    let has_clip = models
+        .get(spec.id)
+        .map(|m| m.find_clip(clip).is_some())
+        .unwrap_or(true);
+    if has_clip {
+        *pending = Some((h.entity, clip));
+    }
+}
+
 fn queue_connecting_melee(
-    pending: &mut Option<(EntityId, &'static str)>,
+    pending: &mut Option<(Option<EntityId>, &'static str)>,
     models: &HashMap<String, Arc<AnimatedModel>>,
     h: &WorldHostile,
 ) {
-    let Some(id) = h.entity else {
-        return;
-    };
     let Some(spec) = mesh_spec(&h.mob_id) else {
         return;
     };
     if spec.anim_melee == spec.anim_idle {
         return;
     }
-    let has_clip = models
-        .get(spec.id)
-        .map(|m| m.find_clip(spec.anim_melee).is_some())
-        .unwrap_or(true);
-    if has_clip {
-        *pending = Some((id, spec.anim_melee));
-    }
+    queue_clip(pending, models, h, spec.anim_melee);
+}
+
+fn queue_weapon_anim(
+    pending: &mut Option<(Option<EntityId>, &'static str)>,
+    models: &HashMap<String, Arc<AnimatedModel>>,
+    h: &WorldHostile,
+) {
+    let Some(spec) = mesh_spec(&h.mob_id) else {
+        return;
+    };
+    let Some(clip) = spec.anim_weapon else {
+        return;
+    };
+    queue_clip(pending, models, h, clip);
 }
 
 fn assets_dir() -> EngineResult<PathBuf> {
@@ -1342,6 +1470,37 @@ mod tests {
         let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
         assert!(
             lines.iter().any(|l| l.starts_with("You Ember wolf-spider for ")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn skull_bolt_telegraphs_weapon_then_deals_mitigated_14() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.hostiles.clear();
+        let sheet = orc_skull_sheet();
+        combat
+            .hostiles
+            .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "orc_skull"));
+        let hp0 = combat.player.resources.hp;
+        let mut layer = CombatLayer::install();
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
+        assert!(
+            layer.skull_tele.contains_key(&0),
+            "telegraph should start on first tick"
+        );
+        assert_eq!(
+            layer.pending_melee.as_ref().map(|(_, clip)| *clip),
+            Some("Weapon"),
+            "Weapon queued"
+        );
+        assert_eq!(combat.player.resources.hp, hp0);
+        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
+        let want = mitigation(f64::from(SKULL_BOLT_DMG), combat.player.stats.attrs.grit);
+        assert_eq!(combat.player.resources.hp, hp0 - f64::from(want));
+        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        assert!(
+            lines.iter().any(|l| l.contains(" hits you for ")),
             "{lines:?}"
         );
     }

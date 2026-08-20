@@ -444,6 +444,11 @@ impl WorldSession {
         self.combat_layer.incoming_hit()
     }
 
+    /// Replay catalog anim_melee (Punch) on hostiles that have the clip.
+    pub fn replay_melee(&mut self, world: &mut World) {
+        self.combat_layer.replay_melee(world, &self.combat);
+    }
+
     pub fn hurt_flash(&self) -> bool {
         self.combat_layer.hurt_flash()
     }
