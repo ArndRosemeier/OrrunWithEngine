@@ -2437,6 +2437,53 @@ impl WorldSession {
         self.nearest_tier0_hamlet().is_some()
     }
 
+    pub fn village_has_camp(&self) -> bool {
+        let Some(hamlet) = self.nearest_tier0_hamlet() else {
+            return false;
+        };
+        self.settlements
+            .as_ref()
+            .is_some_and(|s| s.hamlet_has_camp(hamlet.at))
+    }
+
+    pub fn village_camp_pair(&self) -> Option<(GlobalPosition, GlobalPosition)> {
+        let hamlet = self.nearest_tier0_hamlet()?;
+        self.settlements.as_ref()?.hamlet_camp(hamlet.at)
+    }
+
+    /// Camera stand pulled in on the yard pair (tent canvas + ring stones).
+    pub fn village_camp_stand(&self) -> Option<GlobalPosition> {
+        let (tent, ring) = self.village_camp_pair()?;
+        let mid_x = (tent.x + ring.x) * 0.5;
+        let mid_z = (tent.z + ring.z) * 0.5;
+        let ax = (ring.x - tent.x) as f32;
+        let az = (ring.z - tent.z) as f32;
+        let len = (ax * ax + az * az).sqrt().max(1e-6);
+        let px = -az / len;
+        let pz = ax / len;
+        let stand = GlobalXZ::at(
+            mid_x + f64::from(px * 4.6 - (ax / len) * 1.3),
+            mid_z + f64::from(pz * 4.6 - (az / len) * 1.3),
+        );
+        let ground = self
+            .contact_height(stand)
+            .unwrap_or_else(|| self.surface.column(stand).ground());
+        Some(GlobalPosition::at(stand.x, f64::from(ground + 1.85), stand.z))
+    }
+
+    pub fn village_camp_look(&self) -> Option<(Vec3, Vec3)> {
+        let (tent, ring) = self.village_camp_pair()?;
+        let pos = self.player_position()?;
+        let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+        let target = Vec3::new(
+            ((tent.x + ring.x) * 0.5) as f32,
+            ((tent.y + ring.y) * 0.5) as f32 + 0.7,
+            ((tent.z + ring.z) * 0.5) as f32,
+        );
+        Some((eye, target))
+    }
+
+
     pub fn village_human_count(&self) -> usize {
         self.villagers.as_ref().map_or(0, VillagerLayer::human_count)
     }

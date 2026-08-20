@@ -94,6 +94,8 @@ fn main() {
         "cast_bar.png",
         "incoming.json",
         "incoming.png",
+        "camp.json",
+        "camp.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -363,6 +365,8 @@ enum Phase {
     ControlsLive,
     VillageTravel,
     VillageLive,
+    CampTravel,
+    CampLive,
     CairnTravel,
     CairnLive,
     HutTravel,
@@ -524,7 +528,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -830,7 +834,7 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
-            Phase::VillageTravel | Phase::CairnTravel | Phase::HutTravel => {
+            Phase::VillageTravel | Phase::CampTravel | Phase::CairnTravel | Phase::HutTravel => {
                 input.skip_travel = true;
             }
             Phase::CairnLive | Phase::HutLive => {
@@ -863,6 +867,27 @@ impl Driver {
                 }
                 if let (Some(stand), Some(pos)) = (
                     village_camera_stand(&self.session),
+                    self.session.player_position(),
+                ) {
+                    let dx = (stand.x - pos.x) as f32;
+                    let dz = (stand.z - pos.z) as f32;
+                    let dy = (stand.y - pos.y) as f32;
+                    let mut direction = Vec3::new(dx, dy, dz);
+                    if direction.length_squared() > 1e-6 {
+                        direction = direction.normalize();
+                    } else {
+                        direction = Vec3::Y;
+                    }
+                    input.direction = direction;
+                    input.step_m = FLY_SPEED * dt;
+                }
+            }
+            Phase::CampLive => {
+                if self.session.locomotion() != Some(Locomotion::Fly) {
+                    input.toggle_fly = true;
+                }
+                if let (Some(stand), Some(pos)) = (
+                    self.session.village_camp_stand(),
                     self.session.player_position(),
                 ) {
                     let dx = (stand.x - pos.x) as f32;
@@ -937,6 +962,8 @@ impl Driver {
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::VillageTravel => self.tick_village_travel(world, frame),
             Phase::VillageLive => self.tick_village_live(world, frame),
+            Phase::CampTravel => self.tick_camp_travel(world, frame),
+            Phase::CampLive => self.tick_camp_live(world, frame),
             Phase::CairnTravel | Phase::HutTravel => self.tick_site_travel(world, frame),
             Phase::CairnLive | Phase::HutLive => self.tick_site_live(world, frame),
             Phase::NextHook => {
@@ -976,6 +1003,7 @@ impl Driver {
             "combat_mage" => self.start_combat_mage(world, frame),
             "controls" => self.start_controls(world, frame),
             "village" => self.start_village(world, frame),
+            "camp" => self.start_camp(world, frame),
             "cairn" | "taken_cairn" | "overworld_cairn" => {
                 self.start_site(world, frame, SiteKind::TakenCairn)
             }
@@ -1212,6 +1240,17 @@ impl Driver {
             self.fail_current("dungeon never went live");
             self.advance_after_fail(world, frame);
         }
+    }
+
+    fn aim_camp(&mut self) {
+        let Some((eye, target)) = self.session.village_camp_look() else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn aim_village_cut(&mut self) {
@@ -4094,6 +4133,140 @@ impl Driver {
         self.phase = Phase::NextHook;
     }
 
+    fn start_camp(&mut self, world: &mut World, frame: &Frame) {
+        let from = self
+            .session
+            .player_position()
+            .map(|p| p.horizontal())
+            .or_else(|| self.session.spawn().map(|s| s.ground()))
+            .unwrap_or(GlobalXZ::at(0.0, 0.0));
+        let Some(pin) = self.session.nearest_tier0_pin(from) else {
+            self.fail_current("camp: no tier-0 pin on this atlas");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let dist = pin.at.distance(from);
+        if dist > 80.0 || self.session.state() != SessionState::World {
+            match WorldEntryRequest::at_global(self.session.surface().bounds(), pin.at) {
+                Ok(request) => match self.session.begin_entry(world, request) {
+                    Ok(()) => {
+                        self.phase = Phase::CampTravel;
+                        self.phase_t0 = frame.time;
+                    }
+                    Err(err) => {
+                        self.fail_current(&format!("camp entry failed: {err}"));
+                        self.advance_after_fail(world, frame);
+                    }
+                },
+                Err(err) => {
+                    self.fail_current(&format!("camp pin is not a valid entry: {err}"));
+                    self.advance_after_fail(world, frame);
+                }
+            }
+        } else {
+            self.phase = Phase::CampLive;
+            self.phase_t0 = frame.time;
+        }
+    }
+
+    fn tick_camp_travel(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() == SessionState::World {
+            self.phase = Phase::CampLive;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+            self.fail_current("camp: timed out travelling to the hamlet");
+            self.advance_after_fail(world, frame);
+        }
+    }
+
+    fn tick_camp_live(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("camp: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let stand_xz = pos.horizontal();
+        if !self.session.stream().required_ready(stand_xz) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("camp: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.session.nearest_tier0_hamlet().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("camp: no seated tier-0 hamlet");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.village_has_camp() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("camp: no tent/ring pair on the hamlet yard");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_camp();
+        let Some(cam) = self.session.village_camp_stand() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("camp: yard pair has no camera stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let Some((tent, ring)) = self.session.village_camp_pair() else {
+            self.fail_current("camp: pair vanished");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let horiz = stand_xz.distance(cam.horizontal());
+        let high_enough = (pos.y - cam.y).abs() < 1.6;
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let looking = self.session.village_camp_look().is_some_and(|(eye, target)| {
+            view_angle_degrees(eye, yaw, pitch, target) < 16.0
+        });
+        if horiz > 2.8 || !high_enough || !looking {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "camp: camera never sat on the yard pair (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
+                    pos.y
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let pin = self.session.village_well().unwrap_or(tent.horizontal());
+        self.write_json(
+            "camp",
+            json!({
+                "status": "ok",
+                "has_camp": true,
+                "pin": { "x": pin.x, "z": pin.z },
+                "tent": { "x": tent.x, "y": tent.y, "z": tent.z },
+                "ring": { "x": ring.x, "y": ring.y, "z": ring.z },
+                "pose": {
+                    "x": pos.x,
+                    "y": pos.y,
+                    "z": pos.z,
+                    "yaw_degrees": yaw,
+                    "pitch_degrees": pitch,
+                },
+            }),
+        );
+        self.ok_hook("camp");
+        world.mark_ready();
+        self.queue_shot(world, frame, "camp");
+        self.phase = Phase::NextHook;
+    }
 
     fn start_site(&mut self, world: &mut World, frame: &Frame, kind: SiteKind) {
         self.site_kind = Some(kind);

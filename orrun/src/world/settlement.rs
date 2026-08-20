@@ -7,6 +7,7 @@
 //! was the Godot trap that buried doors or left houses floating.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -15,6 +16,7 @@ use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
+use engine::model::Model;
 use engine::place::{GlobalPlace, Place};
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, World};
@@ -95,6 +97,19 @@ struct SeatedCity {
     plots: Vec<BuildingPlot>,
     standing: Vec<Standing>,
     doors: Vec<HouseDoor>,
+}
+
+struct CampLive {
+    tent: EntityId,
+    ring: EntityId,
+    tent_at: GlobalPosition,
+    ring_at: GlobalPosition,
+}
+
+struct YardPose {
+    tent_xz: GlobalXZ,
+    ring_xz: GlobalXZ,
+    yaw_deg: f32,
 }
 
 /// A seated dwelling door the player can open.
@@ -249,6 +264,9 @@ pub struct SettlementLayer {
     pending: Option<Pending>,
     doors: Vec<HouseDoor>,
     hidden_door: Option<u64>,
+    camps: HashMap<i32, CampLive>,
+    tent_mesh: Option<Mesh>,
+    ring_mesh: Option<Mesh>,
 }
 
 impl SettlementLayer {
@@ -282,6 +300,9 @@ impl SettlementLayer {
             pending: None,
             doors: Vec::new(),
             hidden_door: None,
+            camps: HashMap::new(),
+            tent_mesh: None,
+            ring_mesh: None,
         })
     }
 
@@ -292,6 +313,17 @@ impl SettlementLayer {
     /// Seated hamlets in the current window, for footbridges across a split river.
     pub fn hamlets(&self) -> &[HamletStand] {
         &self.hamlets
+    }
+
+    /// Tent + fire-ring pair on the nearest matching seated hamlet yard.
+    pub fn hamlet_camp(&self, hamlet_at: GlobalXZ) -> Option<(GlobalPosition, GlobalPosition)> {
+        let id = self.pin_id_at(hamlet_at)?;
+        let camp = self.camps.get(&id)?;
+        Some((camp.tent_at, camp.ring_at))
+    }
+
+    pub fn hamlet_has_camp(&self, hamlet_at: GlobalXZ) -> bool {
+        self.hamlet_camp(hamlet_at).is_some()
     }
 
     /// Doors on seated dwellings.
@@ -348,6 +380,7 @@ impl SettlementLayer {
         self.tile_items.clear();
         self.tile_queue.clear();
         self.queued.clear();
+        self.despawn_all_camps(world);
         world.set_instances(self.well, &[])?;
         self.standing.clear();
         self.seated.clear();
@@ -389,6 +422,7 @@ impl SettlementLayer {
         if self.drop_far_pins(&nearby_ids) {
             plots_changed = true;
         }
+        self.drop_far_camps(world, &nearby_ids);
 
         if plots_changed {
             self.rebuild_live();
@@ -443,6 +477,7 @@ impl SettlementLayer {
         } else if plots_changed {
             self.stand_wells(world)?;
         }
+        self.stand_camps(world, surface)?;
 
         let loading = self.staging(focus) || self.pending.is_some();
         let budget = if loading {
@@ -452,6 +487,108 @@ impl SettlementLayer {
         };
         self.drain_tiles(world, focus, budget)?;
         Ok(plots_changed)
+    }
+
+
+    fn pin_id_at(&self, hamlet_at: GlobalXZ) -> Option<i32> {
+        self.seated.iter().find_map(|(id, city)| {
+            let d = city.hamlet.at;
+            if (d.x - hamlet_at.x).abs() < 0.75 && (d.z - hamlet_at.z).abs() < 0.75 {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn despawn_all_camps(&mut self, world: &mut World) {
+        for camp in self.camps.drain().map(|(_, c)| c) {
+            world.despawn(camp.tent);
+            world.despawn(camp.ring);
+        }
+    }
+
+    fn drop_far_camps(&mut self, world: &mut World, nearby_ids: &HashSet<i32>) {
+        let stale: Vec<i32> = self
+            .camps
+            .keys()
+            .copied()
+            .filter(|id| !nearby_ids.contains(id) || !self.seated.contains_key(id))
+            .collect();
+        for id in stale {
+            if let Some(camp) = self.camps.remove(&id) {
+                world.despawn(camp.tent);
+                world.despawn(camp.ring);
+            }
+        }
+    }
+
+    fn ensure_camp_meshes(&mut self) -> EngineResult<(Mesh, Mesh)> {
+        if self.tent_mesh.is_none() {
+            self.tent_mesh = Some(load_prop_mesh("props/tent_canvas_small.glb")?);
+        }
+        if self.ring_mesh.is_none() {
+            self.ring_mesh = Some(load_prop_mesh("props/campfire_ring.glb")?);
+        }
+        Ok((
+            self.tent_mesh.clone().expect("tent mesh"),
+            self.ring_mesh.clone().expect("ring mesh"),
+        ))
+    }
+
+    fn stand_camps(
+        &mut self,
+        world: &mut World,
+        surface: &ContinentalSurface,
+    ) -> EngineResult<()> {
+        let seated_ids: Vec<i32> = self.seated.keys().copied().collect();
+        for id in seated_ids {
+            if self.camps.contains_key(&id) {
+                continue;
+            }
+            if !pin_is_tier0(surface, id) {
+                continue;
+            }
+            let Some(city) = self.seated.get(&id) else {
+                continue;
+            };
+            let houses: Vec<HousePlot> = city
+                .plots
+                .iter()
+                .filter_map(|plot| match plot {
+                    BuildingPlot::House(h) => Some(*h),
+                    _ => None,
+                })
+                .collect();
+            let hamlet = city.hamlet.clone();
+            let seed = plan_seed(self.seed, id);
+            let Some(pose) = pick_yard_pair(&hamlet, &houses, seed) else {
+                continue;
+            };
+            let (tent_mesh, ring_mesh) = self.ensure_camp_meshes()?;
+            let tent_y = surface.column(pose.tent_xz).ground();
+            let ring_y = surface.column(pose.ring_xz).ground();
+            let tent_at = GlobalPosition::at(pose.tent_xz.x, f64::from(tent_y), pose.tent_xz.z);
+            let ring_at = GlobalPosition::at(pose.ring_xz.x, f64::from(ring_y), pose.ring_xz.z);
+            let tent = world.spawn_anchored(
+                tent_mesh,
+                GlobalPlace::at(tent_at).with_yaw_deg(pose.yaw_deg),
+            )?;
+            let ring = world.spawn_anchored(
+                ring_mesh,
+                GlobalPlace::at(ring_at).with_yaw_deg(pose.yaw_deg),
+            )?;
+            self.camps.insert(
+                id,
+                CampLive {
+                    tent,
+                    ring,
+                    tent_at,
+                    ring_at,
+                },
+            );
+        }
+        Ok(())
     }
 
     fn install_cities(&mut self, bake: PackResult, nearby_ids: &HashSet<i32>) -> bool {
@@ -1108,6 +1245,198 @@ fn layout_config(pin: SettlementPin) -> HamletLabConfig {
     config
 }
 
+
+const TENT_HALF_X: f32 = 1.1;
+const TENT_HALF_Z: f32 = 0.8;
+const RING_RADIUS_M: f32 = 0.74;
+const CAMP_GAP_M: f32 = 1.0;
+const CAMP_SEP_M: f32 = TENT_HALF_Z + CAMP_GAP_M + RING_RADIUS_M;
+const WELL_KEEP_M: f32 = 1.45;
+
+fn pin_is_tier0(surface: &ContinentalSurface, pin_id: i32) -> bool {
+    surface
+        .settlements()
+        .iter()
+        .any(|pin| pin.id == pin_id && pin.tier <= 1)
+}
+
+fn load_prop_mesh(rel: &str) -> EngineResult<Mesh> {
+    let mut tried = Vec::new();
+    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
+        tried.push(PathBuf::from(dir));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            tried.push(dir.join("assets"));
+        }
+    }
+    tried.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"));
+    for root in &tried {
+        let path = root.join(rel);
+        if path.is_file() {
+            return Model::load(&path).map_err(|source| {
+                EngineError::Model(format!("camp mesh {} failed: {source}", path.display()))
+            });
+        }
+    }
+    Err(EngineError::Model(format!("camp mesh missing: {rel}")))
+}
+
+fn plaza_xz(hamlet: &HamletStand) -> Vec2 {
+    hamlet
+        .cut
+        .last()
+        .copied()
+        .unwrap_or(Vec2::new(hamlet.at.x as f32, hamlet.at.z as f32))
+}
+
+fn camp_angles(hamlet: &HamletStand, seed: u64) -> Vec<f32> {
+    let plaza = plaza_xz(hamlet);
+    let along = if hamlet.cut.len() >= 2 {
+        let d = plaza - hamlet.cut[0];
+        if d.length_squared() > 1e-6 {
+            d.normalize()
+        } else {
+            Vec2::X
+        }
+    } else {
+        Vec2::X
+    };
+    let perp = Vec2::new(-along.y, along.x);
+    let prefer = perp.y.atan2(perp.x);
+    let mut angles = Vec::new();
+    if seed & 1 == 0 {
+        angles.push(prefer);
+        angles.push(prefer + std::f32::consts::PI);
+    } else {
+        angles.push(prefer + std::f32::consts::PI);
+        angles.push(prefer);
+    }
+    let jitter = ((seed >> 3) & 15) as f32 * (std::f32::consts::TAU / 16.0);
+    for i in 0..16 {
+        let a = jitter + i as f32 * (std::f32::consts::TAU / 16.0);
+        if !angles.iter().any(|b| angle_near(*b, a)) {
+            angles.push(a);
+        }
+    }
+    angles
+}
+
+fn angle_near(a: f32, b: f32) -> bool {
+    let d = (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    d.abs() < 0.08
+}
+
+fn pick_yard_pair(hamlet: &HamletStand, houses: &[HousePlot], seed: u64) -> Option<YardPose> {
+    let plaza = plaza_xz(hamlet);
+    let distances = [4.6_f32, 5.4, 6.2, 3.9, 7.0, 8.0, 3.4, 8.8];
+    let yaws = [0.0_f32, 90.0, 180.0, 270.0];
+    for dist in distances {
+        for ang in camp_angles(hamlet, seed) {
+            let mid = plaza + Vec2::new(ang.cos(), ang.sin()) * dist;
+            for extra in yaws {
+                let yaw_deg = ang.to_degrees() + extra;
+                if let Some(pose) = try_yard_pair(mid, yaw_deg, hamlet, houses) {
+                    return Some(pose);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn try_yard_pair(
+    mid: Vec2,
+    yaw_deg: f32,
+    hamlet: &HamletStand,
+    houses: &[HousePlot],
+) -> Option<YardPose> {
+    let (fx, fz) = kit::yaw_xz(0.0, 1.0, yaw_deg);
+    let half = CAMP_SEP_M * 0.5;
+    let tent = mid - Vec2::new(fx, fz) * half;
+    let ring = mid + Vec2::new(fx, fz) * half;
+    let tent_xz = GlobalXZ::at(f64::from(tent.x), f64::from(tent.y));
+    let ring_xz = GlobalXZ::at(f64::from(ring.x), f64::from(ring.y));
+    if !pair_legal(tent, ring, yaw_deg, hamlet, houses) {
+        return None;
+    }
+    Some(YardPose {
+        tent_xz,
+        ring_xz,
+        yaw_deg,
+    })
+}
+
+fn pair_legal(
+    tent: Vec2,
+    ring: Vec2,
+    yaw_deg: f32,
+    hamlet: &HamletStand,
+    houses: &[HousePlot],
+) -> bool {
+    let yaw_rad = yaw_deg.to_radians();
+    let mut samples = obb_samples(tent, yaw_deg, TENT_HALF_X, TENT_HALF_Z);
+    samples.extend(disk_samples(ring, RING_RADIUS_M));
+    let plaza = plaza_xz(hamlet);
+    for p in &samples {
+        if !hamlet.covers(*p, 0.0) {
+            return false;
+        }
+        if houses.iter().any(|h| h.blocks_prop(*p)) {
+            return false;
+        }
+        let v = Vec2::new(p.x as f32, p.z as f32);
+        if v.distance(plaza) < WELL_KEEP_M {
+            return false;
+        }
+    }
+    if obb_hits_stadium(
+        tent,
+        Vec2::new(TENT_HALF_X, TENT_HALF_Z),
+        yaw_rad,
+        &hamlet.cut,
+        ROAD_CLEAR_M * 0.5,
+    ) {
+        return false;
+    }
+    if obb_hits_stadium(
+        ring,
+        Vec2::new(RING_RADIUS_M, RING_RADIUS_M),
+        0.0,
+        &hamlet.cut,
+        ROAD_CLEAR_M * 0.5,
+    ) {
+        return false;
+    }
+    true
+}
+
+fn obb_samples(center: Vec2, yaw_deg: f32, half_x: f32, half_z: f32) -> Vec<GlobalXZ> {
+    let mut out = Vec::new();
+    for ix in [-1.0_f32, 0.0, 1.0] {
+        for iz in [-1.0_f32, 0.0, 1.0] {
+            let (dx, dz) = kit::yaw_xz(ix * half_x, iz * half_z, yaw_deg);
+            out.push(GlobalXZ::at(
+                f64::from(center.x + dx),
+                f64::from(center.y + dz),
+            ));
+        }
+    }
+    out
+}
+
+fn disk_samples(center: Vec2, radius: f32) -> Vec<GlobalXZ> {
+    let mut out = vec![GlobalXZ::at(f64::from(center.x), f64::from(center.y))];
+    for i in 0..8 {
+        let a = i as f32 * (std::f32::consts::TAU / 8.0);
+        out.push(GlobalXZ::at(
+            f64::from(center.x + a.cos() * radius),
+            f64::from(center.y + a.sin() * radius),
+        ));
+    }
+    out
+}
+
 fn plan_seed(world_seed: i32, node_id: i32) -> u64 {
     (world_seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (node_id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
@@ -1272,6 +1601,48 @@ mod tests {
         );
         let outside = GlobalXZ::at(0.0, 80.0);
         assert!(!hamlet.covers(outside, HAMLET_ROAD_PAD_M));
+    }
+
+    #[test]
+    fn yard_pair_sits_in_plaza_off_house_and_road_cut() {
+        let hamlet = HamletStand {
+            at: GlobalXZ::at(0.0, 0.0),
+            radius: 22.0,
+            houses: vec![GlobalXZ::at(12.0, 0.0)],
+            cut: vec![Vec2::new(-20.0, 0.0), Vec2::new(0.0, 0.0)],
+        };
+        let house = HousePlot {
+            at: GlobalXZ::at(12.0, 0.0),
+            half_x: 4.0,
+            half_z: 3.5,
+            yaw: 0.0,
+            floor_y: 0.0,
+        };
+        let pose = pick_yard_pair(&hamlet, &[house], plan_seed(1, 1)).expect("legal yard pose");
+        assert!(hamlet.covers(pose.tent_xz, 0.0));
+        assert!(hamlet.covers(pose.ring_xz, 0.0));
+        assert!(!house.contains_xz(pose.tent_xz));
+        assert!(!house.contains_xz(pose.ring_xz));
+        assert!(!house.blocks_prop(pose.tent_xz));
+        assert!(!house.blocks_prop(pose.ring_xz));
+        let tent = Vec2::new(pose.tent_xz.x as f32, pose.tent_xz.z as f32);
+        let ring = Vec2::new(pose.ring_xz.x as f32, pose.ring_xz.z as f32);
+        assert!(!obb_hits_stadium(
+            tent,
+            Vec2::new(TENT_HALF_X, TENT_HALF_Z),
+            pose.yaw_deg.to_radians(),
+            &hamlet.cut,
+            ROAD_CLEAR_M * 0.5,
+        ));
+        assert!(!obb_hits_stadium(
+            ring,
+            Vec2::new(RING_RADIUS_M, RING_RADIUS_M),
+            0.0,
+            &hamlet.cut,
+            ROAD_CLEAR_M * 0.5,
+        ));
+        let gap = tent.distance(ring);
+        assert!(gap > 2.0 && gap < 3.2, "pair separation {gap}");
     }
 
     #[test]
