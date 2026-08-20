@@ -914,9 +914,10 @@ impl Driver {
         };
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
-        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        let (dyaw, _) = look_deltas(eye, target, yaw, pitch);
         self.pending_yaw_delta = dyaw;
-        self.pending_pitch_delta = dpitch;
+        // From above the pin, not a horizon vista.
+        self.pending_pitch_delta = -50.0 - pitch;
     }
 
     fn aim_pitch(&mut self, target: f32) {
@@ -2300,7 +2301,7 @@ impl Driver {
         }
         let dwelling_count = hamlet.houses.len();
         let cut: Vec<glam::Vec2> = hamlet.cut.clone();
-        let _well = hamlet.at;
+        let pin = hamlet.at;
         let ribbon_faces = self.session.ribbon_faces();
         let human_count = self.session.village_human_mesh_count(world);
         let human_on_corridor = self.session.village_human_on_corridor();
@@ -2338,17 +2339,17 @@ impl Driver {
             }
             return;
         };
-        let horiz = stand.distance(GlobalXZ::at(cam.x, cam.z));
-        let high_enough = pos.y >= cam.y - 8.0;
+        let horiz = stand.distance(pin);
+        let high_enough = pos.y >= cam.y - 10.0;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
         let looking = village_look(&self.session).is_some_and(|(eye, target)| {
-            view_angle_degrees(eye, yaw, pitch, target) < 16.0
+            view_angle_degrees(eye, yaw, pitch, target) < 18.0
         });
-        if horiz > 10.0 || !high_enough || !looking {
+        if horiz > 12.0 || !high_enough || !looking || pitch > -42.0 {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
-                    "village: camera never sat above the cut (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
+                    "village: camera never sat above the pin (horiz={horiz:.1} y={:.1} pitch={pitch:.1})",
                     pos.y
                 ));
                 self.advance_after_fail(world, frame);
@@ -2700,12 +2701,10 @@ fn village_bank_xz(session: &WorldSession) -> Option<GlobalXZ> {
 
 fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {
     let hamlet = session.nearest_tier0_hamlet()?;
-    let at = session
-        .village_corridor_human()
-        .map(|p| p.horizontal())
-        .or_else(|| village_bank_xz(session))?;
-    let contact = session.contact_height(at).or_else(|| session.contact_height(hamlet.at))?;
-    Some(GlobalPosition::at(at.x, f64::from(contact + 12.0), at.z))
+    let pin = hamlet.at;
+    let contact = session.contact_height(pin)?;
+    // Above the pin, looking at the land street — not sitting on the river chord.
+    Some(GlobalPosition::at(pin.x, f64::from(contact + 72.0), pin.z))
 }
 
 fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
@@ -2719,7 +2718,7 @@ fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
         .or_else(|| session.contact_height(at))
         .unwrap_or(pos.y as f32);
     let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
-    let target = Vec3::new(at.x as f32, ground + 0.9, at.z as f32);
+    let target = Vec3::new(at.x as f32, ground + 1.1, at.z as f32);
     Some((eye, target))
 }
 
