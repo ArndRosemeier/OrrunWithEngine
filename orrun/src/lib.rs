@@ -1,10 +1,12 @@
-﻿//! Orrun game library — continental atlas and content generation.
+//! Orrun game library — continental atlas and content generation.
 
 pub mod atlas;
 pub mod combat;
 pub mod controls;
 pub mod hamlet;
 pub mod hud;
+pub mod inventory;
+pub mod loot;
 pub mod save;
 pub mod settings;
 pub mod world;

@@ -1,8 +1,8 @@
 //! Where the player was standing when they last closed the game.
 //!
-//! FORMAT 2 also keeps combat vitals and the last hatch-mouth shrine. FORMAT 1
+//! FORMAT 3 also keeps combat vitals, bag, and coin. FORMAT 2 also keeps combat vitals and the last hatch-mouth shrine. FORMAT 1
 //! (and any older stand that still has seed/size/x/z/yaw) still loads: combat
-//! fields take create defaults and the next write is FORMAT 2. The continent
+//! fields take create defaults and the next write is FORMAT 3. The continent
 //! itself stays a pure function of the seed.
 
 use std::fs;
@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::combat::{Attrs, Ranks};
+use crate::inventory::Inventory;
 use crate::world::Heading;
 
 /// Shape written on disk. Older stands that still have seed/size/x/z/yaw are
 /// migrated in memory; the next write is this format. A newer format, or JSON
 /// that is not a stand, is an error.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum SaveError {
@@ -76,7 +77,7 @@ impl SavedShrine {
     }
 }
 
-/// One remembered stand plus combat vitals. FORMAT 2.
+/// One remembered stand plus combat vitals, bag, and coin. FORMAT 3.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedStand {
     pub format: u32,
@@ -93,6 +94,7 @@ pub struct SavedStand {
     pub ranks: Ranks,
     pub shaken_until: f64,
     pub last_shrine: Option<SavedShrine>,
+    pub inventory: Inventory,
 }
 
 impl SavedStand {
@@ -116,6 +118,7 @@ impl SavedStand {
             },
             shaken_until: 0.0,
             last_shrine: None,
+            inventory: Inventory::create_kit(),
         }
     }
 
@@ -281,7 +284,7 @@ mod tests {
 
     #[test]
     fn format_is_versioned() {
-        assert_eq!(FORMAT, 2);
+        assert_eq!(FORMAT, 3);
     }
 
     #[test]
@@ -332,6 +335,7 @@ mod tests {
         assert_eq!(back.ranks.martial, 3);
         assert_eq!(back.shaken_until, 12.5);
         assert_eq!(back.last_shrine.unwrap().x, 1.0);
+        assert_eq!(back.inventory, stand.inventory);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -411,7 +415,7 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&out).expect("read written"))
                 .expect("written json");
-        assert_eq!(written["format"], 2);
+        assert_eq!(written["format"], 3);
         assert_eq!(written["x"], parsed["x"]);
         assert_eq!(written["z"], parsed["z"]);
         let _ = fs::remove_dir_all(dir);
@@ -435,6 +439,38 @@ mod tests {
         assert_eq!(stand.format, FORMAT);
         assert_eq!(stand.hp, 100.0);
         assert_eq!(stand.mana, 50.0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    const FORMAT_2_STAND: &str = r#"{
+  "format": 2,
+  "seed": 7,
+  "size": 64,
+  "x": 1.5,
+  "z": 2.25,
+  "yaw_degrees": 90.0,
+  "level": 1,
+  "xp": 0,
+  "hp": 100.0,
+  "mana": 50.0,
+  "attrs": { "might": 10, "grace": 10, "mind": 10, "discipline": 10 },
+  "ranks": { "martial": 1, "hunt": 0, "arcane": 0 },
+  "shaken_until": 0.0,
+  "last_shrine": null
+}"#;
+
+    #[test]
+    fn format_2_stand_migrates_to_create_kit_bag() {
+        let dir = isolated_dir();
+        let path = dir.join("stand-7-64.json");
+        fs::write(&path, FORMAT_2_STAND).expect("write format 2");
+        let stand = SavedStand::read_at(&path, 7, 64)
+            .expect("format 2 must load")
+            .expect("present");
+        assert_eq!(stand.format, FORMAT);
+        assert_eq!(stand.inventory, Inventory::create_kit());
+        assert_eq!(stand.inventory.coin, 0);
+        assert_eq!(stand.inventory.melee.unwrap().name(), "Worn Blade");
         let _ = fs::remove_dir_all(dir);
     }
 

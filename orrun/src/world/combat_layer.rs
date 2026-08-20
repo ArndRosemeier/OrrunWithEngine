@@ -51,6 +51,12 @@ const FLASH: Color = Color {
     b: 0.55,
     a: 1.0,
 };
+const SPARKLE: Color = Color {
+    r: 1.0,
+    g: 0.86,
+    b: 0.22,
+    a: 1.0,
+};
 
 /// One-shot combat voices queued on a live auto that deals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +118,7 @@ pub struct CombatLayer {
     incoming_hit: bool,
     hurt_flash_s: f64,
     death_posed: HashSet<EntityId>,
+    sparkles: HashMap<i32, EntityId>,
 }
 
 impl CombatLayer {
@@ -142,6 +149,7 @@ impl CombatLayer {
             incoming_hit: false,
             hurt_flash_s: 0.0,
             death_posed: HashSet::new(),
+            sparkles: HashMap::new(),
         }
     }
 
@@ -200,6 +208,7 @@ impl CombatLayer {
         self.ring_on = None;
         self.flash = None;
         self.death_posed.clear();
+        self.sparkles.clear();
     }
 
     pub fn roster_pins_skipped(&self) -> bool {
@@ -268,6 +277,57 @@ impl CombatLayer {
             .unwrap_or(false)
     }
 
+
+    pub fn is_death_posed(&self, id: EntityId) -> bool {
+        self.death_posed.contains(&id)
+    }
+
+    pub fn has_sparkle(&self, idx: i32) -> bool {
+        self.sparkles.contains_key(&idx)
+    }
+
+    pub fn sparkle_visible(&self, world: &World) -> bool {
+        self.sparkles
+            .values()
+            .any(|&id| world.entity(id).is_ok())
+    }
+
+    pub fn spawn_sparkle(
+        &mut self,
+        world: &mut World,
+        idx: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> EngineResult<()> {
+        if let Some(id) = self.sparkles.get(&idx).copied() {
+            if world.entity(id).is_ok() {
+                return Ok(());
+            }
+            self.sparkles.remove(&idx);
+        }
+        let id = world.spawn_anchored(
+            sparkle_mesh()?,
+            GlobalPlace::at(GlobalPosition::at(x, y + 0.42, z)),
+        )?;
+        let _ = world.set_casts_shadow(id, false);
+        self.sparkles.insert(idx, id);
+        Ok(())
+    }
+
+    pub fn strip_sparkle(&mut self, world: &mut World, idx: i32) {
+        if let Some(id) = self.sparkles.remove(&idx) {
+            world.despawn(id);
+        }
+    }
+
+    pub fn strip_all_sparkles(&mut self, world: &mut World) {
+        for id in self.sparkles.drain().map(|(_, id)| id) {
+            world.despawn(id);
+        }
+    }
+
+
     pub fn take_combat_sfx(&mut self) -> Vec<CombatSfx> {
         std::mem::take(&mut self.pending_sfx)
     }
@@ -300,6 +360,7 @@ impl CombatLayer {
         self.flash_t = 0.0;
         self.ring_on = None;
         self.death_posed.clear();
+        self.sparkles.clear();
     }
 
     pub fn despawn_meshes(&mut self, world: &mut World) {
@@ -309,6 +370,7 @@ impl CombatLayer {
         self.mesh_anchors.clear();
         self.despawn_ring(world);
         self.despawn_flash(world);
+        self.strip_all_sparkles(world);
         self.flinch = None;
         self.death_posed.clear();
     }
@@ -1605,6 +1667,20 @@ fn hit_flash_mesh() -> EngineResult<Mesh> {
     mesh.add_quad(a, b, c, d)?;
     mesh.add_quad(a, d, c, b)?;
     mesh.paint_all(FLASH);
+    Ok(mesh)
+}
+
+fn sparkle_mesh() -> EngineResult<Mesh> {
+    // Clone of the hit-flash unlit quad. Stays until taken or reset.
+    let mut mesh = Mesh::new();
+    let s = 1.85;
+    let a = mesh.add_point((-s, 0.0, -s))?;
+    let b = mesh.add_point((s, 0.0, -s))?;
+    let c = mesh.add_point((s, 0.0, s))?;
+    let d = mesh.add_point((-s, 0.0, s))?;
+    mesh.add_quad(a, b, c, d)?;
+    mesh.add_quad(a, d, c, b)?;
+    mesh.paint_all(SPARKLE);
     Ok(mesh)
 }
 

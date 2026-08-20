@@ -148,6 +148,8 @@ pub struct WalkInput {
     pub skip_travel: bool,
     /// Tab: cycle lock. Does not steal Escape or E.
     pub tab: bool,
+    /// I: toggle the bag. Does not steal G / Tab / Esc / E / Q.
+    pub bag: bool,
     /// Shift. Combat walk 4.5 / sprint 7. Not fly.
     pub sprint: bool,
     /// Combat actions resolved from the current binds this frame.
@@ -167,6 +169,7 @@ impl WalkInput {
         interact: false,
         skip_travel: false,
         tab: false,
+        bag: false,
         sprint: false,
         actions: PressedActions::NONE,
     };
@@ -242,6 +245,7 @@ impl WalkInput {
             interact,
             skip_travel: keys.pressed(Key::Space),
             tab: keys.pressed(Key::Tab),
+            bag: keys.pressed(Key::I),
             sprint,
             actions: crate::controls::resolve_pressed(binds, keys),
         }
@@ -336,6 +340,11 @@ pub struct WorldSession {
     /// Soft lock + auto-attack. Empty hostiles until a fill/fixture registers them.
     combat: crate::combat::WorldCombat,
     combat_layer: super::combat_layer::CombatLayer,
+    inventory: crate::inventory::Inventory,
+    ground_loot: Vec<crate::loot::GroundPile>,
+    bag_open: bool,
+    loot_open: bool,
+    loot_target: Option<i32>,
     last_shrine: Option<GlobalPlace>,
     key_binds: KeyBinds,
     /// Overland SettlementPin roster mobs are seated once after the default L1 wolves.
@@ -373,6 +382,11 @@ impl WorldSession {
             overworld: None,
             combat: crate::combat::WorldCombat::specialist(1, crate::combat::Discipline::Martial),
             combat_layer: super::combat_layer::CombatLayer::install(),
+            inventory: crate::inventory::Inventory::create_kit(),
+            ground_loot: Vec::new(),
+            bag_open: false,
+            loot_open: false,
+            loot_target: None,
             last_shrine: None,
             key_binds: KeyBinds::default(),
             roster_pins_seated: false,
@@ -418,6 +432,189 @@ impl WorldSession {
             return None;
         }
         Some((h.name.as_str(), h.hp))
+    }
+
+    pub fn inventory(&self) -> &crate::inventory::Inventory {
+        &self.inventory
+    }
+
+    pub fn inventory_mut(&mut self) -> &mut crate::inventory::Inventory {
+        &mut self.inventory
+    }
+
+    pub fn bag_open(&self) -> bool {
+        self.bag_open
+    }
+
+    pub fn set_bag_open(&mut self, open: bool) {
+        self.bag_open = open;
+    }
+
+    pub fn loot_open(&self) -> bool {
+        self.loot_open
+    }
+
+    pub fn loot_target(&self) -> Option<i32> {
+        self.loot_target.filter(|_| self.loot_open)
+    }
+
+    pub fn ground_pile(&self) -> Option<&crate::loot::GroundPile> {
+        let idx = self.loot_target?;
+        self.ground_loot.iter().find(|p| p.hostile_idx == idx)
+    }
+
+    pub fn sparkle_visible(&self, world: &World) -> bool {
+        self.combat_layer.sparkle_visible(world)
+    }
+
+    pub fn close_loot(&mut self) {
+        self.loot_open = false;
+        self.loot_target = None;
+    }
+
+    pub fn take_loot_item(&mut self, world: &mut World, item_i: usize) {
+        let Some(idx) = self.loot_target else {
+            return;
+        };
+        let Some(pos) = self.ground_loot.iter().position(|p| p.hostile_idx == idx) else {
+            return;
+        };
+        let mut pile = self.ground_loot[pos].clone();
+        crate::loot::take_one(&mut self.inventory, &mut pile, item_i);
+        self.finish_loot_take(world, pos, pile);
+    }
+
+    pub fn take_all_loot(&mut self, world: &mut World) {
+        let Some(idx) = self.loot_target else {
+            return;
+        };
+        let Some(pos) = self.ground_loot.iter().position(|p| p.hostile_idx == idx) else {
+            return;
+        };
+        let mut pile = self.ground_loot[pos].clone();
+        crate::loot::take_all(&mut self.inventory, &mut pile);
+        self.finish_loot_take(world, pos, pile);
+    }
+
+    fn finish_loot_take(
+        &mut self,
+        world: &mut World,
+        pos: usize,
+        pile: crate::loot::GroundPile,
+    ) {
+        let idx = pile.hostile_idx;
+        if pile.empty() {
+            self.ground_loot.remove(pos);
+            self.combat_layer.strip_sparkle(world, idx);
+            self.close_loot();
+        } else {
+            self.ground_loot[pos] = pile;
+        }
+    }
+
+    /// Playtester: force a visible family so sparkle is not coin-only.
+    pub fn open_first_loot(&mut self) -> bool {
+        let Some(idx) = self.ground_loot.first().map(|p| p.hostile_idx) else {
+            return false;
+        };
+        self.loot_open = true;
+        self.loot_target = Some(idx);
+        true
+    }
+
+    pub fn force_visible_loot(&mut self, idx: i32) {
+        if let Some(h) = self.combat.hostiles.iter().find(|h| h.idx == idx) {
+            let site = self.loot_site_for(h.x, h.z);
+            let pile = crate::loot::force_visible_pile(&h.mob_id, h.idx, site);
+            self.ground_loot.retain(|p| p.hostile_idx != idx);
+            self.ground_loot.push(pile);
+        }
+    }
+
+    /// Dead-cone on the same left click. Not Tab. Sparkle must still be up.
+    pub fn try_dead_loot(&mut self, player_x: f64, player_z: f64, facing_x: f64, facing_z: f64) -> bool {
+        let sparkle_ids: Vec<i32> = self
+            .ground_loot
+            .iter()
+            .filter(|p| !p.empty() && self.combat_layer.has_sparkle(p.hostile_idx))
+            .map(|p| p.hostile_idx)
+            .collect();
+        let pairs: Vec<(i32, f64, f64)> = self
+            .combat
+            .hostiles
+            .iter()
+            .filter(|h| !h.alive && sparkle_ids.contains(&h.idx))
+            .map(|h| (h.idx, h.x, h.z))
+            .collect();
+        let ids = crate::combat::tab_candidates(player_x, player_z, facing_x, facing_z, &pairs);
+        let Some(idx) = ids.first().copied() else {
+            return false;
+        };
+        self.loot_open = true;
+        self.loot_target = Some(idx);
+        true
+    }
+
+    fn loot_site_for(&self, x: f64, z: f64) -> Option<crate::loot::LootSite> {
+        let site = self.overland_sites.iter().min_by(|a, b| {
+            let da = (a.at.x - x).hypot(a.at.z - z);
+            let db = (b.at.x - x).hypot(b.at.z - z);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        let d = (site.at.x - x).hypot(site.at.z - z);
+        if d > 48.0 {
+            return None;
+        }
+        Some(match site.kind {
+            super::sites::SiteKind::TakenCairn => crate::loot::LootSite::Cairn,
+            super::sites::SiteKind::WoodsHut => crate::loot::LootSite::Hut,
+        })
+    }
+
+    fn sync_ground_loot(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let mut planned: Vec<(i32, f64, f64, f64, Option<crate::loot::GroundPile>)> = Vec::new();
+        for h in &self.combat.hostiles {
+            if h.alive {
+                continue;
+            }
+            let Some(entity) = h.entity else {
+                continue;
+            };
+            if !self.combat_layer.is_death_posed(entity) {
+                continue;
+            }
+            let y = self
+                .contact_height(GlobalXZ::at(h.x, h.z))
+                .map(|g| (g + FOOT_CLEARANCE_M) as f64)
+                .unwrap_or(0.0);
+            if self.ground_loot.iter().any(|p| p.hostile_idx == h.idx) {
+                if !self.combat_layer.has_sparkle(h.idx) {
+                    planned.push((h.idx, h.x, y, h.z, None));
+                }
+                continue;
+            }
+            let site = self.loot_site_for(h.x, h.z);
+            let pile = crate::loot::roll_pile(&h.mob_id, h.idx, site);
+            planned.push((h.idx, h.x, y, h.z, Some(pile)));
+        }
+        for (idx, x, y, z, pile) in planned {
+            self.combat_layer.spawn_sparkle(world, idx, x, y, z)?;
+            if let Some(pile) = pile {
+                self.ground_loot.push(pile);
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_ground_loot(&mut self, world: &mut World) {
+        self.combat_layer.strip_all_sparkles(world);
+        self.forget_ground_loot();
+    }
+
+    fn forget_ground_loot(&mut self) {
+        self.ground_loot.clear();
+        self.loot_open = false;
+        self.loot_target = None;
     }
 
     pub fn fixture_mesh_visible(&self, world: &World) -> bool {
@@ -536,6 +733,7 @@ impl WorldSession {
     /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
     pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -548,6 +746,7 @@ impl WorldSession {
     /// Reseats one published orc on the next world tick. Meshes despawn now.
     pub fn rearm_orc_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -560,6 +759,7 @@ impl WorldSession {
     /// Reseats one published yeti on the next world tick. Meshes despawn now.
     pub fn rearm_yeti_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -572,6 +772,7 @@ impl WorldSession {
     /// Reseats one published demon on the next world tick. Meshes despawn now.
     pub fn rearm_demon_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -584,6 +785,7 @@ impl WorldSession {
     /// Reseats one published blue_demon on the next world tick. Meshes despawn now.
     pub fn rearm_bluedemon_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -596,6 +798,7 @@ impl WorldSession {
     /// Reseats one published tribal_veteran on the next world tick. Meshes despawn now.
     pub fn rearm_tribal_veteran_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -607,6 +810,7 @@ impl WorldSession {
 
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -619,6 +823,7 @@ impl WorldSession {
 
     pub fn rearm_mage_fixture(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
@@ -652,6 +857,7 @@ impl WorldSession {
             self.combat.player.shaken = None;
         }
         self.last_shrine = stand.last_shrine.map(|s| s.to_place());
+        self.inventory = stand.inventory;
     }
 
     pub fn saved_full(&self, seed: i32, size: usize) -> Option<crate::save::SavedStand> {
@@ -666,6 +872,7 @@ impl WorldSession {
         stand.ranks = p.stats.ranks;
         stand.shaken_until = p.shaken.as_ref().map(|s| s.remaining_s).unwrap_or(0.0);
         stand.last_shrine = self.last_shrine().map(crate::save::SavedShrine::from_place);
+        stand.inventory = self.inventory;
         Some(stand)
     }
 
@@ -901,7 +1108,16 @@ impl WorldSession {
         // Whatever anyone asked for, the map and the loading screen need a
         // cursor the player can use; in the world they have to ask for it.
         if self.state == SessionState::World {
-            if input.capture_look {
+            if input.bag {
+                self.bag_open = !self.bag_open;
+                if self.bag_open {
+                    world.set_pointer_lock(false);
+                }
+            }
+            let ui_open = self.bag_open || self.loot_open;
+            if ui_open {
+                world.set_pointer_lock(false);
+            } else if input.capture_look {
                 world.set_pointer_lock(true);
             }
         } else {
@@ -1046,6 +1262,7 @@ impl WorldSession {
         // Bodies died with the stream. Keep planned sites + bandit XZ.
         self.site_prop_ids.clear();
         self.combat_layer.forget_meshes();
+        self.forget_ground_loot();
         let travel = self.travel.as_mut().expect("travel");
         travel.handed_off = true;
         travel.handoffs += 1;
@@ -1628,8 +1845,13 @@ impl WorldSession {
             let pz = player.position.z;
             if input.tab {
                 self.combat.press_tab(px, pz, facing.x as f64, facing.z as f64);
-            } else if input.capture_look && world.pointer_lock() {
-                self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
+            } else if input.capture_look && world.pointer_lock() && !self.bag_open && !self.loot_open {
+                // Dead-cone is not Tab. Same left click; sparkle still up.
+                if self.try_dead_loot(px, pz, facing.x as f64, facing.z as f64) {
+                    world.set_pointer_lock(false);
+                } else {
+                    self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
+                }
             }
         }
         for verb in input.actions.iter() {
@@ -1721,6 +1943,7 @@ impl WorldSession {
                     .unwrap_or(py)
             };
             self.combat_layer.present(world, &self.combat, ground_y, input.dt)?;
+            self.sync_ground_loot(world)?;
             if self.combat.dead
                 && self.combat.player.resources.hp <= 0.0
                 && self.combat.slain_hold_s <= 0.0

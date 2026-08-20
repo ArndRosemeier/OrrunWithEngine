@@ -342,6 +342,9 @@ enum Phase {
     CombatLive,
     CombatOrcLive,
     CombatDeathLive,
+    LootSparkleLive,
+    LootModalLive,
+    BagLive,
     CombatYetiLive,
     CombatDemonLive,
     CombatBlueDemonLive,
@@ -464,6 +467,9 @@ impl Driver {
             Phase::CombatLive
                 | Phase::CombatOrcLive
                 | Phase::CombatDeathLive
+                | Phase::LootSparkleLive
+                | Phase::LootModalLive
+                | Phase::BagLive
                 | Phase::CombatYetiLive
                 | Phase::CombatDemonLive
                 | Phase::CombatBlueDemonLive
@@ -476,6 +482,9 @@ impl Driver {
                 | Some("hud")
                 | Some("roster")
                 | Some("death")
+                | Some("loot_sparkle")
+                | Some("loot_modal")
+                | Some("bag")
                 | Some("yeti")
                 | Some("demon")
                 | Some("bluedemon")
@@ -484,6 +493,15 @@ impl Driver {
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
         }
+        if matches!(
+            self.phase,
+            Phase::LootSparkleLive | Phase::LootModalLive | Phase::BagLive
+        ) || matches!(
+            self.awaiting_shot.as_deref(),
+            Some("loot_sparkle") | Some("loot_modal") | Some("bag")
+        ) {
+            hud::draw_loot_windows(&mut self.session, world, frame);
+        }
 
         if let Some(name) = self.awaiting_shot.clone() {
             let path = self.shots.join(format!("{name}.png"));
@@ -491,7 +509,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -577,7 +595,7 @@ impl Driver {
                     }
                 }
             }
-            Phase::CombatDeathLive => {
+            Phase::CombatDeathLive | Phase::LootSparkleLive | Phase::LootModalLive | Phase::BagLive => {
                 if !self.combat_death_killed && self.combat_tab_sent && self.session.lock_id().is_none() {
                     input.tab = true;
                 } else if self.combat_death_killed {
@@ -889,6 +907,9 @@ impl Driver {
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatDeathLive => self.tick_combat_death(world, frame),
+            Phase::LootSparkleLive => self.tick_loot_sparkle(world, frame),
+            Phase::LootModalLive => self.tick_loot_modal(world, frame),
+            Phase::BagLive => self.tick_bag(world, frame),
             Phase::CombatYetiLive => self.tick_combat_yeti(world, frame),
             Phase::CombatDemonLive => self.tick_combat_demon(world, frame),
             Phase::CombatBlueDemonLive => self.tick_combat_bluedemon(world, frame),
@@ -926,6 +947,9 @@ impl Driver {
             "combat" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
+            "loot_sparkle" => self.start_loot_sparkle(world, frame),
+            "loot_modal" => self.start_loot_modal(world, frame),
+            "bag" => self.start_bag(world, frame),
             "combat_yeti" => self.start_combat_yeti(world, frame),
             "combat_demon" => self.start_combat_demon(world, frame),
             "combat_bluedemon" => self.start_combat_bluedemon(world, frame),
@@ -2355,6 +2379,276 @@ impl Driver {
         self.ok_hook("combat_death");
         world.mark_ready();
         self.queue_shot(world, frame, "death");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn loot_corpse_ready(&self, world: &World) -> bool {
+        self.session.combat().hostiles.iter().any(|h| !h.alive)
+            && self.session.sparkle_visible(world)
+    }
+
+    fn start_loot_sparkle(&mut self, world: &mut World, frame: &Frame) {
+        if self.loot_corpse_ready(world) {
+            self.combat_death_killed = true;
+            self.combat_tab_sent = true;
+            self.combat_death_hold_at = None;
+            self.phase = Phase::LootSparkleLive;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        self.session.rearm_orc_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_death_killed = false;
+        self.combat_death_hold_at = None;
+        self.phase = Phase::LootSparkleLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn start_loot_modal(&mut self, world: &mut World, frame: &Frame) {
+        if self.loot_corpse_ready(world) {
+            self.combat_death_killed = true;
+            self.combat_tab_sent = true;
+            self.combat_death_hold_at = Some(frame.time);
+            self.combat_shot_sent = false;
+            self.phase = Phase::LootModalLive;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        self.start_loot_sparkle(world, frame);
+        self.combat_shot_sent = false;
+        self.phase = Phase::LootModalLive;
+    }
+
+    fn start_bag(&mut self, world: &mut World, frame: &Frame) {
+        if self.loot_corpse_ready(world) {
+            self.session.open_first_loot();
+            self.session.take_all_loot(world);
+        }
+        self.session.set_bag_open(true);
+        self.combat_shot_sent = false;
+        self.phase = Phase::BagLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_loot_kill_setup(&mut self, world: &mut World, frame: &Frame, hook: &str) -> bool {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: never reached World"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return false;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: required_ready stayed false"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: orc mesh not visible"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        self.aim_at_orc();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = orc_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 14.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current(&format!("{hook}: never looked at orc"));
+                    self.advance_after_fail(world, frame);
+                }
+                return false;
+            }
+        }
+        self.combat_tab_sent = true;
+        if !self.combat_death_killed {
+            if self.session.lock_id().is_none() {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current(&format!("{hook}: lock unset after Tab"));
+                    self.advance_after_fail(world, frame);
+                }
+                return false;
+            }
+            let Some((name, hp)) = self.session.lock_name_hp() else {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current(&format!("{hook}: lock name/hp unset after Tab"));
+                    self.advance_after_fail(world, frame);
+                }
+                return false;
+            };
+            let name = name.to_string();
+            if name != "orc" || hp <= 0.0 {
+                self.fail_current(&format!(
+                    "{hook}: want live orc lock, got {name} hp={hp}"
+                ));
+                self.advance_after_fail(world, frame);
+                return false;
+            }
+            let lock = self.session.lock_id();
+            {
+                let combat = self.session.combat_mut();
+                for h in &mut combat.hostiles {
+                    if Some(h.idx) == lock {
+                        h.hp = 0.0;
+                        h.alive = false;
+                    }
+                }
+                combat.lock = None;
+            }
+            if let Some(idx) = lock {
+                self.session.force_visible_loot(idx);
+            }
+            self.combat_death_killed = true;
+            return false;
+        }
+        let Some(stand) = orc_view_stand(&self.session) else {
+            self.fail_current(&format!("{hook}: no orc view stand"));
+            self.advance_after_fail(world, frame);
+            return false;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: never reached orc view stand"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        if !death_hold_ready(world, &self.session) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: Death clip never held last frame"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        if !self.session.sparkle_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("{hook}: sparkle never spawned on Death body"));
+                self.advance_after_fail(world, frame);
+            }
+            return false;
+        }
+        let hold_at = *self.combat_death_hold_at.get_or_insert(frame.time);
+        if frame.time - hold_at < 0.08 {
+            return false;
+        }
+        true
+    }
+
+    fn tick_loot_sparkle(&mut self, world: &mut World, frame: &Frame) {
+        if !self.tick_loot_kill_setup(world, frame, "loot_sparkle") {
+            return;
+        }
+        self.write_json(
+            "loot_sparkle",
+            json!({
+                "status": "ok",
+                "sparkle": true,
+                "shot": "loot_sparkle.png",
+            }),
+        );
+        self.ok_hook("loot_sparkle");
+        world.mark_ready();
+        self.queue_shot(world, frame, "loot_sparkle");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_loot_modal(&mut self, world: &mut World, frame: &Frame) {
+        if !self.tick_loot_kill_setup(world, frame, "loot_modal") {
+            return;
+        }
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let facing = engine::camera::Camera::facing_xz(yaw);
+        if let Some(pos) = self.session.player_position() {
+            let opened = self
+                .session
+                .try_dead_loot(pos.x, pos.z, facing.x as f64, facing.z as f64);
+            if !opened {
+                self.session.open_first_loot();
+            }
+        } else if !self.session.open_first_loot() {
+            self.fail_current("loot_modal: no pile to open");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.loot_open() {
+            self.fail_current("loot_modal: loot window did not open");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.combat_shot_sent {
+            self.combat_shot_sent = true;
+            self.combat_death_hold_at = Some(frame.time);
+            return;
+        }
+        let hold_at = self.combat_death_hold_at.unwrap_or(frame.time);
+        if frame.time - hold_at < 0.16 {
+            return;
+        }
+        self.write_json(
+            "loot_modal",
+            json!({
+                "status": "ok",
+                "loot_open": true,
+                "shot": "loot_modal.png",
+            }),
+        );
+        self.ok_hook("loot_modal");
+        world.mark_ready();
+        self.queue_shot(world, frame, "loot_modal");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_bag(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("bag: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.session.set_bag_open(true);
+        if !self.session.bag_open() {
+            self.fail_current("bag: I bag did not open");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.combat_shot_sent {
+            self.combat_shot_sent = true;
+            self.combat_death_hold_at = Some(frame.time);
+            return;
+        }
+        let hold_at = self.combat_death_hold_at.unwrap_or(frame.time);
+        if frame.time - hold_at < 0.16 {
+            return;
+        }
+        let inv = self.session.inventory();
+        if inv.bag.len() != 8 {
+            self.fail_current("bag: bag is not 8 slots");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.write_json(
+            "bag",
+            json!({
+                "status": "ok",
+                "coin": inv.coin,
+                "melee": inv.melee.map(|i| i.name()),
+                "shot": "bag.png",
+            }),
+        );
+        self.ok_hook("bag");
+        world.mark_ready();
+        self.queue_shot(world, frame, "bag");
         self.phase = Phase::NextHook;
         self.phase_t0 = frame.time;
     }
