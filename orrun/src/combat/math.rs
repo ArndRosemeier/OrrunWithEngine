@@ -147,6 +147,28 @@ pub const ORC_SPEED: f64 = 3.5;
 pub const ORC_REACH_M: f64 = 2.0;
 pub const ORC_XP: i32 = 80;
 
+// L6 first-slice stamp. Wolf ruler HP 70+18*(lvl-1)=160, atk 10+2*(lvl-1)=20, xp 35+12*(lvl-1)=95.
+pub const TRIBAL_LEVEL: i32 = 6;
+pub const TRIBAL_HP: i32 = 176;
+pub const TRIBAL_DMG: i32 = 20;
+pub const TRIBAL_SWING_S: f64 = 1.8;
+pub const TRIBAL_ARMOR: i32 = 8;
+pub const TRIBAL_SPEED: f64 = 5.0;
+pub const TRIBAL_REACH_M: f64 = 1.6;
+pub const TRIBAL_XP: i32 = 95;
+
+pub const SKULL_LEVEL: i32 = 6;
+pub const SKULL_HP: i32 = 112;
+pub const SKULL_DMG: i32 = 20;
+pub const SKULL_SWING_S: f64 = 2.0;
+pub const SKULL_ARMOR: i32 = 8;
+pub const SKULL_SPEED: f64 = 4.8;
+pub const SKULL_REACH_M: f64 = 2.0;
+pub const SKULL_XP: i32 = 95;
+pub const SKULL_BOLT_DMG: i32 = 14;
+pub const SKULL_TELE_S: f64 = 1.2;
+pub const SKULL_BOLT_RANGE_M: f64 = 24.0;
+
 pub const YETI_LEVEL: i32 = 6;
 pub const YETI_HP: i32 = 240;
 pub const YETI_DMG: i32 = 14;

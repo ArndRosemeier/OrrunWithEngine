@@ -214,6 +214,8 @@ pub struct WorldHostile {
     pub root_s: f64,
     /// Display name for the lock tell. Fixture wolves use "wolf-spider".
     pub name: String,
+    /// Sheet / catalog id (orc, tribal, orc_skull, crawler_spider_wolf).
+    pub mob_id: String,
     /// Visible body entity, if the fixture mesh has been spawned.
     pub entity: Option<engine::world::EntityId>,
     pub damage: i32,
@@ -469,6 +471,7 @@ mod tests {
             slow_s: 0.0,
             root_s: 0.0,
             name: "wolf-spider".into(),
+            mob_id: "crawler_spider_wolf".into(),
             entity: None,
             damage: dmg,
             swing_s: 2.0,

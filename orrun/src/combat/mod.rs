@@ -9,6 +9,7 @@ pub mod sheets;
 pub mod sim;
 pub mod types;
 pub mod verbs;
+pub mod catalog;
 
 pub use math::{
     mitigation, skill_rider, Attrs, Discipline, Ranks, BOW_DRAW_S, HEAR_AGGRO_M, LEASH_M,

@@ -125,6 +125,7 @@ fn main() {
         combat_fail_sent: false,
         combat_death_sent: false,
         incoming_hp: None,
+        combat_orc_punch_at: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -302,6 +303,7 @@ enum Phase {
     BindForceWalk,
     BindWrite,
     CombatLive,
+    CombatOrcLive,
     CombatBodyLive,
     ControlsLive,
     NextHook,
@@ -347,6 +349,7 @@ struct Driver {
     combat_fail_sent: bool,
     combat_death_sent: bool,
     incoming_hp: Option<f64>,
+    combat_orc_punch_at: Option<f32>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -392,10 +395,10 @@ impl Driver {
         self.pending_yaw_delta = 0.0;
         self.pending_pitch_delta = 0.0;
 
-        let paint_combat_hud = matches!(self.phase, Phase::CombatLive)
+        let paint_combat_hud = matches!(self.phase, Phase::CombatLive | Phase::CombatOrcLive)
             || matches!(
                 self.awaiting_shot.as_deref(),
-                Some("combat") | Some("hurt") | Some("slain") | Some("hud")
+                Some("combat") | Some("hurt") | Some("slain") | Some("hud") | Some("roster")
             );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -487,6 +490,12 @@ impl Driver {
                             input.pitch_delta_degrees = self.pending_pitch_delta;
                         }
                     }
+                }
+            }
+            Phase::CombatOrcLive => {
+                // Stay in the 1.5 m stand. Orc reach is 2.0 m. Tab after look.
+                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
                 }
             }
             Phase::CombatBodyLive => {
@@ -594,6 +603,7 @@ impl Driver {
             Phase::BindForceWalk => self.tick_force_walk(world, frame),
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
+            Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::ControlsLive => self.tick_controls(world, frame),
             Phase::NextHook => {
@@ -619,6 +629,7 @@ impl Driver {
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
             "combat" => self.start_combat(world, frame),
+            "combat_orc" => self.start_combat_orc(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
             "controls" => self.start_controls(world, frame),
             "faction_overlay" => {
@@ -1420,6 +1431,101 @@ impl Driver {
         view_angle_degrees(eye, yaw, pitch, target) < 18.0 && pitch > -55.0
     }
 
+    fn start_combat_orc(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_orc_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_shot_sent = false;
+        self.combat_orc_punch_at = None;
+        self.phase = Phase::CombatOrcLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_orc(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: orc mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_orc();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = orc_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 14.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_orc: never looked at orc");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        self.combat_tab_sent = true;
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: lock unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let name = name.to_string();
+        if name != "orc" {
+            self.fail_current(&format!("combat_orc: want orc lock, got {name}"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.incoming_hit() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_orc: incoming Punch never landed");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let punch_at = *self.combat_orc_punch_at.get_or_insert(frame.time);
+        if frame.time - punch_at < 0.3 {
+            return;
+        }
+        self.write_json(
+            "combat_orc",
+            json!({
+                "status": "ok",
+                "name": name,
+                "hp": hp,
+                "punch": true,
+                "shot": "roster.png",
+            }),
+        );
+        self.ok_hook("combat_orc");
+        world.mark_ready();
+        self.queue_shot(world, frame, "roster");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
         match orrun::combat::fixture_l1_martial_wolf() {
             Ok(fight) => {
@@ -1782,6 +1888,17 @@ impl Driver {
             self.combat_hurt_sent = true;
             return;
         }
+    }
+
+    fn aim_at_orc(&mut self) {
+        let Some((eye, target)) = orc_look(&self.session) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn aim_at_wolf_line(&mut self) {
@@ -2229,6 +2346,18 @@ fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
     let (fx, fz) = (fx / fl, fz / fl);
     // 1.2 m back: inside wolf reach (1.8 m). 2.0 m was just outside it.
     Some(GlobalXZ::at(a.x - fx * 1.2, a.z - fz * 1.2))
+}
+
+fn orc_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let ground = session
+        .contact_height(GlobalXZ::at(h.x, h.z))
+        .unwrap_or(pos.y as f32);
+    let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+    // Chest / punching arms on the ~3.2 m orc so Punch reads in roster.png.
+    let target = Vec3::new(h.x as f32, ground + 1.45, h.z as f32);
+    Some((eye, target))
 }
 
 fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {

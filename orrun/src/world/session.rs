@@ -334,6 +334,10 @@ pub struct WorldSession {
     combat_layer: super::combat_layer::CombatLayer,
     last_shrine: Option<GlobalPlace>,
     key_binds: KeyBinds,
+    /// Overland SettlementPin roster mobs are seated once after the default L1 wolves.
+    roster_pins_seated: bool,
+    /// Live dungeon pin whose orc_skull hostiles are already in the list.
+    dungeon_skulls_for: Option<i32>,
 }
 
 impl WorldSession {
@@ -364,6 +368,8 @@ impl WorldSession {
             combat_layer: super::combat_layer::CombatLayer::install(),
             last_shrine: None,
             key_binds: KeyBinds::default(),
+            roster_pins_seated: false,
+            dungeon_skulls_for: None,
         }
     }
 
@@ -511,7 +517,19 @@ impl WorldSession {
     /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
     pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        self.combat_layer.request_wolf_fixture();
+        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
+        self.dungeon_skulls_for = None;
+    }
+
+    /// Reseats one published orc on the next world tick. Meshes despawn now.
+    pub fn rearm_orc_fixture(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        self.combat_layer.request_orc_fixture();
+        self.combat_layer.skip_roster_pins();
+        self.combat_layer.rearm();
+        self.dungeon_skulls_for = None;
     }
 
     pub fn key_binds(&self) -> &KeyBinds {
@@ -1241,6 +1259,79 @@ impl WorldSession {
         Ok(true)
     }
 
+    fn hostile_feet_y(&self, world: &World, player: &Player, h: &crate::combat::WorldHostile) -> f64 {
+        if h.mob_id == "orc_skull" {
+            if let Some(y) = self
+                .dungeons
+                .as_ref()
+                .and_then(|d| d.indoor_floor_y(world, player.position))
+            {
+                return f64::from(y + FOOT_CLEARANCE_M);
+            }
+        }
+        self.contact_height(GlobalXZ::at(h.x, h.z))
+            .map(|g| (g + FOOT_CLEARANCE_M) as f64)
+            .unwrap_or(player.position.y)
+    }
+
+    fn respawn_hostile_meshes(
+        &mut self,
+        world: &mut World,
+        player: &Player,
+    ) -> Result<(), SessionError> {
+        let feet: Vec<f64> = self
+            .combat
+            .hostiles
+            .iter()
+            .map(|h| self.hostile_feet_y(world, player, h))
+            .collect();
+        self.combat_layer
+            .spawn_wolf_meshes(world, &mut self.combat, &feet, player.yaw_degrees)
+            .map_err(Into::into)
+    }
+
+    fn sync_dungeon_skulls(
+        &mut self,
+        world: &mut World,
+        player: &Player,
+    ) -> Result<(), SessionError> {
+        let live_id = self.dungeons.as_ref().and_then(DungeonLayer::live_pin_id);
+        let in_space = self
+            .dungeons
+            .as_ref()
+            .and_then(|d| d.indoor_floor_y(world, player.position))
+            .is_some();
+        if live_id.is_none() {
+            if self.dungeon_skulls_for.take().is_some() {
+                super::combat_layer::clear_dungeon_skulls(&mut self.combat);
+                if self.combat_layer.fixture_ready() {
+                    self.respawn_hostile_meshes(world, player)?;
+                }
+            }
+            return Ok(());
+        }
+        let id = live_id.expect("live dungeon");
+        if !in_space || self.dungeon_skulls_for == Some(id) {
+            return Ok(());
+        }
+        if self.dungeon_skulls_for.is_some() {
+            super::combat_layer::clear_dungeon_skulls(&mut self.combat);
+        }
+        let spots = self
+            .dungeons
+            .as_ref()
+            .map(DungeonLayer::live_skulls)
+            .unwrap_or_default();
+        if !spots.is_empty() {
+            super::combat_layer::seat_dungeon_skulls(&mut self.combat, &spots);
+            if self.combat_layer.fixture_ready() {
+                self.respawn_hostile_meshes(world, player)?;
+            }
+        }
+        self.dungeon_skulls_for = Some(id);
+        Ok(())
+    }
+
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
@@ -1252,13 +1343,40 @@ impl WorldSession {
         {
             let facing = Camera::facing_xz(player.yaw_degrees);
             if !self.combat_layer.fixture_ready() {
-                self.combat_layer.install_l1_wolf_line(
-                    &mut self.combat,
-                    player.position.x,
-                    player.position.z,
-                    facing.x as f64,
-                    facing.z as f64,
-                );
+                if self.combat_layer.wants_orc() {
+                    self.combat_layer.install_orc_fixture(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else {
+                    self.combat_layer.install_l1_wolf_line(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                    if !self.combat_layer.roster_pins_skipped() && !self.roster_pins_seated {
+                        let overland = self
+                            .dungeons
+                            .as_ref()
+                            .and_then(|d| d.indoor_floor_y(world, player.position))
+                            .is_none();
+                        if overland {
+                            let pins = self.surface.settlements();
+                            let hamlets = self
+                                .settlements
+                                .as_ref()
+                                .map(SettlementLayer::hamlets)
+                                .unwrap_or(&[]);
+                            super::combat_layer::seat_roster_pins(&mut self.combat, pins, hamlets);
+                        }
+                        self.roster_pins_seated = true;
+                    }
+                }
                 let feet: Vec<f64> = self
                     .combat
                     .hostiles
@@ -1547,6 +1665,7 @@ impl WorldSession {
                 ),
             );
         }
+        self.sync_dungeon_skulls(world, &player)?;
         let hidden_leaf = self.doors.hidden_leaf();
         if let Some(settlements) = self.settlements.as_mut() {
             settlements.hide_leaf(world, hidden_leaf)?;

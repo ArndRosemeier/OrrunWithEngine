@@ -282,6 +282,65 @@ pub fn orc_sheet() -> MobSheet {
     }
 }
 
+pub fn tribal_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "tribal".into(),
+        name: "tribal".into(),
+        level: TRIBAL_LEVEL,
+        hp: TRIBAL_HP,
+        armor: TRIBAL_ARMOR,
+        damage: TRIBAL_DMG,
+        swing_s: TRIBAL_SWING_S,
+        slam_damage: None,
+        slam_every_s: None,
+        telegraph_s: None,
+        reach_m: TRIBAL_REACH_M,
+        speed_mps: TRIBAL_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: TRIBAL_XP,
+        token_brood: 0,
+        specials: vec!["punch".into()],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
+pub fn orc_skull_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "orc_skull".into(),
+        name: "orc-skull".into(),
+        level: SKULL_LEVEL,
+        hp: SKULL_HP,
+        armor: SKULL_ARMOR,
+        damage: SKULL_DMG,
+        swing_s: SKULL_SWING_S,
+        slam_damage: Some(SKULL_BOLT_DMG),
+        slam_every_s: None,
+        telegraph_s: Some(SKULL_TELE_S),
+        reach_m: SKULL_REACH_M,
+        speed_mps: SKULL_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: SKULL_XP,
+        token_brood: 0,
+        specials: vec![
+            "punch".into(),
+            "weapon_bolt_24m_1.2s_telegraph_interruptible".into(),
+        ],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
 pub fn yeti_sheet() -> MobSheet {
     let (sight, hear, leash, social) = aggro_fields();
     MobSheet {
@@ -319,6 +378,8 @@ pub fn resolve_mob_id(name: &str) -> Result<String, String> {
         "line_mother" | "line-mother" | "Line-Mother" => Ok("line_mother".into()),
         "green_blob" | "GreenBlob" | "greenblob" => Ok("green_blob".into()),
         "orc" => Ok("orc".into()),
+        "tribal" => Ok("tribal".into()),
+        "orc_skull" | "orc-skull" | "skull" => Ok("orc_skull".into()),
         "yeti" => Ok("yeti".into()),
         other => Err(format!("unknown mob: {other}")),
     }
@@ -332,6 +393,8 @@ pub fn mob_sheet(id: &str, level: Option<i32>) -> Result<MobSheet, String> {
         "line_mother" => mother_sheet(),
         "green_blob" => blob_sheet(),
         "orc" => orc_sheet(),
+        "tribal" => tribal_sheet(),
+        "orc_skull" => orc_skull_sheet(),
         "yeti" => yeti_sheet(),
         other => return Err(format!("unknown mob: {other}")),
     })
@@ -654,6 +717,8 @@ pub fn mob_sheets_json() -> Value {
         "crawler_scorpion": scorpion_sheet(),
         "green_blob": blob_sheet(),
         "orc": orc_sheet(),
+        "tribal": tribal_sheet(),
+        "orc_skull": orc_skull_sheet(),
         "yeti": yeti_sheet(),
     })
 }

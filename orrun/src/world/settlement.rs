@@ -46,7 +46,7 @@ const MAX_TILES_LOADING: usize = 64;
 /// Keep house footprints off the atlas road bed (half of a primary ribbon plus a wall).
 const ROAD_CLEAR_M: f32 = 4.0;
 /// Extra metres past the outermost house where the dirt ribbon still pauses.
-const HAMLET_ROAD_PAD_M: f32 = 10.0;
+pub const HAMLET_ROAD_PAD_M: f32 = 10.0;
 /// Engine collider layer for house walls and castle curtains.
 const COLLIDER_LAYER: ColliderLayer = 2;
 
@@ -1067,6 +1067,22 @@ mod tests {
             tier,
             population: 12,
         }
+    }
+
+    #[test]
+    fn covers_rejects_a_point_inside_the_hamlet_disk() {
+        let hamlet = HamletStand {
+            at: GlobalXZ::at(0.0, 0.0),
+            radius: 20.0,
+            houses: vec![],
+        };
+        let inside = GlobalXZ::at(0.0, 5.0);
+        assert!(
+            hamlet.covers(inside, HAMLET_ROAD_PAD_M),
+            "a point inside the packed disk plus road pad must be covered"
+        );
+        let outside = GlobalXZ::at(0.0, 80.0);
+        assert!(!hamlet.covers(outside, HAMLET_ROAD_PAD_M));
     }
 
     #[test]

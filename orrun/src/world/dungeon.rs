@@ -80,6 +80,8 @@ struct OwnedLayout {
     used_seed: u64,
     meshes: HashMap<PieceId, Mesh>,
     mesh_err: Option<String>,
+    /// Local-space chamber centres (5 m XZ clusters of placed meshes). T2+ only.
+    skulls: Vec<Vec3>,
 }
 
 enum BuildMsg {
@@ -104,6 +106,7 @@ struct LiveDungeon {
     landing_y: f32,
     landing_yaw: f32,
     mouth_at: GlobalPosition,
+    skulls: Vec<GlobalXZ>,
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +220,18 @@ impl DungeonLayer {
 
     pub fn has_live(&self) -> bool {
         self.live.is_some()
+    }
+
+    pub fn live_pin_id(&self) -> Option<i32> {
+        self.live.as_ref().map(|live| live.pin_id)
+    }
+
+    /// World XZ of T2 chamber skulls on the live interior, if any.
+    pub fn live_skulls(&self) -> Vec<GlobalXZ> {
+        self.live
+            .as_ref()
+            .map(|live| live.skulls.clone())
+            .unwrap_or_default()
     }
 
     pub fn pin_seated(&self, id: i32) -> bool {
@@ -578,6 +593,15 @@ impl DungeonLayer {
             .collision_mut()
             .replace_layer(DUNGEON_LAYER, colliders)
             .expect("dungeon colliders");
+        let skulls = layout
+            .skulls
+            .iter()
+            .copied()
+            .map(|local| {
+                let at = placement.at(local);
+                GlobalXZ::at(at.x, at.z)
+            })
+            .collect();
         self.live = Some(LiveDungeon {
             pin_id: pin.id,
             space,
@@ -588,6 +612,7 @@ impl DungeonLayer {
             landing_y,
             landing_yaw,
             mouth_at: placement.mouth_world,
+            skulls,
         });
         let _ = layout.used_seed;
         Ok(())
@@ -760,6 +785,21 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unknown panic".into())
 }
 
+fn chamber_skulls(positions: impl IntoIterator<Item = Vec3>) -> Vec<Vec3> {
+    const CELL: f32 = 5.0;
+    let mut buckets: HashMap<(i32, i32), (Vec3, u32)> = HashMap::new();
+    for p in positions {
+        let key = ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32);
+        let entry = buckets.entry(key).or_insert((Vec3::ZERO, 0));
+        entry.0 += p;
+        entry.1 += 1;
+    }
+    buckets
+        .into_values()
+        .map(|(sum, n)| sum / n as f32)
+        .collect()
+}
+
 fn generate_layout(pin: DungeonPin) -> OwnedLayout {
     let catalog = load_catalog();
     let (shell, density, attempts) = spec_for(pin.tier);
@@ -780,11 +820,17 @@ fn generate_layout(pin: DungeonPin) -> OwnedLayout {
         let placed = assembly
             .places()
             .unwrap_or_else(|err| panic!("dungeon {} places: {err}", pin.id));
+        let skulls = if pin.tier >= 2 {
+            chamber_skulls(placed.iter().map(|item| item.place.position))
+        } else {
+            Vec::new()
+        };
         return OwnedLayout {
             placed,
             used_seed: next.seed,
             meshes: HashMap::new(),
             mesh_err: None,
+            skulls,
         };
     }
     panic!(
@@ -886,6 +932,35 @@ mod tests {
     use super::*;
     use crate::atlas::ContinentAtlas;
     use crate::world::surface::ContinentalSurface;
+
+    #[test]
+    fn five_metre_cells_yield_one_skull_per_cluster() {
+        let skulls = chamber_skulls([
+            Vec3::new(0.1, 1.0, 0.2),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(20.0, 0.0, 20.0),
+        ]);
+        assert_eq!(skulls.len(), 2);
+    }
+
+    #[test]
+    fn tier2_layout_seeds_one_skull_per_chamber_cluster() {
+        let pin = DungeonPin {
+            id: 7,
+            at: GlobalXZ::at(0.0, 0.0),
+            tier: 2,
+            seed: 11,
+        };
+        let layout = generate_layout(pin);
+        if layout.placed.is_empty() {
+            return;
+        }
+        assert!(
+            !layout.skulls.is_empty(),
+            "tier-2 layout with {} placed meshes must seed at least one skull",
+            layout.placed.len()
+        );
+    }
 
     #[test]
     fn compact_generate_is_deterministic() {

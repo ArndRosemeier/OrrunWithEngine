@@ -7,18 +7,21 @@
 //! Visible fixture bodies use catalog id `wolf` (`assets/fauna/wolf/wolf.gltf`).
 //! There is no spider in the fauna catalog; do not route these through FaunaLayer.
 
+use crate::combat::catalog::mesh_spec;
 use crate::combat::math::{TICK, WALK_MPS};
-use crate::combat::sheets::wolf_sheet;
+use crate::combat::sheets::{orc_sheet, orc_skull_sheet, tribal_sheet, wolf_sheet, MobSheet};
 use crate::combat::types::{WorldCombat, WorldHostile};
+use crate::world::settlement::{HamletStand, HAMLET_ROAD_PAD_M};
+use crate::world::surface::SettlementPin;
 use crate::combat::Discipline;
-use crate::world::fauna::FaunaCatalog;
 use engine::anim::AnimatedModel;
 use engine::color::Color;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
 use engine::place::{GlobalPlace, Place};
-use engine::space::GlobalPosition;
+use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,6 +38,8 @@ const GOLD: Color = Color {
     b: 0.12,
     a: 1.0,
 };
+/// Overland roster mob sits this far +Z from the atlas settlement pin.
+const PIN_SPAWN_OFFSET_M: f64 = 18.0;
 const FLASH_S: f32 = 6.0;
 const FLASH: Color = Color {
     r: 1.0,
@@ -49,6 +54,12 @@ pub enum CombatSfx {
     Swing,
     Hit,
     Hurt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureKind {
+    WolfLine,
+    Orc,
 }
 
 struct MeshAnchor {
@@ -68,10 +79,14 @@ struct Flinch {
 pub struct CombatLayer {
     accum_s: f64,
     fixture: bool,
+    skip_roster_pins: bool,
     first_auto: Option<i32>,
     mesh_ids: Vec<EntityId>,
     mesh_anchors: Vec<MeshAnchor>,
     wolf_model: Option<Arc<AnimatedModel>>,
+    models: HashMap<String, Arc<AnimatedModel>>,
+    fixture_kind: FixtureKind,
+    pending_melee: Option<(EntityId, &'static str)>,
     lock_ring: Option<EntityId>,
     ring_on: Option<i32>,
     attack_pip_s: f64,
@@ -91,10 +106,14 @@ impl CombatLayer {
         Self {
             accum_s: 0.0,
             fixture: false,
+            skip_roster_pins: false,
             first_auto: None,
             mesh_ids: Vec::new(),
             mesh_anchors: Vec::new(),
             wolf_model: None,
+            models: HashMap::new(),
+            fixture_kind: FixtureKind::WolfLine,
+            pending_melee: None,
             lock_ring: None,
             ring_on: None,
             attack_pip_s: 0.0,
@@ -112,6 +131,27 @@ impl CombatLayer {
 
     pub fn fixture_ready(&self) -> bool {
         self.fixture
+    }
+
+    pub fn request_orc_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::Orc;
+    }
+
+    pub fn request_wolf_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::WolfLine;
+    }
+
+    /// Playtester HOLD rearms must stay three-wolves / one-orc.
+    pub fn skip_roster_pins(&mut self) {
+        self.skip_roster_pins = true;
+    }
+
+    pub fn roster_pins_skipped(&self) -> bool {
+        self.skip_roster_pins
+    }
+
+    pub fn wants_orc(&self) -> bool {
+        self.fixture_kind == FixtureKind::Orc
     }
 
     pub fn first_auto(&self) -> Option<i32> {
@@ -173,6 +213,7 @@ impl CombatLayer {
         self.flinch = None;
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.pending_melee = None;
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
@@ -202,20 +243,32 @@ impl CombatLayer {
         self.flash_t = 0.0;
     }
 
-    fn wolf_model(&mut self) -> EngineResult<Arc<AnimatedModel>> {
-        if let Some(model) = &self.wolf_model {
+    fn model_for(&mut self, mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
+        let spec = mesh_spec(mob_id).ok_or_else(|| {
+            EngineError::Model(format!("no combat mesh for '{mob_id}'"))
+        })?;
+        if let Some(model) = self.models.get(spec.id) {
             return Ok(model.clone());
         }
-        let model = load_wolf_model()?;
-        self.wolf_model = Some(model.clone());
+        let model = load_combat_model(mob_id)?;
+        if spec.id == "crawler_spider_wolf" {
+            self.wolf_model = Some(model.clone());
+        }
+        self.models.insert(spec.id.to_string(), model.clone());
         Ok(model)
+    }
+
+    #[allow(dead_code)]
+    fn wolf_model(&mut self) -> EngineResult<Arc<AnimatedModel>> {
+        self.model_for("crawler_spider_wolf")
     }
 
     /// Visible fixture meshes on the live hostiles. Faces the player.
     ///
-    /// Mesh is catalog id `wolf` (`assets/fauna/wolf/wolf.gltf`). There is no
-    /// spider in the fauna catalog. Spawned like other glTF, not through FaunaLayer.
-    pub fn spawn_wolf_meshes(
+    /// Each hostile uses `catalog::mesh_spec(mob_id)`. Wolf stays
+    /// `fauna/wolf/wolf.gltf` with MESH_BEHIND_M 2.55. Orc/tribal/skull
+    /// sit on the combat XZ. Not FaunaLayer.
+    pub fn spawn_hostile_meshes(
         &mut self,
         world: &mut World,
         combat: &mut WorldCombat,
@@ -226,7 +279,6 @@ impl CombatLayer {
         for h in &mut combat.hostiles {
             h.entity = None;
         }
-        let model = self.wolf_model()?;
         let yaw = player_yaw_deg + 180.0;
         // wolf.gltf is ~5.5 m long. Origin at the combat point puts the
         // camera inside the snout. Keep hit XZ; sit the mesh behind it.
@@ -235,22 +287,44 @@ impl CombatLayer {
         let az = away.cos() as f64;
         const MESH_BEHIND_M: f64 = 2.55;
         for (i, h) in combat.hostiles.iter_mut().enumerate() {
+            let spec = mesh_spec(&h.mob_id).ok_or_else(|| {
+                EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
+            })?;
+            let model = self.model_for(&h.mob_id)?;
             let y = feet_y.get(i).copied().unwrap_or(0.0);
-            let pos = GlobalPosition::at(h.x + ax * MESH_BEHIND_M, y, h.z + az * MESH_BEHIND_M);
+            let behind = if is_wolf_mesh(&h.mob_id) {
+                MESH_BEHIND_M
+            } else {
+                0.0
+            };
+            let pos = GlobalPosition::at(h.x + ax * behind, y, h.z + az * behind);
             let render = world.to_render(pos)?;
             let place = Place::at(render.x, render.y, render.z)?
                 .yaw_deg(yaw)?
                 .scale(1.0)?;
             let id = world.spawn_animated_shared(model.clone(), place)?;
-            if model.find_clip("Idle").is_some() {
-                world.play_animation(id, "Idle")?;
-                world.set_animation_speed(id, 0.65)?;
+            if model.find_clip(spec.anim_idle).is_some() {
+                world.play_animation(id, spec.anim_idle)?;
+                if is_wolf_mesh(&h.mob_id) {
+                    world.set_animation_speed(id, 0.65)?;
+                }
             }
             h.entity = Some(id);
             self.mesh_ids.push(id);
             self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
         }
         Ok(())
+    }
+
+    /// Wrapper so session.rs keeps compiling if it still calls the wolf name.
+    pub fn spawn_wolf_meshes(
+        &mut self,
+        world: &mut World,
+        combat: &mut WorldCombat,
+        feet_y: &[f64],
+        player_yaw_deg: f32,
+    ) -> EngineResult<()> {
+        self.spawn_hostile_meshes(world, combat, feet_y, player_yaw_deg)
     }
 
     pub fn mesh_visible(&self, world: &World) -> bool {
@@ -306,6 +380,7 @@ impl CombatLayer {
                 slow_s: 0.0,
                 root_s: 0.0,
                 name: sheet.name.clone(),
+                mob_id: sheet.id.clone(),
                 entity: None,
                 damage: sheet.damage,
                 swing_s: sheet.swing_s,
@@ -340,6 +415,78 @@ impl CombatLayer {
         self.flash = None;
         self.flash_t = 0.0;
         self.ring_on = None;
+    }
+
+    /// One published orc 1.5 m in front of the player. First Punch after swing_s.
+    pub fn install_orc_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let sheet = orc_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.hostiles.push(WorldHostile {
+            idx: 0,
+            x: player_x + fx * 1.5,
+            z: player_z + fz * 1.5,
+            hp: f64::from(sheet.hp),
+            max_hp: f64::from(sheet.hp),
+            armor: sheet.armor,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: sheet.name.clone(),
+            mob_id: "orc".into(),
+            entity: None,
+            damage: sheet.damage,
+            swing_s: sheet.swing_s,
+            swing_cd: sheet.swing_s,
+            reach_m: sheet.reach_m,
+        });
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::Orc;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
     }
 
     /// Soft lock + auto. Does not touch camera, Esc, or E.
@@ -437,6 +584,13 @@ impl CombatLayer {
                 if hit.killed {
                     combat.log.push("You are slain");
                 }
+                if let Some(h) = combat
+                    .hostiles
+                    .iter()
+                    .find(|h| h.name == hit.by || h.mob_id == hit.by)
+                {
+                    queue_connecting_melee(&mut self.pending_melee, &self.models, h);
+                }
             }
         }
         just
@@ -463,6 +617,9 @@ impl CombatLayer {
         mut ground_y: impl FnMut(f64, f64) -> f64,
         dt: f32,
     ) -> EngineResult<()> {
+        if let Some((id, clip)) = self.pending_melee.take() {
+            let _ = world.play_animation(id, clip);
+        }
         self.sync_lock_ring(world, combat, &mut ground_y)?;
         if self.pending_flinch {
             self.pending_flinch = false;
@@ -782,56 +939,76 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out
 }
 
-fn fauna_dir() -> EngineResult<PathBuf> {
+
+fn is_wolf_mesh(mob_id: &str) -> bool {
+    matches!(mob_id, "crawler_spider_wolf" | "wolf" | "wolf-spider")
+}
+
+fn queue_connecting_melee(
+    pending: &mut Option<(EntityId, &'static str)>,
+    models: &HashMap<String, Arc<AnimatedModel>>,
+    h: &WorldHostile,
+) {
+    let Some(id) = h.entity else {
+        return;
+    };
+    let Some(spec) = mesh_spec(&h.mob_id) else {
+        return;
+    };
+    if spec.anim_melee == spec.anim_idle {
+        return;
+    }
+    let has_clip = models
+        .get(spec.id)
+        .map(|m| m.find_clip(spec.anim_melee).is_some())
+        .unwrap_or(true);
+    if has_clip {
+        *pending = Some((id, spec.anim_melee));
+    }
+}
+
+fn assets_dir() -> EngineResult<PathBuf> {
     let mut tried = Vec::new();
     if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
-        tried.push(PathBuf::from(dir).join("fauna"));
+        tried.push(PathBuf::from(dir));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            tried.push(dir.join("assets").join("fauna"));
+            tried.push(dir.join("assets"));
         }
     }
-    tried.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join("fauna"),
-    );
+    tried.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"));
     for root in &tried {
         if root.is_dir() {
             return Ok(root.clone());
         }
     }
     Err(EngineError::Model(format!(
-        "no fauna assets under {}",
+        "no assets under {}",
         tried.first().map(|p| p.display().to_string()).unwrap_or_default()
     )))
 }
 
-/// Catalog id `wolf` / `wolf/wolf.gltf` via AnimatedModel, same as FaunaLayer.
-fn load_wolf_model() -> EngineResult<Arc<AnimatedModel>> {
-    let catalog = FaunaCatalog::load().map_err(|e| EngineError::Model(e.to_string()))?;
-    let spec = catalog
-        .specs()
-        .iter()
-        .find(|s| s.id == "wolf")
-        .ok_or_else(|| EngineError::Model("fauna catalog missing id 'wolf'".into()))?;
-    if spec.source != "wolf/wolf.gltf" {
-        return Err(EngineError::Model(format!(
-            "wolf catalog source must be wolf/wolf.gltf, got {}",
-            spec.source
-        )));
-    }
-    let root = fauna_dir()?;
-    let path = root.join(&spec.source);
+fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
+    let spec = mesh_spec(mob_id).ok_or_else(|| {
+        EngineError::Model(format!("no combat mesh for '{mob_id}'"))
+    })?;
+    let assets = assets_dir()?;
+    let path = assets.join(spec.source);
     if !path.is_file() {
         return Err(EngineError::Model(format!(
-            "wolf mesh missing at {}",
+            "{} mesh missing at {}",
+            spec.id,
             path.display()
         )));
     }
+    let root = if spec.source.starts_with("fauna/") {
+        assets.join("fauna")
+    } else {
+        path.parent().unwrap_or(&assets).to_path_buf()
+    };
     let model = AnimatedModel::load_with(&path, &root, &engine::EngineLimits::default())?;
-    if model.find_clip(&spec.anim_idle).is_none() {
+    if is_wolf_mesh(mob_id) && model.find_clip(spec.anim_idle).is_none() {
         return Err(EngineError::Model(format!(
             "wolf clip '{}' is not in {}",
             spec.anim_idle,
@@ -840,6 +1017,86 @@ fn load_wolf_model() -> EngineResult<Arc<AnimatedModel>> {
     }
     Ok(Arc::new(model))
 }
+
+
+/// +Z offset from the atlas pin. Rejected when a seated hamlet covers the point.
+pub fn pin_spawn_xz(pin: &SettlementPin) -> GlobalXZ {
+    GlobalXZ::at(pin.at.x, pin.at.z + PIN_SPAWN_OFFSET_M)
+}
+
+pub fn pin_spawn_accepted(p: GlobalXZ, hamlets: &[HamletStand]) -> bool {
+    !hamlets.iter().any(|h| h.covers(p, HAMLET_ROAD_PAD_M))
+}
+
+fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) -> WorldHostile {
+    WorldHostile {
+        idx,
+        x,
+        z,
+        hp: f64::from(sheet.hp),
+        max_hp: f64::from(sheet.hp),
+        armor: sheet.armor,
+        alive: true,
+        stun_s: 0.0,
+        slow_s: 0.0,
+        root_s: 0.0,
+        name: sheet.name.clone(),
+        mob_id: mob_id.into(),
+        entity: None,
+        damage: sheet.damage,
+        swing_s: sheet.swing_s,
+        swing_cd: sheet.swing_s,
+        reach_m: sheet.reach_m,
+    }
+}
+
+pub fn seat_roster_pins(
+    combat: &mut WorldCombat,
+    pins: &[SettlementPin],
+    hamlets: &[HamletStand],
+) {
+    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    for pin in pins {
+        let p = pin_spawn_xz(pin);
+        if !pin_spawn_accepted(p, hamlets) {
+            continue;
+        }
+        let (sheet, mob_id) = if pin.tier <= 1 {
+            (tribal_sheet(), "tribal")
+        } else {
+            (orc_sheet(), "orc")
+        };
+        combat
+            .hostiles
+            .push(hostile_from_sheet(idx, p.x, p.z, &sheet, mob_id));
+        idx += 1;
+    }
+}
+
+pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
+    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    let sheet = orc_skull_sheet();
+    for p in spots {
+        combat
+            .hostiles
+            .push(hostile_from_sheet(idx, p.x, p.z, &sheet, "orc_skull"));
+        idx += 1;
+    }
+}
+
+pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
+    combat.hostiles.retain(|h| h.mob_id != "orc_skull");
+    if let Some(lock) = combat.lock {
+        if !combat.hostiles.iter().any(|h| h.idx == lock) {
+            combat.lock = None;
+        }
+    }
+}
+
+fn load_wolf_model() -> EngineResult<Arc<AnimatedModel>> {
+    load_combat_model("crawler_spider_wolf")
+}
+
 
 /// Headless live lock+auto of the L1 Martial fixture wolf. First mitigated hit is 11.
 pub fn first_fixture_auto_hit() -> i32 {
@@ -856,10 +1113,90 @@ pub fn first_fixture_auto_hit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::fauna::FaunaCatalog;
 
     #[test]
     fn first_mitigated_auto_on_l1_wolf_is_11() {
         assert_eq!(first_fixture_auto_hit(), 11);
+    }
+
+    #[test]
+    fn orc_sheet_fixture_is_one_orc_with_swing_cd_armed() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_orc_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        assert_eq!(combat.hostiles.len(), 1);
+        let h = &combat.hostiles[0];
+        assert_eq!(h.mob_id, "orc");
+        assert_eq!(h.name, "orc");
+        assert!((h.x - 1.5).abs() < 1e-9);
+        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
+        assert!((h.reach_m - 2.0).abs() < 1e-9);
+        assert_eq!(h.max_hp, 130.0);
+        assert!(layer.wants_orc());
+        assert!(layer.fixture_ready());
+    }
+
+    #[test]
+    fn pin_spawn_inside_hamlet_disk_is_rejected() {
+        let hamlet = HamletStand {
+            at: GlobalXZ::at(0.0, 0.0),
+            radius: 20.0,
+            houses: vec![],
+        };
+        let pin = SettlementPin {
+            id: 1,
+            at: GlobalXZ::at(0.0, 0.0),
+            tier: 0,
+            population: 3,
+        };
+        let p = pin_spawn_xz(&pin);
+        assert!(hamlet.covers(p, HAMLET_ROAD_PAD_M));
+        assert!(
+            !pin_spawn_accepted(p, &[hamlet.clone()]),
+            "a point inside the hamlet disk is not an accepted pin spawn"
+        );
+        let far = GlobalXZ::at(0.0, 80.0);
+        assert!(!hamlet.covers(far, HAMLET_ROAD_PAD_M));
+        assert!(pin_spawn_accepted(far, &[hamlet]));
+    }
+
+    #[test]
+    fn seat_roster_pins_tribal_hinterland_orc_town_covers_reject() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        combat.hostiles.clear();
+        let hamlet = HamletStand {
+            at: GlobalXZ::at(0.0, 0.0),
+            radius: 20.0,
+            houses: vec![],
+        };
+        let pins = [
+            SettlementPin {
+                id: 1,
+                at: GlobalXZ::at(0.0, 0.0),
+                tier: 0,
+                population: 3,
+            },
+            SettlementPin {
+                id: 2,
+                at: GlobalXZ::at(200.0, 200.0),
+                tier: 1,
+                population: 4,
+            },
+            SettlementPin {
+                id: 3,
+                at: GlobalXZ::at(400.0, 400.0),
+                tier: 2,
+                population: 12,
+            },
+        ];
+        seat_roster_pins(&mut combat, &pins, &[hamlet]);
+        assert_eq!(combat.hostiles.len(), 2);
+        assert_eq!(combat.hostiles[0].mob_id, "tribal");
+        assert_eq!(combat.hostiles[0].idx, 0);
+        assert_eq!(combat.hostiles[1].mob_id, "orc");
+        assert_eq!(combat.hostiles[1].idx, 1);
+        assert!((combat.hostiles[0].z - (200.0 + PIN_SPAWN_OFFSET_M)).abs() < 1e-9);
     }
 
     #[test]
