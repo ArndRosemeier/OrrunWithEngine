@@ -1688,7 +1688,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     } else {
                         0.0
                     };
-                    let hp_color = if session.hurt_flash() {
+                    let hp_color = if session.hp_ghost_frac().is_none() && session.hurt_flash() {
                         Color32::from_rgb(220, 24, 24)
                     } else if hp_frac <= 0.20 {
                         Color32::from_rgb(200, 32, 32)
@@ -1697,18 +1697,36 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     } else {
                         Color32::from_rgb(40, 180, 64)
                     };
-                    ui.add(
-                        egui::ProgressBar::new(hp_frac)
-                            .fill(hp_color)
-                            .desired_width(160.0),
+                    let bar_h = ui.spacing().interact_size.y;
+                    let (hp_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(160.0, bar_h), Sense::hover());
+                    ui.painter().rect_filled(
+                        hp_rect,
+                        2.0,
+                        Color32::from_rgb(40, 40, 40),
                     );
-                    if session.hurt_flash() {
-                        let (flash_rect, _) =
-                            ui.allocate_exact_size(egui::vec2(160.0, 6.0), Sense::hover());
+                    if let Some(ghost) = session.hp_ghost_frac() {
+                        if ghost > hp_frac {
+                            let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    hp_rect.min,
+                                    egui::vec2(ghost_w, hp_rect.height()),
+                                ),
+                                2.0,
+                                Color32::from_rgb(220, 24, 24),
+                            );
+                        }
+                    }
+                    if hp_frac > 0.0 {
+                        let fill_w = hp_rect.width() * hp_frac;
                         ui.painter().rect_filled(
-                            flash_rect,
-                            0.0,
-                            Color32::from_rgba_unmultiplied(220, 24, 24, 180),
+                            egui::Rect::from_min_size(
+                                hp_rect.min,
+                                egui::vec2(fill_w, hp_rect.height()),
+                            ),
+                            2.0,
+                            hp_color,
                         );
                     }
                     if let Some(slain) = session.slain_line() {

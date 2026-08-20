@@ -92,6 +92,8 @@ fn main() {
         "death.png",
         "cast_bar.json",
         "cast_bar.png",
+        "incoming.json",
+        "incoming.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -501,6 +503,7 @@ impl Driver {
                 | Some("tribal_veteran")
                 | Some("cd_sweep")
                 | Some("cast_bar")
+                | Some("incoming")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -521,7 +524,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -958,7 +961,7 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" | "cast_bar" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" | "cast_bar" | "incoming" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
             "loot_sparkle" => self.start_loot_sparkle(world, frame),
@@ -3511,6 +3514,25 @@ impl Driver {
                 }
                 return;
             }
+            if self.current_hook() == Some("incoming") {
+                self.write_json(
+                    "incoming",
+                    json!({
+                        "status": "ok",
+                        "shot": "incoming.png",
+                        "player_hp": self.session.player_hp(),
+                        "player_hp_max": self.session.player_hp_max(),
+                        "incoming_hit": true,
+                        "hp_ghost_frac": self.session.hp_ghost_frac(),
+                    }),
+                );
+                world.mark_ready();
+                self.queue_shot(world, frame, "incoming");
+                self.ok_hook("incoming");
+                self.phase = Phase::NextHook;
+                self.phase_t0 = frame.time;
+                return;
+            }
             if self.combat_cd_sweep_at.is_none() {
                 let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
                 let facing = Camera::facing_xz(yaw);
@@ -4880,7 +4902,7 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
     let mana_max = session.player_mana_max().max(1.0);
     let hp_frac = (hp / hp_max).clamp(0.0, 1.0) as f32;
     let mana_frac = (mana / mana_max).clamp(0.0, 1.0) as f32;
-    let hp_color = if session.hurt_flash() {
+    let hp_color = if session.hp_ghost_frac().is_none() && session.hurt_flash() {
         Color32::from_rgb(220, 24, 24)
     } else if hp_frac <= 0.20 {
         Color32::from_rgb(200, 32, 32)
@@ -4898,12 +4920,37 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("HP").size(18.0).color(Color32::WHITE));
-                    ui.add(
-                        egui::ProgressBar::new(hp_frac)
-                            .fill(hp_color)
-                            .desired_width(360.0)
-                            .desired_height(22.0),
+                    let (hp_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(360.0, 22.0), Sense::hover());
+                    ui.painter().rect_filled(
+                        hp_rect,
+                        2.0,
+                        Color32::from_rgb(40, 40, 40),
                     );
+                    if let Some(ghost) = session.hp_ghost_frac() {
+                        if ghost > hp_frac {
+                            let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    hp_rect.min,
+                                    egui::vec2(ghost_w, hp_rect.height()),
+                                ),
+                                2.0,
+                                Color32::from_rgb(220, 24, 24),
+                            );
+                        }
+                    }
+                    if hp_frac > 0.0 {
+                        let fill_w = hp_rect.width() * hp_frac;
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                hp_rect.min,
+                                egui::vec2(fill_w, hp_rect.height()),
+                            ),
+                            2.0,
+                            hp_color,
+                        );
+                    }
                     ui.label(egui::RichText::new("Mana").size(18.0).color(Color32::WHITE));
                     ui.add(
                         egui::ProgressBar::new(mana_frac)

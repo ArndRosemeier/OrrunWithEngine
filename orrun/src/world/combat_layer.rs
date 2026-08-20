@@ -32,6 +32,8 @@ use std::sync::Arc;
 
 /// Attack pip is a short tell, not the 1.8 s swing clock.
 const ATTACK_PIP_S: f64 = 0.15;
+/// Previous-HP leftover on the bar. Longer than hurt_flash (0.15 s) so a PNG can catch it.
+const HP_CHUNK_S: f64 = 0.80;
 const STRAFE_M: f64 = 1.8;
 const FLINCH_S: f32 = 4.0;
 const FLINCH_PEAK: f32 = 1.32;
@@ -121,6 +123,8 @@ pub struct CombatLayer {
     flash_t: f32,
     incoming_hit: bool,
     hurt_flash_s: f64,
+    hp_ghost_frac: f32,
+    hp_chunk_s: f64,
     death_posed: HashSet<EntityId>,
     sparkles: HashMap<i32, EntityId>,
 }
@@ -152,6 +156,8 @@ impl CombatLayer {
             flash_t: 0.0,
             incoming_hit: false,
             hurt_flash_s: 0.0,
+            hp_ghost_frac: 0.0,
+            hp_chunk_s: 0.0,
             death_posed: HashSet::new(),
             sparkles: HashMap::new(),
         }
@@ -271,6 +277,30 @@ impl CombatLayer {
         self.hurt_flash_s > 0.0
     }
 
+    pub fn hp_ghost_frac(&self) -> Option<f32> {
+        if self.hp_chunk_s > 0.0 {
+            Some(self.hp_ghost_frac)
+        } else {
+            None
+        }
+    }
+
+    fn latch_incoming_chunk(&mut self, prev_hp: f64, hp_max: f64) {
+        self.incoming_hit = true;
+        self.hurt_flash_s = 0.15;
+        let prev_frac = if hp_max > 0.0 {
+            (prev_hp / hp_max).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        if self.hp_chunk_s <= 0.0 {
+            self.hp_ghost_frac = prev_frac;
+        } else {
+            self.hp_ghost_frac = self.hp_ghost_frac.max(prev_frac);
+        }
+        self.hp_chunk_s = HP_CHUNK_S;
+    }
+
     pub fn hit_flash_latched(&self) -> bool {
         self.hit_flash
     }
@@ -366,6 +396,8 @@ impl CombatLayer {
         self.flinch = None;
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
         self.pending_melee = None;
         self.skull_tele.clear();
         self.mage_tele.clear();
@@ -655,6 +687,8 @@ impl CombatLayer {
         self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// One published yeti 1.5 m in front of the player. First Punch after swing_s.
@@ -729,6 +763,8 @@ impl CombatLayer {
         self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// One published demon 1.5 m in front of the player. First Punch after swing_s.
@@ -803,6 +839,8 @@ impl CombatLayer {
         self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// One published blue_demon 1.5 m in front of the player. First Punch after swing_s.
@@ -877,6 +915,8 @@ impl CombatLayer {
         self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
 
@@ -952,6 +992,8 @@ impl CombatLayer {
         self.skull_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// One Warrior + two Minions, wolf-line seating (1.5 m + strafe +/-1.8 m).
@@ -1031,6 +1073,8 @@ impl CombatLayer {
         self.mage_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// One Mage_Staff 1.5 m in front of the player.
@@ -1093,6 +1137,8 @@ impl CombatLayer {
         self.mage_tele.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
+        self.hp_ghost_frac = 0.0;
+        self.hp_chunk_s = 0.0;
     }
 
     /// Soft lock + auto. Does not touch camera, Esc, or E.
@@ -1124,6 +1170,9 @@ impl CombatLayer {
         }
         if self.hurt_flash_s > 0.0 {
             self.hurt_flash_s = (self.hurt_flash_s - dt).max(0.0);
+        }
+        if self.hp_chunk_s > 0.0 {
+            self.hp_chunk_s = (self.hp_chunk_s - dt).max(0.0);
         }
         let mut just = None;
         self.accum_s += dt;
@@ -1192,9 +1241,9 @@ impl CombatLayer {
                     combat.log.push(format!("You hit {name} for {dealt}"));
                 }
             }
+            let prev_hp = combat.player.resources.hp;
             if let Some(hit) = combat.tick_incoming(player_x, player_z, TICK) {
-                self.incoming_hit = true;
-                self.hurt_flash_s = 0.15;
+                self.latch_incoming_chunk(prev_hp, combat.player.resources.hp_max);
                 self.pending_sfx.push(CombatSfx::Hurt);
                 combat
                     .log
@@ -1263,13 +1312,14 @@ impl CombatLayer {
                 }
                 self.skull_tele.remove(&idx);
                 let dealt = mitigation(f64::from(SKULL_BOLT_DMG), grit);
+                let prev_hp = combat.player.resources.hp;
+                let hp_max = combat.player.resources.hp_max;
                 combat.player.resources.hp =
                     (combat.player.resources.hp - f64::from(dealt)).max(0.0);
                 let killed = combat.player.resources.hp <= 0.0;
                 let name = combat.hostiles[slot].name.clone();
                 combat.log.push(format!("{name} hits you for {dealt}"));
-                self.incoming_hit = true;
-                self.hurt_flash_s = 0.15;
+                self.latch_incoming_chunk(prev_hp, hp_max);
                 self.pending_sfx.push(CombatSfx::Hurt);
                 if killed {
                     combat.dead = true;
@@ -1338,13 +1388,14 @@ impl CombatLayer {
                 }
                 self.mage_tele.remove(&idx);
                 let dealt = mitigation(f64::from(MAGE_BOLT_DMG), grit);
+                let prev_hp = combat.player.resources.hp;
+                let hp_max = combat.player.resources.hp_max;
                 combat.player.resources.hp =
                     (combat.player.resources.hp - f64::from(dealt)).max(0.0);
                 let killed = combat.player.resources.hp <= 0.0;
                 let name = combat.hostiles[slot].name.clone();
                 combat.log.push(format!("{name} hits you for {dealt}"));
-                self.incoming_hit = true;
-                self.hurt_flash_s = 0.15;
+                self.latch_incoming_chunk(prev_hp, hp_max);
                 self.pending_sfx.push(CombatSfx::Hurt);
                 if killed {
                     combat.dead = true;

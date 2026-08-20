@@ -664,6 +664,10 @@ impl WorldSession {
         self.combat_layer.hurt_flash()
     }
 
+    pub fn hp_ghost_frac(&self) -> Option<f32> {
+        self.combat_layer.hp_ghost_frac()
+    }
+
     pub fn slain_line(&self) -> Option<String> {
         self.combat.slain_by.as_ref().map(|n| format!("slain by {n}"))
     }
