@@ -30,7 +30,7 @@ Later stamps (not this close): berry theft, ford, silk yard, cut landing, Ash Ho
 
 ## M5 Path to 20 - NEXT
 
-Yeti L6 Punch fixture SHIP `2ef0de5` (Playtester PASS + Reviewer). Slam tell HOLD (no clip). Remaining: Demon, BlueDemon, tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
+Yeti L6 Punch fixture SHIP `2ef0de5`. Demon L8 Punch+trident SHIP `6476cd8` (Playtester PASS + Reviewer). Slam/Shout HOLD (no clips). Remaining: BlueDemon, tribal veteran. No fake bows. Hinterland bandit already live on M4 sites.
 
 ## M6 Village life 2 — LATER
 
