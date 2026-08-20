@@ -182,6 +182,16 @@ YETI_SPEED = 3.0
 YETI_REACH_M = 2.2
 YETI_XP = 160
 
+# Demon — L8 melee, Punch only. Shout tell HOLD (no clip).
+DEMON_LEVEL = 8
+DEMON_HP = 220
+DEMON_ARMOR = 12
+DEMON_DMG = 16
+DEMON_SWING_S = 2.0
+DEMON_REACH_M = 2.2
+DEMON_SPEED = 3.2
+DEMON_XP = 180
+
 # XP to go from N → N+1 (N=1..9). Tuned so the locked dungeon path
 # D1→L4, D2→L8, T2/Mother→L10 lands in 90–150 minutes.
 XP_TO_NEXT = {
@@ -340,6 +350,27 @@ def orc_sheet() -> Dict[str, Any]:
     }
 
 
+def demon_sheet() -> Dict[str, Any]:
+    return {
+        "id": "demon",
+        "name": "demon",
+        "level": DEMON_LEVEL,
+        "hp": DEMON_HP,
+        "armor": DEMON_ARMOR,
+        "damage": DEMON_DMG,
+        "swing_s": DEMON_SWING_S,
+        "reach_m": DEMON_REACH_M,
+        "speed_mps": DEMON_SPEED,
+        "sight_m": SIGHT_AGGRO_M,
+        "hear_m": HEAR_AGGRO_M,
+        "leash_m": LEASH_M,
+        "social_m": SOCIAL_M,
+        "xp": DEMON_XP,
+        "token_brood": 0,
+        "specials": [],
+    }
+
+
 def yeti_sheet() -> Dict[str, Any]:
     return {
         "id": "yeti",
@@ -371,6 +402,7 @@ MOB_BUILDERS = {
     "green_blob": lambda lvl=None: blob_sheet(),
     "orc": lambda lvl=None: orc_sheet(),
     "yeti": lambda lvl=None: yeti_sheet(),
+    "demon": lambda lvl=None: demon_sheet(),
 }
 
 MOB_ALIASES = {
@@ -1588,6 +1620,7 @@ def run_all(seed: int = 1) -> Dict[str, Any]:
             "green_blob": blob_sheet(),
             "orc": orc_sheet(),
             "yeti": yeti_sheet(),
+            "demon": demon_sheet(),
         },
         "player_specialists": {
             f"L{lv}_{d}": player_stats(lv, d)

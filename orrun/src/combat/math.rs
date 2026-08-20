@@ -205,6 +205,15 @@ pub const YETI_SPEED: f64 = 3.0;
 pub const YETI_REACH_M: f64 = 2.2;
 pub const YETI_XP: i32 = 160;
 
+pub const DEMON_LEVEL: i32 = 8;
+pub const DEMON_HP: i32 = 220;
+pub const DEMON_ARMOR: i32 = 12;
+pub const DEMON_DMG: i32 = 16;
+pub const DEMON_SWING_S: f64 = 2.0;
+pub const DEMON_REACH_M: f64 = 2.2;
+pub const DEMON_SPEED: f64 = 3.2;
+pub const DEMON_XP: i32 = 180;
+
 /// Truncate toward zero (Python `int(x)` on the non-negative combat path).
 #[inline]
 pub fn trunc(x: f64) -> i32 {

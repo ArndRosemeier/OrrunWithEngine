@@ -82,6 +82,8 @@ fn main() {
         "overworld_hut.png",
         "yeti.json",
         "yeti.png",
+        "demon.json",
+        "demon.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -142,6 +144,8 @@ fn main() {
         incoming_hp: None,
         combat_orc_punch_at: None,
         combat_yeti_punch_at: None,
+        combat_demon_punch_at: None,
+        combat_demon_stand: None,
         combat_body_melee_at: None,
         combat_bones_melee_at: None,
         combat_mage_cast_at: None,
@@ -328,6 +332,7 @@ enum Phase {
     CombatLive,
     CombatOrcLive,
     CombatYetiLive,
+    CombatDemonLive,
     CombatBodyLive,
     CombatBonesLive,
     CombatMageLive,
@@ -383,6 +388,8 @@ struct Driver {
     incoming_hp: Option<f64>,
     combat_orc_punch_at: Option<f32>,
     combat_yeti_punch_at: Option<f32>,
+    combat_demon_punch_at: Option<f32>,
+    combat_demon_stand: Option<GlobalXZ>,
     combat_body_melee_at: Option<f32>,
     combat_bones_melee_at: Option<f32>,
     combat_mage_cast_at: Option<f32>,
@@ -437,7 +444,7 @@ impl Driver {
 
         let paint_combat_hud = matches!(
             self.phase,
-            Phase::CombatLive | Phase::CombatOrcLive | Phase::CombatYetiLive
+            Phase::CombatLive | Phase::CombatOrcLive | Phase::CombatYetiLive | Phase::CombatDemonLive
         ) || matches!(
             self.awaiting_shot.as_deref(),
             Some("combat")
@@ -446,6 +453,7 @@ impl Driver {
                 | Some("hud")
                 | Some("roster")
                 | Some("yeti")
+                | Some("demon")
         );
         if paint_combat_hud {
             draw_combat_hud(&self.session, frame);
@@ -457,7 +465,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -572,6 +580,28 @@ impl Driver {
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
                         orc_view_stand(&self.session),
+                    ) {
+                        if pos.horizontal().distance(stand) > 0.45 {
+                            input = walk_toward(pos.horizontal(), stand, dt);
+                            input.yaw_delta_degrees = self.pending_yaw_delta;
+                            input.pitch_delta_degrees = self.pending_pitch_delta;
+                        }
+                    }
+                }
+            }
+            Phase::CombatDemonLive => {
+                // Stay in the 1.5 m stand until Punch connects (reach 2.2).
+                // Then walk to a 3/4 human viewing stand so demon.png
+                // shows the Trident pole, not an end-on stick.
+                if self.combat_tab_sent && self.session.lock_id().is_none() {
+                    input.tab = true;
+                } else if self.session.incoming_hit() {
+                    if self.combat_demon_stand.is_none() {
+                        self.combat_demon_stand = demon_view_stand(&self.session);
+                    }
+                    if let (Some(pos), Some(stand)) = (
+                        self.session.player_position(),
+                        self.combat_demon_stand,
                     ) {
                         if pos.horizontal().distance(stand) > 0.45 {
                             input = walk_toward(pos.horizontal(), stand, dt);
@@ -779,6 +809,7 @@ impl Driver {
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatYetiLive => self.tick_combat_yeti(world, frame),
+            Phase::CombatDemonLive => self.tick_combat_demon(world, frame),
             Phase::CombatBodyLive => self.tick_combat_body(world, frame),
             Phase::CombatBonesLive => self.tick_combat_bones(world, frame),
             Phase::CombatMageLive => self.tick_combat_mage(world, frame),
@@ -812,6 +843,7 @@ impl Driver {
             "combat" => self.start_combat(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_yeti" => self.start_combat_yeti(world, frame),
+            "combat_demon" => self.start_combat_demon(world, frame),
             "combat_body" => self.start_combat_body(world, frame),
             "combat_bones" => self.start_combat_bones(world, frame),
             "combat_mage" => self.start_combat_mage(world, frame),
@@ -2213,6 +2245,120 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
+    fn start_combat_demon(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_demon_fixture(world);
+        self.combat_tab_sent = false;
+        self.combat_shot_sent = false;
+        self.combat_demon_punch_at = None;
+        self.combat_demon_stand = None;
+        self.phase = Phase::CombatDemonLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_combat_demon(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.fixture_mesh_visible(world) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: demon mesh not visible");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_demon();
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        if let Some((eye, target)) = demon_look(&self.session) {
+            if view_angle_degrees(eye, yaw, pitch, target) > 16.0 {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current("combat_demon: never looked at demon");
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
+        self.combat_tab_sent = true;
+        if self.session.lock_id().is_none() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: lock unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: lock name/hp unset after Tab");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let name = name.to_string();
+        if name != "demon" {
+            self.fail_current(&format!("combat_demon: want demon lock, got {name}"));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if !self.session.incoming_hit() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: incoming Punch never landed");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.combat_demon_stand.is_none() {
+            self.combat_demon_stand = demon_view_stand(&self.session);
+        }
+        let Some(stand) = self.combat_demon_stand else {
+            self.fail_current("combat_demon: no demon view stand");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        if pos.horizontal().distance(stand) >= 0.45 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("combat_demon: never reached demon view stand");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let punch_at = *self.combat_demon_punch_at.get_or_insert_with(|| {
+            self.session.replay_melee(world);
+            frame.time
+        });
+        if frame.time - punch_at < 0.35 {
+            return;
+        }
+        self.write_json(
+            "demon",
+            json!({
+                "status": "ok",
+                "name": name,
+                "hp": hp,
+                "punch": true,
+                "shot": "demon.png",
+            }),
+        );
+        self.ok_hook("combat_demon");
+        world.mark_ready();
+        self.queue_shot(world, frame, "demon");
+        self.phase = Phase::NextHook;
+        self.phase_t0 = frame.time;
+    }
+
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
         match orrun::combat::fixture_l1_martial_wolf() {
             Ok(fight) => {
@@ -2575,6 +2721,17 @@ impl Driver {
             self.combat_hurt_sent = true;
             return;
         }
+    }
+
+    fn aim_at_demon(&mut self) {
+        let Some((eye, target)) = demon_look(&self.session) else {
+            return;
+        };
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
     }
 
     fn aim_at_orc(&mut self) {
@@ -3579,6 +3736,55 @@ fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
     let (fx, fz) = (fx / fl, fz / fl);
     // 1.2 m back: inside wolf reach (1.8 m). 2.0 m was just outside it.
     Some(GlobalXZ::at(a.x - fx * 1.2, a.z - fz * 1.2))
+}
+
+fn demon_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
+    // Human viewing distance, strong 3/4 on the Trident side so the pole
+    // (local Z, ~2.3 m) reads as a line. Front-on is end-on; the first
+    // SIDE sign landed on the punch arm.
+    const STAND_M: f64 = 3.5;
+    const SIDE_M: f64 = 4.6;
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let dx = pos.x - h.x;
+    let dz = pos.z - h.z;
+    let len = (dx * dx + dz * dz).sqrt();
+    let (fx, fz) = if len > 1e-6 {
+        (dx / len, dz / len)
+    } else {
+        (-1.0, 0.0)
+    };
+    // Hostile faces the player (fx,fz). Right-handed Y-up: (-fz, fx)
+    // is the hostile's right / original punch side. Flip to the Trident.
+    Some(GlobalXZ::at(
+        h.x + fx * STAND_M - fz * SIDE_M,
+        h.z + fz * STAND_M + fx * SIDE_M,
+    ))
+}
+
+fn demon_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
+    const BEHIND_M: f64 = 1.6;
+    const CHEST_M: f32 = 1.25;
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let dx = pos.x - h.x;
+    let dz = pos.z - h.z;
+    let len = (dx * dx + dz * dz).sqrt();
+    let (fx, fz) = if len > 1e-6 {
+        (dx / len, dz / len)
+    } else {
+        (-1.0, 0.0)
+    };
+    let ground = session
+        .contact_height(GlobalXZ::at(h.x, h.z))
+        .unwrap_or(pos.y as f32);
+    let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+    let target = Vec3::new(
+        (h.x - fx * BEHIND_M) as f32,
+        ground + CHEST_M,
+        (h.z - fz * BEHIND_M) as f32,
+    );
+    Some((eye, target))
 }
 
 fn orc_view_stand(session: &WorldSession) -> Option<GlobalXZ> {

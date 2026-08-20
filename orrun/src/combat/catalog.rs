@@ -83,6 +83,14 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
             anim_weapon: None,
             weapon_node: None,
         },
+        "demon" => CombatMesh {
+            id: "demon",
+            source: "monsters/big/Demon.glb",
+            anim_idle: "Idle",
+            anim_melee: "Punch",
+            anim_weapon: Some("Weapon"),
+            weapon_node: Some("Trident"),
+        },
         _ => return None,
     })
 }
@@ -103,6 +111,7 @@ mod tests {
             "skeleton_mage",
             "bandit",
             "yeti",
+            "demon",
         ] {
             let spec = mesh_spec(id).expect(id);
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -132,6 +141,40 @@ mod tests {
         assert!(
             model.find_clip(spec.anim_melee).is_some(),
             "Attack missing on bandit"
+        );
+    }
+
+    #[test]
+    fn demon_glb_loads_idle_punch_and_trident() {
+        let spec = mesh_spec("demon").expect("demon");
+        assert_eq!(spec.anim_idle, "Idle");
+        assert_eq!(spec.anim_melee, "Punch");
+        assert_eq!(spec.anim_weapon, Some("Weapon"));
+        assert_eq!(spec.weapon_node, Some("Trident"));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(spec.source);
+        let root = path.parent().unwrap();
+        let model = engine::anim::AnimatedModel::load_with(
+            &path,
+            root,
+            &engine::EngineLimits::default(),
+        )
+        .unwrap_or_else(|err| panic!("demon glb load: {err}"));
+        assert!(
+            model.find_clip(spec.anim_idle).is_some(),
+            "Idle missing on demon"
+        );
+        assert!(
+            model.find_clip(spec.anim_melee).is_some(),
+            "Punch missing on demon"
+        );
+        let bytes = std::fs::read(&path).expect("read Demon.glb");
+        let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let json = std::str::from_utf8(&bytes[20..20 + json_len]).expect("glb json");
+        assert!(
+            json.contains("\"name\":\"Trident\""),
+            "Trident node missing in Demon.glb"
         );
     }
 
