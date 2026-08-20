@@ -4,7 +4,7 @@ Living plan. Main only. Invisible live content does not ship. Human controls fir
 
 Product locks (not milestones): procgen continent, recipes on existing pins, no authored zones, new seed = new map. Factions Wardens / Cutters / Brood / Tollers. Dungeon-first fill. EQ-soft first-person. Combat bible (trash 5.2, starved in-combat mana, Ember 3/1.2s, potion +40). L1-20 XP curve on paper (~5 hours).
 
-Character assets: dressed humans must include clothing meshes, alphaMode OPAQUE, GLB JSON+BIN\0 only, Idle/Walk present. Loader should refuse a hole-body instead of drawing a nude mask.
+Character assets: dressed humans must include clothing meshes, alphaMode OPAQUE, GLB JSON+BIN\0 only, Idle/Walk present. Engine loader SHIP `ac97df1`: BLEND/MASK without real alpha is a load error (hole-body cannot spawn).
 
 ## M0 Playable fight — SHIP
 
@@ -18,7 +18,7 @@ Chaotic pack stays. Post-pack road cut to the well. Dirt ribbon drawn. Walking h
 
 ## M2 Readable packs — NEXT
 
-Unstack spawn hostiles (one lock = one body). Attack/flinch still-proven on the locked mesh. No silent play_animation no-op. Do not ship another live type without an attack shot. Loud-fail hole-body humans in the loader.
+Unstack spawn hostiles (one lock = one body). Attack/flinch still-proven on the locked mesh. No silent play_animation no-op. Do not ship another live type without an attack shot. Engine hole-body gate already SHIP on Engine `ac97df1`.
 
 ## M3 Bones in the dark — QUEUED
 
