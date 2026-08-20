@@ -163,6 +163,11 @@ impl CombatLayer {
         self.skip_roster_pins = true;
     }
 
+    /// Keep current hostiles. Next world tick will not reseat the wolf line.
+    pub fn hold_fixture(&mut self) {
+        self.fixture = true;
+    }
+
     pub fn roster_pins_skipped(&self) -> bool {
         self.skip_roster_pins
     }

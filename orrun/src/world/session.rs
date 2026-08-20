@@ -581,6 +581,30 @@ impl WorldSession {
         self.dungeon_skulls_for = None;
     }
 
+    /// Stamp a cairn or woods hut in front of the player. Playtester
+    /// overworld_* hooks use this when procgen skip/travel would miss.
+    /// Does not call skip_roster_pins.
+    pub fn install_site_fixture(
+        &mut self,
+        world: &mut World,
+        kind: super::sites::SiteKind,
+    ) -> Result<(), SessionError> {
+        let player = self.player.ok_or(SessionError::NoWorld)?;
+        let site = super::sites::fixture_in_front(kind, player.position.horizontal(), player.yaw_degrees);
+        self.combat.hostiles.clear();
+        self.combat.lock = None;
+        self.overland_sites.clear();
+        self.overland_sites.push(site);
+        super::sites::seat_overland_sites(&mut self.combat, &self.overland_sites);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        self.site_prop_ids =
+            super::sites::spawn_site_props(world, &self.surface, &self.overland_sites)?;
+        self.roster_pins_seated = true;
+        self.combat_layer.hold_fixture();
+        self.respawn_hostile_meshes(world, &player)?;
+        Ok(())
+    }
+
     pub fn key_binds(&self) -> &KeyBinds {
         &self.key_binds
     }
