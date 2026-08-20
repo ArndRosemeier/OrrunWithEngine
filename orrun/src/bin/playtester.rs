@@ -136,6 +136,7 @@ fn main() {
         combat_bones_melee_at: None,
         combat_mage_cast_at: None,
         combat_mage_stand: None,
+        combat_mage_look: None,
         controls_stage: ControlsStage::Tab,
         ambience: match Ambience::load() {
             Ok(a) => Some(a),
@@ -368,6 +369,7 @@ struct Driver {
     combat_bones_melee_at: Option<f32>,
     combat_mage_cast_at: Option<f32>,
     combat_mage_stand: Option<GlobalXZ>,
+    combat_mage_look: Option<Vec3>,
     controls_stage: ControlsStage,
     ambience: Option<Ambience>,
 }
@@ -563,6 +565,7 @@ impl Driver {
                 } else {
                     if self.combat_mage_stand.is_none() {
                         self.combat_mage_stand = mage_view_stand(&self.session);
+                        self.combat_mage_look = mage_mesh_chest(&self.session);
                     }
                     if let (Some(pos), Some(stand)) = (
                         self.session.player_position(),
@@ -1631,6 +1634,7 @@ impl Driver {
         self.combat_tab_sent = false;
         self.combat_mage_cast_at = None;
         self.combat_mage_stand = None;
+        self.combat_mage_look = None;
         self.phase = Phase::CombatMageLive;
         self.phase_t0 = frame.time;
     }
@@ -1690,6 +1694,7 @@ impl Driver {
         }
         if self.combat_mage_stand.is_none() {
             self.combat_mage_stand = mage_view_stand(&self.session);
+            self.combat_mage_look = mage_mesh_chest(&self.session);
         }
         if let Some(stand) = self.combat_mage_stand {
             if let Some(pos) = self.session.player_position() {
@@ -1741,11 +1746,33 @@ impl Driver {
     }
 
     fn aim_at_mage_body(&mut self) {
-        // Mesh sits ORC_MESH_BEHIND 1.6 m behind the hitbox. Look at that chest.
+        // Mesh sits 1.6 m behind the hitbox. After the side-stand snapshot,
+        // keep looking at that chest so a right-offset crop stays on the mage.
+        if let Some(target) = self.combat_mage_look {
+            let Some(pos) = self.session.player_position() else {
+                return;
+            };
+            let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+            let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+            let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+            let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+            self.pending_yaw_delta = dyaw;
+            self.pending_pitch_delta = dpitch;
+            return;
+        }
         self.aim_at_humanoid(1.6, 1.15);
     }
 
     fn looking_at_mage_body(&self) -> bool {
+        if let Some(target) = self.combat_mage_look {
+            let Some(pos) = self.session.player_position() else {
+                return false;
+            };
+            let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+            let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+            let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+            return view_angle_degrees(eye, yaw, pitch, target) < 18.0 && pitch > -55.0;
+        }
         self.looking_at_humanoid(1.6, 1.15)
     }
 
@@ -2993,12 +3020,12 @@ fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
-    // Close crop of head+torso+hands. Mesh is 1.6 m behind the hitbox;
-    // stand just in front of the hitbox so the mage fills the frame and
-    // hamlet trees/bushes are not what a reviewer samples as a staff.
-    // Snapshot once: player motion would otherwise rotate the offset.
-    const STAND_M: f64 = 1.0;
-    const SIDE_M: f64 = 0.0;
+    // True side / tight 3/4 from the mage's RIGHT: mesh is 1.6 m behind
+    // the hitbox, so STAND=-1.2 / SIDE=1.8 sits ~1.8 m off the mesh on
+    // the staff hand. Cylinder.004's 2.1 m +Z shaft is then a line across
+    // the picture (not end-on). Snapshot once so walking does not rotate it.
+    const STAND_M: f64 = -1.2;
+    const SIDE_M: f64 = 1.8;
     let pos = session.player_position()?;
     let h = session.combat().hostiles.first()?;
     let dx = pos.x - h.x;
@@ -3014,6 +3041,28 @@ fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     Some(GlobalXZ::at(
         h.x + fx * STAND_M + rx * SIDE_M,
         h.z + fz * STAND_M + rz * SIDE_M,
+    ))
+}
+
+fn mage_mesh_chest(session: &WorldSession) -> Option<Vec3> {
+    // Visual chest: 1.6 m behind the hitbox along facing (toward the player
+    // at snapshot time). Used so a right-side stand still looks at the mesh.
+    const BEHIND_M: f64 = 1.6;
+    const CHEST_M: f32 = 1.15;
+    let pos = session.player_position()?;
+    let h = session.combat().hostiles.first()?;
+    let dx = pos.x - h.x;
+    let dz = pos.z - h.z;
+    let len = (dx * dx + dz * dz).sqrt();
+    let (fx, fz) = if len > 1e-6 {
+        (dx / len, dz / len)
+    } else {
+        (-1.0, 0.0)
+    };
+    Some(Vec3::new(
+        (h.x - fx * BEHIND_M) as f32,
+        pos.y as f32 + CHEST_M,
+        (h.z - fz * BEHIND_M) as f32,
     ))
 }
 
