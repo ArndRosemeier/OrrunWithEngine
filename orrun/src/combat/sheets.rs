@@ -464,6 +464,34 @@ pub fn demon_sheet() -> MobSheet {
     }
 }
 
+pub fn blue_demon_sheet() -> MobSheet {
+    let (sight, hear, leash, social) = aggro_fields();
+    MobSheet {
+        id: "blue_demon".into(),
+        name: "blue_demon".into(),
+        level: BLUE_DEMON_LEVEL,
+        hp: BLUE_DEMON_HP,
+        armor: BLUE_DEMON_ARMOR,
+        damage: BLUE_DEMON_DMG,
+        swing_s: BLUE_DEMON_SWING_S,
+        slam_damage: None,
+        slam_every_s: None,
+        telegraph_s: None,
+        reach_m: BLUE_DEMON_REACH_M,
+        speed_mps: BLUE_DEMON_SPEED,
+        sight_m: sight,
+        hear_m: hear,
+        leash_m: leash,
+        social_m: social,
+        xp: BLUE_DEMON_XP,
+        token_brood: 0,
+        specials: vec![],
+        scale_hp: None,
+        scale_dmg: None,
+        scale_xp: None,
+    }
+}
+
 pub fn yeti_sheet() -> MobSheet {
     let (sight, hear, leash, social) = aggro_fields();
     MobSheet {
@@ -508,6 +536,7 @@ pub fn resolve_mob_id(name: &str) -> Result<String, String> {
         "skeleton_mage" | "Mage" | "mage" => Ok("skeleton_mage".into()),
         "yeti" => Ok("yeti".into()),
         "demon" => Ok("demon".into()),
+        "blue_demon" | "BlueDemon" => Ok("blue_demon".into()),
         "bandit" | "male_bandit" => Ok("bandit".into()),
         other => Err(format!("unknown mob: {other}")),
     }
@@ -528,6 +557,7 @@ pub fn mob_sheet(id: &str, level: Option<i32>) -> Result<MobSheet, String> {
         "skeleton_mage" => skeleton_mage_sheet(),
         "yeti" => yeti_sheet(),
         "demon" => demon_sheet(),
+        "blue_demon" => blue_demon_sheet(),
         "bandit" => bandit_sheet(),
         other => return Err(format!("unknown mob: {other}")),
     })
@@ -857,6 +887,7 @@ pub fn mob_sheets_json() -> Value {
         "skeleton_mage": skeleton_mage_sheet(),
         "yeti": yeti_sheet(),
         "demon": demon_sheet(),
+        "blue_demon": blue_demon_sheet(),
         "bandit": bandit_sheet(),
     })
 }

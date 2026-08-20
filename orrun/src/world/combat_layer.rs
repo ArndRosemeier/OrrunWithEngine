@@ -13,8 +13,8 @@ use crate::combat::math::{
     SKULL_BOLT_RANGE_M, SKULL_TELE_S, TICK, WALK_MPS,
 };
 use crate::combat::sheets::{
-    demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet, skeleton_minion_sheet,
-    skeleton_warrior_sheet, wolf_sheet, yeti_sheet, MobSheet,
+    blue_demon_sheet, demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet,
+    skeleton_minion_sheet, skeleton_warrior_sheet, wolf_sheet, yeti_sheet, MobSheet,
 };
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::combat::Discipline;
@@ -67,6 +67,7 @@ enum FixtureKind {
     Mage,
     Yeti,
     Demon,
+    BlueDemon,
 }
 
 struct MeshAnchor {
@@ -168,6 +169,10 @@ impl CombatLayer {
         self.fixture_kind = FixtureKind::Demon;
     }
 
+    pub fn request_bluedemon_fixture(&mut self) {
+        self.fixture_kind = FixtureKind::BlueDemon;
+    }
+
     /// Playtester HOLD rearms stay fixture-only: no overland sites, no roster pins.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
@@ -210,6 +215,10 @@ impl CombatLayer {
 
     pub fn wants_demon(&self) -> bool {
         self.fixture_kind == FixtureKind::Demon
+    }
+
+    pub fn wants_bluedemon(&self) -> bool {
+        self.fixture_kind == FixtureKind::BlueDemon
     }
 
     pub fn first_auto(&self) -> Option<i32> {
@@ -688,6 +697,80 @@ impl CombatLayer {
         combat.second_wind_used = false;
         combat.last_rank_gate = None;
         self.fixture_kind = FixtureKind::Demon;
+        self.fixture = true;
+        self.first_auto = None;
+        self.accum_s = 0.0;
+        self.attack_pip_s = 0.0;
+        self.swing_whoosh = false;
+        self.hit_flash = false;
+        self.pending_sfx.clear();
+        self.pending_flinch = false;
+        self.flinch = None;
+        self.flash = None;
+        self.flash_t = 0.0;
+        self.ring_on = None;
+        self.pending_melee = None;
+        self.skull_tele.clear();
+        self.incoming_hit = false;
+        self.hurt_flash_s = 0.0;
+    }
+
+    /// One published blue_demon 1.5 m in front of the player. First Punch after swing_s.
+    /// Live bolt/self-Mend/Ward tells are HOLD (no mob caster API). Melee clip is Punch.
+    pub fn install_bluedemon_fixture(
+        &mut self,
+        combat: &mut WorldCombat,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) {
+        let fl = (facing_x * facing_x + facing_z * facing_z).sqrt();
+        let (fx, fz) = if fl > 1e-9 {
+            (facing_x / fl, facing_z / fl)
+        } else {
+            (1.0, 0.0)
+        };
+        let sheet = blue_demon_sheet();
+        combat.hostiles.clear();
+        combat.lock = None;
+        combat.cycle.clear();
+        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.hostiles.push(WorldHostile {
+            idx: 0,
+            x: player_x + fx * 1.5,
+            z: player_z + fz * 1.5,
+            hp: f64::from(sheet.hp),
+            max_hp: f64::from(sheet.hp),
+            armor: sheet.armor,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: sheet.name.clone(),
+            mob_id: "blue_demon".into(),
+            entity: None,
+            damage: sheet.damage,
+            swing_s: sheet.swing_s,
+            swing_cd: sheet.swing_s,
+            reach_m: sheet.reach_m,
+        });
+        *combat = keep_player(combat);
+        combat.strike_armed = false;
+        combat.ember_started = false;
+        combat.last_potion_heal = 0;
+        combat.busy = 0.0;
+        combat.gcd = 0.0;
+        combat.cds = crate::combat::verbs::empty_cds();
+        combat.cast_kind = None;
+        combat.cast_t = 0.0;
+        combat.cast_target = None;
+        combat.ward = 0.0;
+        combat.ward_t = 0.0;
+        combat.mark_t = 0.0;
+        combat.second_wind_used = false;
+        combat.last_rank_gate = None;
+        self.fixture_kind = FixtureKind::BlueDemon;
         self.fixture = true;
         self.first_auto = None;
         self.accum_s = 0.0;
@@ -1837,6 +1920,25 @@ mod tests {
         assert_eq!(h.damage, 16);
         assert!(layer.wants_demon());
         assert!(layer.fixture_ready());
+    }
+
+    #[test]
+    fn blue_demon_sheet_fixture_is_one_blue_demon_with_swing_cd_armed() {
+        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+        let mut layer = CombatLayer::install();
+        layer.install_bluedemon_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
+        assert_eq!(combat.hostiles.len(), 1);
+        let h = &combat.hostiles[0];
+        assert_eq!(h.mob_id, "blue_demon");
+        assert_eq!(h.name, "blue_demon");
+        assert!((h.x - 1.5).abs() < 1e-9);
+        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
+        assert!((h.reach_m - 2.0).abs() < 1e-9);
+        assert_eq!(h.max_hp, 155.0);
+        assert_eq!(h.damage, 12);
+        assert!(layer.wants_bluedemon());
+        assert!(layer.fixture_ready());
+        assert!(!layer.wants_demon());
     }
 
     #[test]

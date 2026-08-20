@@ -214,6 +214,15 @@ pub const DEMON_REACH_M: f64 = 2.2;
 pub const DEMON_SPEED: f64 = 3.2;
 pub const DEMON_XP: i32 = 180;
 
+pub const BLUE_DEMON_LEVEL: i32 = 7;
+pub const BLUE_DEMON_HP: i32 = 155;
+pub const BLUE_DEMON_ARMOR: i32 = 9;
+pub const BLUE_DEMON_DMG: i32 = 12;
+pub const BLUE_DEMON_SWING_S: f64 = 2.0;
+pub const BLUE_DEMON_REACH_M: f64 = 2.0;
+pub const BLUE_DEMON_SPEED: f64 = 3.6;
+pub const BLUE_DEMON_XP: i32 = 140;
+
 /// Truncate toward zero (Python `int(x)` on the non-negative combat path).
 #[inline]
 pub fn trunc(x: f64) -> i32 {

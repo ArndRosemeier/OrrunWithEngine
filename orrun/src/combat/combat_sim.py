@@ -192,6 +192,16 @@ DEMON_REACH_M = 2.2
 DEMON_SPEED = 3.2
 DEMON_XP = 180
 
+# BlueDemon - L7 melee, Punch only. Bolt/self-Mend/Ward tells HOLD (no mob caster API).
+BLUE_DEMON_LEVEL = 7
+BLUE_DEMON_HP = 155
+BLUE_DEMON_ARMOR = 9
+BLUE_DEMON_DMG = 12
+BLUE_DEMON_SWING_S = 2.0
+BLUE_DEMON_REACH_M = 2.0
+BLUE_DEMON_SPEED = 3.6
+BLUE_DEMON_XP = 140
+
 # XP to go from N → N+1 (N=1..9). Tuned so the locked dungeon path
 # D1→L4, D2→L8, T2/Mother→L10 lands in 90–150 minutes.
 XP_TO_NEXT = {
@@ -371,6 +381,27 @@ def demon_sheet() -> Dict[str, Any]:
     }
 
 
+def blue_demon_sheet() -> Dict[str, Any]:
+    return {
+        "id": "blue_demon",
+        "name": "blue_demon",
+        "level": BLUE_DEMON_LEVEL,
+        "hp": BLUE_DEMON_HP,
+        "armor": BLUE_DEMON_ARMOR,
+        "damage": BLUE_DEMON_DMG,
+        "swing_s": BLUE_DEMON_SWING_S,
+        "reach_m": BLUE_DEMON_REACH_M,
+        "speed_mps": BLUE_DEMON_SPEED,
+        "sight_m": SIGHT_AGGRO_M,
+        "hear_m": HEAR_AGGRO_M,
+        "leash_m": LEASH_M,
+        "social_m": SOCIAL_M,
+        "xp": BLUE_DEMON_XP,
+        "token_brood": 0,
+        "specials": [],
+    }
+
+
 def yeti_sheet() -> Dict[str, Any]:
     return {
         "id": "yeti",
@@ -403,6 +434,7 @@ MOB_BUILDERS = {
     "orc": lambda lvl=None: orc_sheet(),
     "yeti": lambda lvl=None: yeti_sheet(),
     "demon": lambda lvl=None: demon_sheet(),
+    "blue_demon": lambda lvl=None: blue_demon_sheet(),
 }
 
 MOB_ALIASES = {
@@ -414,6 +446,7 @@ MOB_ALIASES = {
     "Line-Mother": "line_mother",
     "GreenBlob": "green_blob",
     "greenblob": "green_blob",
+    "BlueDemon": "blue_demon",
 }
 
 
@@ -1621,6 +1654,7 @@ def run_all(seed: int = 1) -> Dict[str, Any]:
             "orc": orc_sheet(),
             "yeti": yeti_sheet(),
             "demon": demon_sheet(),
+            "blue_demon": blue_demon_sheet(),
         },
         "player_specialists": {
             f"L{lv}_{d}": player_stats(lv, d)
