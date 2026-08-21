@@ -495,11 +495,10 @@ fn how_far_the_tiers_disagree() {
 #[test]
 fn coarse_tiers_do_not_bridge_the_reported_river_canyon() {
     let (_, surface) = world_of(20260809, 256);
-    // The camera was at (134935, 88743), 65 m from a far-chunk boundary.
-    // Ahead of it, this point lies on the river centreline under a 64 m knoll.
-    // The canonical carve is a canyon, but a 125 m quad used to bridge the
-    // banks and render 18.7 m above the walked bed.
-    let p = GlobalXZ::at(135_335.0, 88_563.0);
+    // Fixture refreshed after Quilez lowland relief moved the carve ~80 m from
+    // the original camera-ahead centreline at (135335, 88563). The point must
+    // stay on a deep wet bed so medium/far quads cannot bridge the banks.
+    let p = GlobalXZ::at(135_385.0, 88_498.0);
     let column = surface.column(p);
     let walked = tier_height(&surface, p, &super::NEAR);
     let medium = tier_height(&surface, p, &super::MEDIUM);
@@ -1945,27 +1944,32 @@ fn adjacent_chunks_share_their_edge_exactly() {
 fn inland_grass_is_not_one_soil() {
     // Dry sward and peat have to actually win somewhere, or the extra albedos
     // are dead bindings and the continent is one green tile with a tint. The
-    // geographic centre is often alpine, so this walks a diagonal that crosses
-    // low woods and sunny flanks.
+    // geographic centre is often alpine, so sample a diagonal band (and its
+    // neighbours) that crosses low woods and sunny flanks.
     let (atlas, surface) = world_of(1, 48);
     let builder = TerrainChunkBuilder::new(Arc::clone(&surface));
     let span = atlas.size as f64 * CELL_METRES as f64 / CHUNK_SPAN_M;
     let mut dry = 0u32;
     let mut moor = 0u32;
-    for t in [0.28, 0.38, 0.48, 0.58] {
+    for t in [0.22, 0.28, 0.34, 0.40, 0.46, 0.52, 0.58, 0.64] {
         let c = (span * t) as i32;
-        let Some(payload) = builder.build(ChunkCoord::new(c, c)).expect("build") else {
-            continue;
-        };
-        let land = payload
-            .layer(engine::space::ChunkLayer::Land)
-            .expect("land");
-        for uv in &land.uvs {
-            if uv[0] > 0.35 {
-                dry += 1;
-            }
-            if uv[1] > 0.35 {
-                moor += 1;
+        for (dx, dz) in [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)] {
+            let Some(payload) = builder
+                .build(ChunkCoord::new(c + dx, c + dz))
+                .expect("build")
+            else {
+                continue;
+            };
+            let land = payload
+                .layer(engine::space::ChunkLayer::Land)
+                .expect("land");
+            for uv in &land.uvs {
+                if uv[0] > 0.35 {
+                    dry += 1;
+                }
+                if uv[1] > 0.35 {
+                    moor += 1;
+                }
             }
         }
     }

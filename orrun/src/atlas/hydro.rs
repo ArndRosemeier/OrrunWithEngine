@@ -22,7 +22,7 @@ const LAKE_SMOOTH_HALF_WIN: usize = 3;
 const RIVER_MEANDER_FRAC: f32 = 0.18;
 const RIVER_CURVE_SPACING_M: f32 = 36.0;
 /// How far a mouth may walk past the last land cell to meet the meandered shore.
-const MOUTH_MAX_M: f32 = 700.0;
+const MOUTH_MAX_M: f32 = 1_500.0;
 const MOUTH_STEP_M: f32 = 24.0;
 
 /// River-like shore meander: amplitudes (m) and wavelengths along the perimeter (m).
@@ -1213,13 +1213,25 @@ fn extend_mouth(
     sheet: f32,
     in_water: impl Fn(Vec2) -> bool,
 ) {
+    let start_len = river.points.len();
     let mut at = *river.points.last().expect("a river has points");
     let past = river.half_width_m.max(24.0);
     let mut travelled = 0.0;
     let mut past_water = 0.0;
     let mut seen_water = in_water(at);
+    let mut dir = heading;
     while travelled < MOUTH_MAX_M {
-        at += heading * MOUTH_STEP_M;
+        if !seen_water && travelled >= MOUTH_STEP_M * 4.0 {
+            if let Some(toward) = nearest_water_dir(at, &in_water) {
+                let blended = dir * 0.35 + toward * 0.65;
+                dir = if blended.length_squared() > 1e-6 {
+                    blended.normalize()
+                } else {
+                    toward
+                };
+            }
+        }
+        at += dir * MOUTH_STEP_M;
         travelled += MOUTH_STEP_M;
         river.points.push(at);
         river.surface_z.push(sheet);
@@ -1233,6 +1245,34 @@ fn extend_mouth(
             return;
         }
     }
+    // Blind extension that never found water leaves a worse beach stub — retract.
+    if !seen_water {
+        river.points.truncate(start_len);
+        river.surface_z.truncate(start_len);
+    }
+}
+
+/// Fan-search for ocean/lake water near a stuck mouth. Headings alone can run
+/// along a bay for the whole budget while the shore sits a few hundred metres
+/// to the side.
+fn nearest_water_dir(at: Vec2, in_water: &impl Fn(Vec2) -> bool) -> Option<Vec2> {
+    let mut best: Option<(f32, Vec2)> = None;
+    const DIRS: usize = 16;
+    for i in 0..DIRS {
+        let ang = std::f32::consts::TAU * (i as f32) / (DIRS as f32);
+        let dir = Vec2::new(ang.cos(), ang.sin());
+        for &dist in &[48.0_f32, 96.0, 192.0, 288.0, 400.0, 560.0] {
+            let p = at + dir * dist;
+            if !in_water(p) {
+                continue;
+            }
+            if best.is_none_or(|(best_d, _)| dist < best_d) {
+                best = Some((dist, dir));
+            }
+            break;
+        }
+    }
+    best.map(|(_, dir)| dir)
 }
 
 fn inside_any_coast(p: Vec2, coasts: &[CoastRing], boxes: &[(Vec2, Vec2)]) -> bool {
