@@ -139,6 +139,7 @@ impl VillagerLayer {
     ) -> EngineResult<()> {
         self.ensure_models();
         self.drop_gone(world, hamlets);
+        let models_ready = self.worksuit.is_some() && self.casual.is_some();
         for hamlet in hamlets {
             if !is_hamlet_pin(surface, hamlet.at) {
                 continue;
@@ -148,6 +149,11 @@ impl VillagerLayer {
             }
             let key = stand_key(hamlet.at);
             if self.spawned.contains(&key) {
+                continue;
+            }
+            // Staggered GLB load: do not mark the hamlet spawned until both
+            // outfits exist, or a cold spawn at the pin permanently skips people.
+            if !models_ready {
                 continue;
             }
             let local_doors: Vec<&HouseDoor> = doors
@@ -165,11 +171,14 @@ impl VillagerLayer {
     }
 
     fn ensure_models(&mut self) {
+        // One GLB per follow: full UAL bakes are ~20 MB and a double load on the
+        // first village visit was a multi-second hitch (looked like floating seats).
         if self.worksuit.is_none() {
             match load_human(WORKSUIT_GLB) {
                 Ok(model) => self.worksuit = Some(model),
                 Err(err) => eprintln!("villagers: worksuit skipped: {err}"),
             }
+            return;
         }
         if self.casual.is_none() {
             match load_human(CASUAL_GLB) {
@@ -212,7 +221,7 @@ impl VillagerLayer {
             let Some(model) = casual.clone() else {
                 break;
             };
-            let Some((pos, yaw)) = point_on_cut(&hamlet.cut, t, stream) else {
+            let Some((pos, yaw)) = point_on_cut(&hamlet.cut, t, 1.0, stream) else {
                 continue;
             };
             if self.spawn_person(
@@ -310,7 +319,7 @@ impl VillagerLayer {
             let Some(model) = casual.clone() else {
                 break;
             };
-            let Some((pos, yaw)) = point_on_cut(&hamlet.cut, extra_t, stream) else {
+            let Some((pos, yaw)) = point_on_cut(&hamlet.cut, extra_t, 1.0, stream) else {
                 break;
             };
             if self.spawn_person(
@@ -435,7 +444,8 @@ impl VillagerLayer {
         } else {
             self.set_clip(world, i, true)?;
         }
-        if let Some((pos, yaw)) = point_on_cut(cut, self.people[i].along, stream) {
+        if let Some((pos, yaw)) = point_on_cut(cut, self.people[i].along, self.people[i].dir, stream)
+        {
             self.people[i].pos = pos;
             self.people[i].yaw = yaw;
         }
@@ -658,10 +668,23 @@ fn dry_cut_ts(cut: &[Vec2], stream: &WorldStream, hamlet: &HamletStand, want: us
     }
 }
 
-fn point_on_cut(cut: &[Vec2], t: f32, stream: &WorldStream) -> Option<(GlobalPosition, f32)> {
-    let p = sample_polyline(cut, t.clamp(0.0, 1.0))?;
-    let ahead = sample_polyline(cut, (t + 0.02).clamp(0.0, 1.0)).unwrap_or(p);
-    let d = ahead - p;
+fn point_on_cut(
+    cut: &[Vec2],
+    t: f32,
+    dir: f32,
+    stream: &WorldStream,
+) -> Option<(GlobalPosition, f32)> {
+    let t = t.clamp(0.0, 1.0);
+    let p = sample_polyline(cut, t)?;
+    let sign = if dir >= 0.0 { 1.0 } else { -1.0 };
+    let look_t = (t + 0.02 * sign).clamp(0.0, 1.0);
+    let ahead = sample_polyline(cut, look_t).unwrap_or(p);
+    let mut d = ahead - p;
+    if d.length_squared() <= 1e-6 {
+        let back_t = (t - 0.02 * sign).clamp(0.0, 1.0);
+        let back = sample_polyline(cut, back_t).unwrap_or(p);
+        d = p - back;
+    }
     let yaw = if d.length_squared() > 1e-6 {
         d.x.atan2(d.y).to_degrees()
     } else {

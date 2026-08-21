@@ -89,6 +89,8 @@ struct Standing {
     kind: Kind,
     at: GlobalPosition,
     yaw_deg: f32,
+    /// Linear multiply for house paint variety (white = authored look).
+    tint: Color,
     door_id: Option<u64>,
 }
 
@@ -258,7 +260,7 @@ pub struct SettlementLayer {
     hamlets: Vec<HamletStand>,
     plot_index: Arc<BuildingIndex>,
     tiles: HashMap<TileKey, EntityId>,
-    tile_items: HashMap<TileKey, Vec<(GlobalPosition, f32)>>,
+    tile_items: HashMap<TileKey, Vec<(GlobalPosition, f32, Color)>>,
     tile_queue: VecDeque<TileKey>,
     queued: HashSet<TileKey>,
     pending: Option<Pending>,
@@ -643,7 +645,7 @@ impl SettlementLayer {
             self.tile_items
                 .entry(key)
                 .or_default()
-                .push((item.at, item.yaw_deg));
+                .push((item.at, item.yaw_deg, item.tint));
         }
     }
 
@@ -1111,6 +1113,7 @@ fn seat_house(
             kind: Kind::Well,
             at: GlobalPosition::at(x, f64::from(seat.floor_z), z),
             yaw_deg,
+            tint: Color::WHITE,
             door_id: None,
         });
         return;
@@ -1120,6 +1123,7 @@ fn seat_house(
     }
 
     let seed = house_seed(world_seed, pin.id, shape.center.x, shape.center.y);
+    let tint = house_tint(seed);
     let recipe = dwelling_recipes.get(spec.id, seed);
     let floor_y = seat.floor_z - DOOR_SINK_M;
     plots.push(BuildingPlot::House(HousePlot {
@@ -1166,6 +1170,7 @@ fn seat_house(
             kind: Kind::HousePiece(index),
             at,
             yaw_deg: yaw_deg + item.place.yaw_degrees,
+            tint,
             door_id: leaf.then_some(id),
         });
     }
@@ -1233,6 +1238,7 @@ fn seat_castle(
                 z + f64::from(dz),
             ),
             yaw_deg: yaw_deg + item.place.yaw_degrees,
+            tint: Color::WHITE,
             door_id: None,
         });
     }
@@ -1452,6 +1458,42 @@ fn house_seed(world_seed: i32, node_id: i32, cx: f32, cz: f32) -> u64 {
         ^ (u64::from(cz.to_bits())).rotate_left(21)
 }
 
+/// Plaster/roof multiply so neighbouring dwellings read as different paint.
+/// Values are linear RGB factors — keep them strong enough to beat flat lighting
+/// on shared cream + timber albedos.
+fn house_tint(seed: u64) -> Color {
+    // Linear RGB multiply factors. Keep pairs ≥~0.3 L1 apart so cream plaster
+    // still reads as different paint under flat daylight.
+    const PALETTES: [Color; 5] = [
+        Color::WHITE,
+        Color {
+            r: 1.0,
+            g: 0.78,
+            b: 0.52,
+            a: 1.0,
+        }, // warm sandstone
+        Color {
+            r: 0.68,
+            g: 0.76,
+            b: 0.95,
+            a: 1.0,
+        }, // cool slate
+        Color {
+            r: 0.72,
+            g: 0.92,
+            b: 0.68,
+            a: 1.0,
+        }, // sage
+        Color {
+            r: 1.0,
+            g: 0.55,
+            b: 0.70,
+            a: 1.0,
+        }, // clay rose
+    ];
+    PALETTES[(seed % PALETTES.len() as u64) as usize]
+}
+
 fn spawn_batches(
     world: &mut World,
     glbs: &[(&str, &str)],
@@ -1520,14 +1562,14 @@ fn tile_dist_key(key: TileKey, focus: GlobalXZ) -> i64 {
     (dx * dx + dz * dz).round() as i64
 }
 
-fn places_of(items: &[(GlobalPosition, f32)], origin: RenderOrigin) -> Vec<Place> {
+fn places_of(items: &[(GlobalPosition, f32, Color)], origin: RenderOrigin) -> Vec<Place> {
     let mut places = Vec::with_capacity(items.len());
-    for &(at, yaw_deg) in items {
+    for &(at, yaw_deg, tint) in items {
         let Ok(render) = at.to_render(origin) else {
             continue;
         };
         let p = render.vec3();
-        places.push(Place::new(p.x, p.y, p.z).with_yaw_deg(yaw_deg));
+        places.push(Place::new(p.x, p.y, p.z).with_yaw_deg(yaw_deg).with_tint(tint));
     }
     places
 }
@@ -1692,12 +1734,36 @@ mod tests {
     }
 
     #[test]
+    fn house_tint_palettes_are_visibly_apart() {
+        let mut colors = Vec::new();
+        for seed in 0..5u64 {
+            colors.push(house_tint(seed));
+        }
+        // Same seed family cycles the five paints.
+        assert_eq!(house_tint(0).r, house_tint(5).r);
+        let mut min_dist = f32::MAX;
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                let a = colors[i];
+                let b = colors[j];
+                let d = (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+                min_dist = min_dist.min(d);
+            }
+        }
+        assert!(
+            min_dist > 0.28,
+            "house paints too close to notice (min_dist={min_dist})"
+        );
+    }
+
+    #[test]
     fn house_and_castle_tiles_do_not_share_a_batch() {
         let at = GlobalPosition::at(130.0, 0.0, 10.0);
         let house = tile_key(&Standing {
             kind: Kind::HousePiece(0),
             at,
             yaw_deg: 0.0,
+            tint: Color::WHITE,
             door_id: None,
         })
         .expect("house piece");
@@ -1705,6 +1771,7 @@ mod tests {
             kind: Kind::CastlePiece(0),
             at,
             yaw_deg: 0.0,
+            tint: Color::WHITE,
             door_id: None,
         })
         .expect("castle piece");
