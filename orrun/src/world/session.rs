@@ -1507,6 +1507,11 @@ impl WorldSession {
         let plots = self.plot_index();
         if let Some(scatter) = self.scatter.as_mut() {
             let t = Instant::now();
+            let hamlets = self
+                .settlements
+                .as_ref()
+                .map(SettlementLayer::hamlets)
+                .unwrap_or(&[]);
             scatter.follow(
                 world,
                 &self.stream,
@@ -1514,6 +1519,7 @@ impl WorldSession {
                 &self.ponds.field(),
                 focus,
                 &plots,
+                hamlets,
                 false,
             )?;
             world.hitch_span(
@@ -2023,6 +2029,10 @@ impl WorldSession {
         let plots = self.plot_index();
         if let Some(scatter) = self.scatter.as_mut() {
             let t = Instant::now();
+            let hamlets = self
+                .settlements
+                .as_ref()
+                .map_or(&[][..], SettlementLayer::hamlets);
             scatter.follow(
                 world,
                 &self.stream,
@@ -2030,6 +2040,7 @@ impl WorldSession {
                 &self.ponds.field(),
                 foot,
                 &plots,
+                hamlets,
                 rebased,
             )?;
             world.hitch_span(

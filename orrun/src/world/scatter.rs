@@ -40,10 +40,15 @@ use glam::{Vec2, Vec3};
 use super::coords::CHUNK_SPAN_M;
 use super::footprint::BuildingIndex;
 use super::look::{SNOW_FULL_M, SNOW_LINE_M, SNOW_SLOPE_END, SNOW_SLOPE_START, SUN_DIR};
+use super::paths::road_ribbon_width;
 use super::ponds::PondField;
 use super::rng::{value_noise, CellRng};
+use super::settlement::{HamletStand, ROAD_CLEAR_M};
 use super::surface::{lerp, smoothstep, ContinentalSurface, SurfaceColumn};
 use super::world_stream::{WorldStream, MEDIUM, NEAR};
+
+/// Extra metres past the ribbon half-width so a scaled tuft cannot hang over dirt.
+const ROAD_VEG_PAD_M: f32 = 0.35;
 
 /// Lattice spacing and window radius per class, in metres.
 const GRASS_SPACING_M: f64 = 1.7;
@@ -348,6 +353,11 @@ impl PropClass {
             self,
             Self::Grass | Self::Tree | Self::Bush | Self::Snag | Self::Mushroom | Self::Berry
         )
+    }
+
+    /// Dirt ribbons stay plant-free; stones may still sit on the bed.
+    fn skips_road(self) -> bool {
+        self.skips_urban() || matches!(self, Self::Reed)
     }
 
     /// Whether being near water changes how much of this class belongs here,
@@ -952,6 +962,8 @@ struct Sprig {
     at: GlobalPosition,
     yaw_deg: f32,
     scale: f32,
+    /// Linear multiply on the shared mesh albedo (white = authored look).
+    tint: Color,
 }
 
 /// Everything a sow reads, all of it owned or shared — nothing borrowed from the
@@ -970,6 +982,8 @@ struct Sowing {
     ponds: Arc<PondField>,
     ground: ContactSnapshot,
     plots: Arc<BuildingIndex>,
+    /// Atlas roads and hamlet dirt cuts in the sow window.
+    roads: RoadClear,
 }
 
 /// Far-band pine stand-ins: same cover field as the tint, medium-tier height.
@@ -980,6 +994,59 @@ struct FarSowing {
     inner_m: f64,
     outer_m: f64,
     spacing_m: f64,
+    roads: RoadClear,
+}
+
+/// Road and village-cut segments that must stay free of plant cover.
+struct RoadClear {
+    segs: Vec<(Vec2, Vec2, f32)>,
+}
+
+impl RoadClear {
+    fn gather(
+        surface: &ContinentalSurface,
+        hamlets: &[HamletStand],
+        focus: GlobalXZ,
+        reach_m: f64,
+    ) -> Self {
+        let origin = Vec2::new(focus.x as f32, focus.z as f32);
+        let reach = reach_m as f32;
+        let mut segs = Vec::new();
+        for road in surface.roads() {
+            let half = road_ribbon_width(road.class) * 0.5 + ROAD_VEG_PAD_M;
+            for w in road.points.windows(2) {
+                if dist_point_seg(origin, w[0], w[1]) <= reach + half {
+                    segs.push((w[0], w[1], half));
+                }
+            }
+        }
+        let cut_half = ROAD_CLEAR_M * 0.5 + ROAD_VEG_PAD_M;
+        for hamlet in hamlets {
+            for w in hamlet.cut.windows(2) {
+                if dist_point_seg(origin, w[0], w[1]) <= reach + cut_half {
+                    segs.push((w[0], w[1], cut_half));
+                }
+            }
+        }
+        Self { segs }
+    }
+
+    fn blocks(&self, p: GlobalXZ) -> bool {
+        let q = Vec2::new(p.x as f32, p.z as f32);
+        self.segs
+            .iter()
+            .any(|&(a, b, half)| dist_point_seg(q, a, b) < half)
+    }
+}
+
+fn dist_point_seg(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let d = b - a;
+    let len2 = d.length_squared();
+    if len2 < 1e-8 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(d) / len2).clamp(0.0, 1.0);
+    p.distance(a + d * t)
 }
 
 /// A sow in flight, and the state of the world it speaks for.
@@ -1229,6 +1296,7 @@ impl ScatterLayer {
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
         house_plots: &Arc<BuildingIndex>,
+        hamlets: &[HamletStand],
         rebased: bool,
     ) -> EngineResult<bool> {
         let resident = stream.resident_count();
@@ -1274,12 +1342,12 @@ impl ScatterLayer {
             }
         }
 
-        if self.follow_near(stream, surface, ponds, focus, house_plots, resident)? {
+        if self.follow_near(stream, surface, ponds, focus, house_plots, hamlets, resident)? {
             changed = true;
         }
         self.reprioritize_uploads(focus);
         let upload = self.drain_uploads(world, landed_near)?;
-        self.follow_far(surface, ponds, focus)?;
+        self.follow_far(surface, ponds, focus, hamlets)?;
         Ok(changed || upload.trees || upload.other || upload.far)
     }
 
@@ -1290,6 +1358,7 @@ impl ScatterLayer {
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
         house_plots: &Arc<BuildingIndex>,
+        hamlets: &[HamletStand],
         resident: usize,
     ) -> EngineResult<bool> {
         let moved = self
@@ -1310,6 +1379,11 @@ impl ScatterLayer {
         }
 
         self.house_plots = Arc::clone(house_plots);
+        let near_reach = PROP_CLASSES
+            .iter()
+            .map(|c| c.radius_m())
+            .fold(0.0_f64, f64::max);
+        let roads = RoadClear::gather(surface, hamlets, focus, near_reach);
         let sowing = Sowing {
             seed: self.seed,
             variants: self
@@ -1321,6 +1395,7 @@ impl ScatterLayer {
             ponds: Arc::clone(ponds),
             ground: stream.contact_snapshot(),
             plots: Arc::clone(&self.house_plots),
+            roads,
         };
         self.pending = Some(Pending {
             focus,
@@ -1338,6 +1413,7 @@ impl ScatterLayer {
         surface: &Arc<ContinentalSurface>,
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
+        hamlets: &[HamletStand],
     ) -> EngineResult<()> {
         if self.far_pending.is_some() {
             return Ok(());
@@ -1349,6 +1425,7 @@ impl ScatterLayer {
         if moved < FAR_RESEED_M {
             return Ok(());
         }
+        let roads = RoadClear::gather(surface, hamlets, focus, FAR_TREE_RADIUS_M);
         let sowing = FarSowing {
             seed: self.seed,
             surface: Arc::clone(surface),
@@ -1356,6 +1433,7 @@ impl ScatterLayer {
             inner_m: 0.0,
             outer_m: FAR_TREE_RADIUS_M,
             spacing_m: FAR_TREE_SPACING_M,
+            roads,
         };
         self.far_pending = Some(Pending {
             focus,
@@ -1938,6 +2016,9 @@ impl Sowing {
                 if class.skips_urban() && self.plots.urban_cover(p) {
                     continue;
                 }
+                if class.skips_road() && self.roads.blocks(p) {
+                    continue;
+                }
 
                 let far_from_water = surface
                     .water_reach(p)
@@ -1982,6 +2063,8 @@ impl Sowing {
                 let scale = rng.range(scale_lo, scale_hi);
                 let yaw = 360.0 * rng.unit();
                 let variant = self.pick_variant(variants, &cover, rng.unit());
+                // Tint after placement draws so palette rolls never steal yaw/scale.
+                let tint = prop_tint(class, &mut rng);
                 let y = (ground - class.bed_in() * scale) as f64;
                 let Ok(at) = p.with_height(y) else {
                     continue;
@@ -1991,6 +2074,7 @@ impl Sowing {
                     at,
                     yaw_deg: yaw,
                     scale,
+                    tint,
                 });
             }
         }
@@ -2037,6 +2121,7 @@ impl FarSowing {
             self.seed,
             self.surface.as_ref(),
             self.ponds.as_ref(),
+            &self.roads,
             focus,
             self.inner_m,
             self.outer_m,
@@ -2054,6 +2139,7 @@ fn sow_far_forest(
     seed: u64,
     surface: &ContinentalSurface,
     ponds: &PondField,
+    roads: &RoadClear,
     focus: GlobalXZ,
     inner_m: f64,
     outer_m: f64,
@@ -2082,6 +2168,9 @@ fn sow_far_forest(
                 continue;
             }
             let p = GlobalXZ::at(jx, jz);
+            if roads.blocks(p) {
+                continue;
+            }
 
             let far_from_water = surface
                 .water_reach(p)
@@ -2107,6 +2196,7 @@ fn sow_far_forest(
 
             let scale = rng.range(scale_lo, scale_hi);
             let yaw = 360.0 * rng.unit();
+            let tint = prop_tint(PropClass::Tree, &mut rng);
             let y = (ground - MEDIUM.sink_m - PropClass::Tree.bed_in() * scale) as f64;
             let Ok(at) = p.with_height(y) else {
                 continue;
@@ -2116,6 +2206,7 @@ fn sow_far_forest(
                 at,
                 yaw_deg: yaw,
                 scale,
+                tint,
             });
         }
     }
@@ -2240,10 +2331,225 @@ fn places_of(sprigs: &[Sprig], origin: RenderOrigin) -> Vec<Place> {
         places.push(
             Place::new(at.x, at.y, at.z)
                 .with_yaw_deg(sprig.yaw_deg)
-                .with_scale(sprig.scale),
+                .with_scale(sprig.scale)
+                .with_tint(sprig.tint),
         );
     }
     places
+}
+
+/// Chance a sprig picks a loud outlier paint instead of a mild stand tint.
+const PROP_OUTLIER_RATE: f32 = 0.012;
+
+/// Per-instance paint for shared prop meshes. Mild greens/greys most of the time;
+/// about one in eighty is a clear oddball so woods and scrub are not wallpaper.
+fn prop_tint(class: PropClass, rng: &mut CellRng) -> Color {
+    let outlier = rng.unit() < PROP_OUTLIER_RATE;
+    let roll = rng.unit();
+    if outlier {
+        prop_outlier_tint(class, roll)
+    } else {
+        prop_mild_tint(class, roll)
+    }
+}
+
+fn pick_palette(roll: f32, palettes: &[Color]) -> Color {
+    let n = palettes.len();
+    debug_assert!(n > 0);
+    let i = ((roll.clamp(0.0, 0.999_999) * n as f32) as usize).min(n - 1);
+    palettes[i]
+}
+
+fn prop_mild_tint(class: PropClass, roll: f32) -> Color {
+    match class {
+        PropClass::Tree | PropClass::Bush | PropClass::Reed | PropClass::Grass => pick_palette(
+            roll,
+            &[
+                Color::WHITE,
+                Color {
+                    r: 0.92,
+                    g: 1.0,
+                    b: 0.82,
+                    a: 1.0,
+                }, // lime
+                Color {
+                    r: 0.78,
+                    g: 0.92,
+                    b: 0.88,
+                    a: 1.0,
+                }, // blue-green
+                Color {
+                    r: 0.88,
+                    g: 0.90,
+                    b: 0.72,
+                    a: 1.0,
+                }, // olive
+                Color {
+                    r: 0.72,
+                    g: 0.88,
+                    b: 0.70,
+                    a: 1.0,
+                }, // deep leaf
+            ],
+        ),
+        PropClass::Rock | PropClass::Snag => pick_palette(
+            roll,
+            &[
+                Color::WHITE,
+                Color {
+                    r: 1.0,
+                    g: 0.94,
+                    b: 0.86,
+                    a: 1.0,
+                }, // warm stone
+                Color {
+                    r: 0.86,
+                    g: 0.90,
+                    b: 0.96,
+                    a: 1.0,
+                }, // cool grey
+                Color {
+                    r: 0.90,
+                    g: 0.86,
+                    b: 0.80,
+                    a: 1.0,
+                }, // dusty
+            ],
+        ),
+        PropClass::Mushroom | PropClass::Berry => pick_palette(
+            roll,
+            &[
+                Color::WHITE,
+                Color {
+                    r: 1.0,
+                    g: 0.90,
+                    b: 0.82,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.90,
+                    g: 0.86,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                Color {
+                    r: 1.0,
+                    g: 0.82,
+                    b: 0.88,
+                    a: 1.0,
+                },
+            ],
+        ),
+    }
+}
+
+fn prop_outlier_tint(class: PropClass, roll: f32) -> Color {
+    match class {
+        PropClass::Tree | PropClass::Bush => pick_palette(
+            roll,
+            &[
+                Color {
+                    r: 1.0,
+                    g: 0.55,
+                    b: 0.18,
+                    a: 1.0,
+                }, // autumn blaze
+                Color {
+                    r: 0.95,
+                    g: 0.82,
+                    b: 0.22,
+                    a: 1.0,
+                }, // gold
+                Color {
+                    r: 0.72,
+                    g: 0.35,
+                    b: 0.85,
+                    a: 1.0,
+                }, // violet oddity
+                Color {
+                    r: 0.35,
+                    g: 0.55,
+                    b: 0.95,
+                    a: 1.0,
+                }, // blue spruce freak
+                Color {
+                    r: 0.95,
+                    g: 0.28,
+                    b: 0.32,
+                    a: 1.0,
+                }, // crimson
+            ],
+        ),
+        PropClass::Grass | PropClass::Reed => pick_palette(
+            roll,
+            &[
+                Color {
+                    r: 1.0,
+                    g: 0.85,
+                    b: 0.25,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.55,
+                    g: 0.35,
+                    b: 0.90,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.95,
+                    g: 0.45,
+                    b: 0.20,
+                    a: 1.0,
+                },
+            ],
+        ),
+        PropClass::Rock | PropClass::Snag => pick_palette(
+            roll,
+            &[
+                Color {
+                    r: 1.0,
+                    g: 0.45,
+                    b: 0.28,
+                    a: 1.0,
+                }, // rust
+                Color {
+                    r: 0.95,
+                    g: 0.95,
+                    b: 1.0,
+                    a: 1.0,
+                }, // chalk
+                Color {
+                    r: 0.35,
+                    g: 0.32,
+                    b: 0.30,
+                    a: 1.0,
+                }, // charcoal
+            ],
+        ),
+        PropClass::Mushroom | PropClass::Berry => pick_palette(
+            roll,
+            &[
+                Color {
+                    r: 1.0,
+                    g: 0.15,
+                    b: 0.20,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.55,
+                    g: 0.20,
+                    b: 0.95,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.20,
+                    g: 0.85,
+                    b: 0.95,
+                    a: 1.0,
+                },
+            ],
+        ),
+    }
 }
 
 fn timed<T>(job: impl FnOnce() -> T) -> (T, f32) {
@@ -2406,18 +2712,21 @@ mod tests {
                 at: at(50.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
             Sprig {
                 variant: 0,
                 at: at(250.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
             Sprig {
                 variant: 1,
                 at: at(50.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
         ];
         let buckets = bucket_near_sprigs(sprigs);
@@ -2436,18 +2745,21 @@ mod tests {
                 at: at(50.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
             Sprig {
                 variant: 0,
                 at: at(250.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
             Sprig {
                 variant: 0,
                 at: at(1_050.0, 50.0),
                 yaw_deg: 0.0,
                 scale: 1.0,
+                tint: Color::WHITE,
             },
         ]);
         assert_eq!(sown.cells.len(), 3);
@@ -2488,13 +2800,18 @@ mod tests {
         assert!(PropClass::Grass.keep_fraction(100.0).is_none());
     }
 
+    fn empty_roads() -> RoadClear {
+        RoadClear { segs: Vec::new() }
+    }
+
     #[test]
     fn near_and_far_tree_bands_do_not_share_a_cell() {
         let (surface, ponds) = world(20260809);
         let focus = forested(&surface);
         let inner = 180.0;
         let outer = 420.0;
-        let far = sow_far_forest(7, &surface, &ponds, focus, inner, outer, 24.0);
+        let roads = empty_roads();
+        let far = sow_far_forest(7, &surface, &ponds, &roads, focus, inner, outer, 24.0);
         assert!(!far.is_empty(), "no far pines around a forested probe");
         for sprig in &far {
             let p = sprig.at.horizontal();
@@ -2511,7 +2828,8 @@ mod tests {
     fn far_pines_use_the_same_cover_field_as_the_ground_tint() {
         let (surface, ponds) = world(20260809);
         let focus = forested(&surface);
-        let far = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
+        let roads = empty_roads();
+        let far = sow_far_forest(7, &surface, &ponds, &roads, focus, 180.0, 420.0, 24.0);
         assert!(!far.is_empty());
         for sprig in &far {
             let p = sprig.at.horizontal();
@@ -2539,8 +2857,9 @@ mod tests {
     fn far_forest_sowing_is_deterministic() {
         let (surface, ponds) = world(20260809);
         let focus = forested(&surface);
-        let a = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
-        let b = sow_far_forest(7, &surface, &ponds, focus, 180.0, 420.0, 24.0);
+        let roads = empty_roads();
+        let a = sow_far_forest(7, &surface, &ponds, &roads, focus, 180.0, 420.0, 24.0);
+        let b = sow_far_forest(7, &surface, &ponds, &roads, focus, 180.0, 420.0, 24.0);
         let pos = |s: &[Sprig]| {
             s.iter()
                 .map(|s| (s.at.x.to_bits(), s.at.y.to_bits(), s.at.z.to_bits()))
@@ -2550,7 +2869,7 @@ mod tests {
         assert_ne!(
             pos(&a),
             pos(&sow_far_forest(
-                8, &surface, &ponds, focus, 180.0, 420.0, 24.0
+                8, &surface, &ponds, &roads, focus, 180.0, 420.0, 24.0
             )),
             "a different seed grew the same stand"
         );
@@ -2700,5 +3019,96 @@ mod tests {
     fn broadleaf_and_conifer_meshes_disagree_on_lineage() {
         assert!(PropTaste::of("pine_spruce_narrow").conifer > 0.9);
         assert!(PropTaste::of("oak_round_mature").conifer < 0.1);
+    }
+
+    #[test]
+    fn plant_cover_stays_off_the_road_bed() {
+        let roads = RoadClear {
+            segs: vec![
+                (Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), 2.95),
+                (Vec2::new(200.0, 0.0), Vec2::new(200.0, 40.0), 2.0),
+            ],
+        };
+        assert!(roads.blocks(GlobalXZ::at(50.0, 0.0)));
+        assert!(roads.blocks(GlobalXZ::at(50.0, 2.5)));
+        assert!(!roads.blocks(GlobalXZ::at(50.0, 4.0)));
+        assert!(roads.blocks(GlobalXZ::at(200.0, 20.0)));
+        assert!(!roads.blocks(GlobalXZ::at(205.0, 20.0)));
+        assert!(PropClass::Grass.skips_road());
+        assert!(PropClass::Tree.skips_road());
+        assert!(!PropClass::Rock.skips_road());
+    }
+
+    #[test]
+    fn prop_mild_tree_tints_are_visibly_apart() {
+        let mut colors = Vec::new();
+        for i in 0..5 {
+            colors.push(prop_mild_tint(PropClass::Tree, (i as f32 + 0.5) / 5.0));
+        }
+        let mut min_dist = f32::MAX;
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                let a = colors[i];
+                let b = colors[j];
+                let d = (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+                min_dist = min_dist.min(d);
+            }
+        }
+        assert!(
+            min_dist > 0.12,
+            "mild tree paints too close (min_dist={min_dist})"
+        );
+    }
+
+    #[test]
+    fn prop_outlier_trees_diverge_hard_from_white() {
+        let blaze = prop_outlier_tint(PropClass::Tree, 0.05);
+        let dist = (1.0 - blaze.r).abs() + (1.0 - blaze.g).abs() + (1.0 - blaze.b).abs();
+        assert!(dist > 0.8, "outlier too mild vs white (dist={dist})");
+    }
+
+    #[test]
+    fn prop_tint_outliers_are_rare() {
+        let mut outliers = 0usize;
+        const N: usize = 20_000;
+        for i in 0..N {
+            let mut rng = CellRng::new(0x7E57_u64, i as i64, (i / 17) as i64);
+            let tint = prop_tint(PropClass::Tree, &mut rng);
+            // Mild palettes stay near white; outliers sit far from (1,1,1).
+            let dist = (1.0 - tint.r).abs() + (1.0 - tint.g).abs() + (1.0 - tint.b).abs();
+            if dist > 0.7 {
+                outliers += 1;
+            }
+        }
+        let rate = outliers as f32 / N as f32;
+        assert!(
+            rate > 0.005 && rate < 0.03,
+            "outlier rate {rate} not near {PROP_OUTLIER_RATE}"
+        );
+    }
+
+    #[test]
+    fn places_of_keeps_sprig_tint() {
+        let origin = RenderOrigin::new(GlobalXZ::at(0.0, 0.0));
+        let tint = Color {
+            r: 1.0,
+            g: 0.55,
+            b: 0.18,
+            a: 1.0,
+        };
+        let sprigs = [Sprig {
+            variant: 0,
+            at: GlobalXZ::at(10.0, 20.0)
+                .with_height(5.0)
+                .expect("height"),
+            yaw_deg: 15.0,
+            scale: 1.2,
+            tint,
+        }];
+        let places = places_of(&sprigs, origin);
+        assert_eq!(places.len(), 1);
+        assert!((places[0].tint.r - tint.r).abs() < 1e-5);
+        assert!((places[0].tint.g - tint.g).abs() < 1e-5);
+        assert!((places[0].tint.b - tint.b).abs() < 1e-5);
     }
 }

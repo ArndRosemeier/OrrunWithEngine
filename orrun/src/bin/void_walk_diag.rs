@@ -107,6 +107,7 @@ fn main() {
                 &ponds.field(),
                 p,
                 &empty_plots,
+                &[],
                 rebased,
             )
             .expect("cover");

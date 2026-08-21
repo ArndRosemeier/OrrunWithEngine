@@ -33,6 +33,19 @@ const RIBBON_STEP_M: f32 = 2.0;
 const PRIMARY_WIDTH: f32 = 5.2;
 const SECONDARY_WIDTH: f32 = 3.6;
 const FOOT_WIDTH: f32 = 2.2;
+
+/// Full width of the drawn dirt ribbon for an atlas road class.
+///
+/// Matches the path bake: class 0 is the primary highway, every other class
+/// uses the secondary strip. Vegetation clears half of this plus a small pad
+/// so props do not hang over the bed.
+pub(crate) fn road_ribbon_width(class: i32) -> f32 {
+    if class == 0 {
+        PRIMARY_WIDTH
+    } else {
+        SECONDARY_WIDTH
+    }
+}
 const FORD_MAX_GAP_M: f32 = 8.0;
 const FORD_MAX_WET_M: f32 = 0.9;
 const MIN_SPAN_M: f32 = 4.0;
@@ -251,11 +264,7 @@ fn bake_paths(
         if !path_near(&road.points, focus, reach_sq) {
             continue;
         }
-        let width = if road.class == 0 {
-            PRIMARY_WIDTH
-        } else {
-            SECONDARY_WIDTH
-        };
+        let width = road_ribbon_width(road.class);
         for samples in sample_runs(surface, ponds, &road.points, focus2) {
             let spans = spans_along(&samples, width);
             let dry = dry_runs(&samples, &spans, hamlets);
