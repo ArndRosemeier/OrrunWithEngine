@@ -174,7 +174,7 @@ impl DoorLayer {
         let opening_out = door.opening_out();
         let door_out = world.spawn_anchored(opening.clone(), opening_out)?;
         world.in_space(space)?;
-        let layout = interior::assemble(&door.catalog_id, door.seed);
+        let layout = interior::assemble(door.brief, door.seed);
         let opening_in = house_place(door, layout.door_local);
         let door_in = world.spawn_anchored(opening, opening_in)?;
         let mut interior = spawn_layout(world, door, &layout)?;
@@ -553,7 +553,7 @@ mod tests {
     fn door_at(x: f64, z: f64, yaw: f32) -> HouseDoor {
         HouseDoor {
             id: 1,
-            catalog_id: "house_hut_thatch".into(),
+            brief: crate::hamlet::DwellingBrief::new(3, 2, 1, crate::hamlet::HouseTheme::Any),
             seed: 1,
             leaf_piece: "door_plank".into(),
             at: GlobalPosition::at(x, 1.0, z),
@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn indoor_doorway_collider_leaves_a_walkable_gap() {
         let door = door_at(0.0, 0.0, 180.0);
-        let layout = interior::assemble(&door.catalog_id, door.seed);
+        let layout = interior::assemble(door.brief, door.seed);
         let mut world = World::new();
         let space = world.space("test-house").expect("space");
         replace_interior_colliders(&mut world, space, &door, &layout);
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn portal_lands_on_the_room_side_of_the_door_wall() {
         let door = door_at(0.0, 0.0, 180.0);
-        let layout = interior::assemble(&door.catalog_id, door.seed);
+        let layout = interior::assemble(door.brief, door.seed);
         let mut world = World::new();
         let out = world
             .spawn_anchored(
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn long_portal_step_stops_at_the_far_wall() {
         let door = door_at(0.0, 0.0, 180.0);
-        let layout = interior::assemble(&door.catalog_id, door.seed);
+        let layout = interior::assemble(door.brief, door.seed);
         let mut world = World::new();
         let space = world.space("test-house").expect("space");
         replace_interior_colliders(&mut world, space, &door, &layout);

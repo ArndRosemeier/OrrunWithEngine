@@ -6,8 +6,12 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use super::castle;
-use super::catalog::{self, BuildingRole};
+use super::catalog;
 use super::config::{self, HamletLabConfig};
+use super::dwelling::{
+    footprints_fallback_order, max_footprint_depth_m, roll_footprint, roll_storeys, DwellingBrief,
+    HouseTheme, FOUNDATION_M,
+};
 use super::occupancy::{point_in_polygon, Occupancy};
 use super::seat::{self, Plot};
 use super::{HamletError, PlacedBuilding, Plan2D, Shape, ShapeKind};
@@ -53,6 +57,7 @@ pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan
         yaw: 0.0,
         radius: config.market_radius,
         catalog_id: String::new(),
+        dwelling: None,
         polygon: primary,
     });
 
@@ -66,14 +71,7 @@ pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan
         occ.stamp_polygon(poly);
     }
 
-    let dwelling_ids = catalog::ids_with_role(BuildingRole::Dwelling, config.tier);
-    if dwelling_ids.is_empty() {
-        return Err(HamletError::NoDwellings { tier: config.tier });
-    }
-    let max_depth = dwelling_ids
-        .iter()
-        .map(|id| catalog::spec_for(id).expect("catalog id").size_z)
-        .fold(0.0_f32, f32::max);
+    let max_depth = max_footprint_depth_m();
 
     let want_lo = config.dwelling_min.min(config.dwelling_max);
     let want_hi = config.dwelling_min.max(config.dwelling_max);
@@ -121,31 +119,21 @@ pub fn plan_on(config: &HamletLabConfig, plot: Option<&dyn Plot>) -> Result<Plan
     }
 
     for _ in 0..want {
-        let catalog_id = dwelling_ids[rng.gen_range(0..dwelling_ids.len())];
-        if let Some(new_r) = place_building(
+        if let Some(new_r) = place_dwelling(
             config,
             &mut out,
             &mut occ,
             &mut houses,
             &mut rng,
-            catalog_id,
             frontier_r,
             expand_step,
-            false,
             plot,
         )? {
             frontier_r = frontier_r.max(new_r);
         }
     }
 
-    out.house_count = houses
-        .iter()
-        .filter(|h| {
-            catalog::spec_for(&h.catalog_id)
-                .map(|s| s.is_dwelling())
-                .unwrap_or(false)
-        })
-        .count() as u32;
+    out.house_count = houses.iter().filter(|h| h.dwelling.is_some()).count() as u32;
 
     if out.house_count < out.want_count {
         out.underfill_message = format!(
@@ -306,6 +294,7 @@ fn place_castle(
         yaw: pick.yaw,
         radius: 0.0,
         catalog_id: catalog_id.to_string(),
+        dwelling: None,
         polygon: Vec::new(),
     });
     occ.stamp_obb(pick.center, pick.half_x, pick.half_z, pick.yaw, 0.0);
@@ -315,6 +304,7 @@ fn place_castle(
         half_z: pick.half_z,
         yaw: pick.yaw,
         catalog_id: catalog_id.to_string(),
+        dwelling: None,
     });
     plan.castle_count = 1;
     Ok(())
@@ -354,10 +344,82 @@ fn place_building(
     let spec = catalog::spec_for(catalog_id).ok_or_else(|| HamletError::UnknownCatalogId {
         id: catalog_id.to_string(),
     })?;
-    let half_x = spec.half_x();
-    let half_z = spec.half_z();
-    let yaw_offset = spec.yaw_offset;
+    try_place_obb(
+        config,
+        plan,
+        occ,
+        houses,
+        rng,
+        spec.half_x(),
+        spec.half_z(),
+        spec.yaw_offset,
+        spec.foundation_m,
+        frontier_r,
+        expand_step,
+        require_place,
+        None,
+        catalog_id,
+        plot,
+    )
+}
 
+fn place_dwelling(
+    config: &HamletLabConfig,
+    plan: &mut Plan2D,
+    occ: &mut Occupancy,
+    houses: &mut Vec<PlacedBuilding>,
+    rng: &mut ChaCha8Rng,
+    frontier_r: f32,
+    expand_step: f32,
+    plot: Option<&dyn Plot>,
+) -> Result<Option<f32>, HamletError> {
+    let preferred = roll_footprint(config.tier, rng);
+    let storeys = roll_storeys(rng);
+    let theme = HouseTheme::Any;
+    let order = footprints_fallback_order(preferred);
+    for &(cells_x, cells_z) in &order {
+        let brief = DwellingBrief::new(cells_x, cells_z, storeys, theme);
+        if let Some(r) = try_place_obb(
+            config,
+            plan,
+            occ,
+            houses,
+            rng,
+            brief.half_x(),
+            brief.half_z(),
+            0.0,
+            FOUNDATION_M,
+            frontier_r,
+            expand_step,
+            false,
+            Some(brief),
+            "",
+            plot,
+        )? {
+            return Ok(Some(r));
+        }
+    }
+    Ok(None)
+}
+
+/// Shared OBB placement for civics and dwellings.
+fn try_place_obb(
+    config: &HamletLabConfig,
+    plan: &mut Plan2D,
+    occ: &mut Occupancy,
+    houses: &mut Vec<PlacedBuilding>,
+    rng: &mut ChaCha8Rng,
+    half_x: f32,
+    half_z: f32,
+    yaw_offset: f32,
+    foundation_m: f32,
+    frontier_r: f32,
+    expand_step: f32,
+    require_place: bool,
+    dwelling: Option<DwellingBrief>,
+    catalog_id: &str,
+    plot: Option<&dyn Plot>,
+) -> Result<Option<f32>, HamletError> {
     let mut pick: Option<Candidate> = None;
     let mut local_max = frontier_r.min(config.max_settle_radius);
     let mut attempts = 0;
@@ -375,7 +437,7 @@ fn place_building(
             rng,
             half_x,
             half_z,
-            spec.foundation_m,
+            foundation_m,
             local_max,
             tries,
             plot,
@@ -389,7 +451,7 @@ fn place_building(
             half_x,
             half_z,
             yaw_offset,
-            spec.foundation_m,
+            foundation_m,
             local_max,
             tries,
             plot,
@@ -424,7 +486,13 @@ fn place_building(
     let Some(pick) = pick else {
         if require_place {
             return Err(HamletError::PlaceFailed {
-                catalog_id: catalog_id.to_string(),
+                catalog_id: if catalog_id.is_empty() {
+                    dwelling
+                        .map(|d| d.label())
+                        .unwrap_or_else(|| "dwelling".into())
+                } else {
+                    catalog_id.to_string()
+                },
             });
         }
         return Ok(None);
@@ -437,6 +505,7 @@ fn place_building(
         yaw: pick.yaw,
         radius: 0.0,
         catalog_id: catalog_id.to_string(),
+        dwelling,
         polygon: Vec::new(),
     });
     occ.stamp_obb(pick.center, pick.half_x, pick.half_z, pick.yaw, 0.0);
@@ -446,6 +515,7 @@ fn place_building(
         half_z: pick.half_z,
         yaw: pick.yaw,
         catalog_id: catalog_id.to_string(),
+        dwelling,
     });
     Ok(Some(frontier_r.max(local_max)))
 }
@@ -505,6 +575,7 @@ fn add_secondary_markets(
                 yaw: 0.0,
                 radius: child_r,
                 catalog_id: String::new(),
+                dwelling: None,
                 polygon: poly,
             });
             placed = true;

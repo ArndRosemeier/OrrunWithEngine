@@ -8,6 +8,8 @@ mod castle;
 pub(crate) mod castle_kit;
 mod catalog;
 mod config;
+mod dwelling;
+pub(crate) mod house_gen;
 pub(crate) mod interior;
 pub(crate) mod kit;
 mod occupancy;
@@ -20,6 +22,11 @@ mod tests;
 pub use castle::{id_for_tier as castle_id_for_tier, layout_for as castle_layout, CastleLayout};
 pub use catalog::{ids_with_role, spec_for, BuildingRole, BuildingSpec};
 pub use config::{tier_market_radius, tier_market_sides, HamletLabConfig, CIVIC_BY_TIER};
+pub use dwelling::{
+    footprints_fallback_order, max_footprint_depth_m, roll_footprint, roll_storeys, DwellingBrief,
+    HouseTheme, FOOTPRINTS, FOUNDATION_M, PITCH_XZ,
+};
+pub use house_gen::generate as generate_dwelling;
 pub use planner::{plan, plan_on};
 pub use seat::{
     accept, door_point, ground_score, sample_castle_footprint, sample_footprint, seat_building,
@@ -44,7 +51,10 @@ pub struct Shape {
     pub half_size: Vec2,
     pub yaw: f32,
     pub radius: f32,
+    /// Civic / castle catalog id. Empty for generated dwellings.
     pub catalog_id: String,
+    /// Set for village dwellings; `None` for civics and castles.
+    pub dwelling: Option<DwellingBrief>,
     pub polygon: Vec<Vec2>,
 }
 
@@ -74,12 +84,11 @@ pub struct PlacedBuilding {
     pub half_z: f32,
     pub yaw: f32,
     pub catalog_id: String,
+    pub dwelling: Option<DwellingBrief>,
 }
 
 #[derive(Debug, Error)]
 pub enum HamletError {
-    #[error("no dwelling forms for tier {tier}")]
-    NoDwellings { tier: u8 },
     #[error("unknown village catalog id '{id}'")]
     UnknownCatalogId { id: String },
     #[error("civic '{id}' min_tier {min_tier} > settlement tier {settlement_tier}")]

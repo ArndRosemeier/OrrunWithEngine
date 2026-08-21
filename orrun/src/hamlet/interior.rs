@@ -14,6 +14,8 @@ use modular::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
+use super::dwelling::{DwellingBrief, FOOTPRINTS};
+
 const INDOOR_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../Modular/catalogs/indoor.json"
@@ -100,34 +102,35 @@ pub struct InteriorLayout {
 }
 
 /// Assemble the indoor kit and decorate it. Loud if seams stay open.
-pub fn assemble(catalog_id: &str, seed: u64) -> InteriorLayout {
+pub fn assemble(brief: DwellingBrief, seed: u64) -> InteriorLayout {
+    brief.validate();
+    if !FOOTPRINTS.contains(&(brief.cells_x, brief.cells_z)) {
+        panic!(
+            "indoor kit has no layout for {}×{}",
+            brief.cells_x, brief.cells_z
+        );
+    }
     let catalog = catalog();
     let mut rng = StdRng::seed_from_u64(seed ^ 0x1D00_1100);
-    let (assembly, storeys, stair_cell) = match catalog_id {
-        "house_hut_thatch" => (assemble_hut(&catalog, &mut rng), 1, None),
-        "house_cabin_timber" => (assemble_cabin(&catalog, &mut rng), 1, None),
-        "house_cottage_stone" => assemble_cottage(&catalog, &mut rng),
-        "house_hall_large" => assemble_hall(&catalog, &mut rng),
-        other => panic!("'{other}' has no indoor recipe"),
-    };
+    let (assembly, storeys, stair_cell) = assemble_for(&catalog, brief, &mut rng);
     let open = assembly
         .unmated_seams()
-        .unwrap_or_else(|err| panic!("{catalog_id} indoor seams: {err}"));
+        .unwrap_or_else(|err| panic!("{} indoor seams: {err}", brief.label()));
     if !open.is_empty() {
-        panic!("{catalog_id} indoor kit has free seams: {open:?}");
+        panic!("{} indoor kit has free seams: {open:?}", brief.label());
     }
     let origin = footprint_shift(&catalog, &assembly);
     let mut pieces = assembly
         .places()
-        .unwrap_or_else(|err| panic!("{catalog_id} indoor places: {err}"));
+        .unwrap_or_else(|err| panic!("{} indoor places: {err}", brief.label()));
     shift_xz(&mut pieces, origin);
     let door_local = pieces
         .iter()
         .find(|item| item.piece.as_str() == "door")
         .map(|item| opening_place(&item.place))
-        .unwrap_or_else(|| panic!("{catalog_id} indoor kit has no exterior door"));
+        .unwrap_or_else(|| panic!("{} indoor kit has no exterior door", brief.label()));
     if storeys > 1 {
-        pieces.extend(cover_upper_floors(catalog_id, origin, &pieces, stair_cell));
+        pieces.extend(cover_upper_floors(brief, origin, &pieces, stair_cell));
     }
     let stair_local = stair_cell.map(|c| {
         Vec3::new(
@@ -136,7 +139,7 @@ pub fn assemble(catalog_id: &str, seed: u64) -> InteriorLayout {
             (c.z as f32 + 0.5) * CELL_M + origin.z,
         )
     });
-    let furniture = decorate(catalog_id, seed, storeys, stair_local);
+    let furniture = decorate(brief, seed, storeys, stair_local);
     let stair_local = stair_local.or_else(|| {
         furniture
             .iter()
@@ -328,201 +331,179 @@ fn stair_mesh() -> Mesh {
     mesh
 }
 
-fn assemble_hut<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> Assembly<'a> {
-    let mut assembly = Assembly::new(catalog);
-    let ring = ring_3x2(&mut assembly, catalog, rng, Cell::new(0, 0, 0)).expect("hut ring");
-    cap_ring(&mut assembly, &ring, "plinth", "ceiling").expect("hut cap");
-    assembly
-}
-
-fn assemble_cabin<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> Assembly<'a> {
-    // 3×2 has no free interior cell for a mated partition. Rooms are furniture.
-    assemble_hut(catalog, rng)
-}
-
-fn assemble_cottage<'a>(
+fn assemble_for<'a>(
     catalog: &'a Catalog,
+    brief: DwellingBrief,
     rng: &mut StdRng,
 ) -> (Assembly<'a>, u32, Option<Cell>) {
     let mut assembly = Assembly::new(catalog);
-    let ground = ring_3x2(&mut assembly, catalog, rng, Cell::new(0, 0, 0)).expect("cottage ground");
-    cap_down(&mut assembly, &ground, "plinth").expect("cottage plinth");
-    let upper = stack_ring_3x2(&mut assembly, catalog, rng, &ground).expect("cottage upper");
-    cap_up(&mut assembly, &upper, "ceiling").expect("cottage ceiling");
-    (assembly, 2, None)
+    let (ground, roles) = build_indoor_ring(
+        &mut assembly,
+        catalog,
+        rng,
+        Cell::new(0, 0, 0),
+        brief.cells_x,
+        brief.cells_z,
+    )
+    .expect("indoor ring");
+    cap_down(&mut assembly, &ground, "plinth").expect("indoor plinth");
+    let storeys = u32::from(brief.storeys);
+    let stair_cell = if brief.storeys >= 2 && brief.cells_x >= 3 && brief.cells_z >= 3 {
+        Some(Cell::new(1, 0, i32::from(brief.cells_z) - 2))
+    } else {
+        None
+    };
+    if let Some(stair_cell) = stair_cell {
+        let stair = assembly
+            .place(pid("stair"), stair_cell, YawQuarter::Deg0)
+            .expect("indoor stair");
+        assembly
+            .mate(stair, did("down"), pid("plinth"), did("up"))
+            .expect("stair plinth");
+        fill_indoor_floors(&mut assembly, brief, stair_cell).expect("indoor floors");
+        let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
+            .expect("indoor upper");
+        cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
+        assembly
+            .mate(stair, did("up"), pid("ceiling"), did("down"))
+            .expect("stair well cap");
+        (assembly, storeys, Some(stair_cell))
+    } else if brief.storeys >= 2 {
+        let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
+            .expect("indoor upper");
+        cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
+        (assembly, storeys, None)
+    } else {
+        cap_up(&mut assembly, &ground, "ceiling").expect("indoor ceiling");
+        (assembly, storeys, None)
+    }
 }
 
-fn assemble_hall<'a>(catalog: &'a Catalog, rng: &mut StdRng) -> (Assembly<'a>, u32, Option<Cell>) {
-    let mut assembly = Assembly::new(catalog);
-    let ground = ring_3x4(&mut assembly, catalog, rng, Cell::new(0, 0, 0)).expect("hall ground");
-    cap_down(&mut assembly, &ground, "plinth").expect("hall plinth");
-    let stair_cell = Cell::new(1, 0, 2);
-    let stair = assembly
-        .place(pid("stair"), stair_cell, YawQuarter::Deg0)
-        .expect("hall stair");
-    assembly
-        .mate(stair, did("down"), pid("plinth"), did("up"))
-        .expect("stair plinth");
-    let floor = assembly
-        .place(pid("floor"), Cell::new(1, 0, 1), YawQuarter::Deg0)
-        .expect("hall floor");
-    assembly
-        .mate(floor, did("down"), pid("plinth"), did("up"))
-        .expect("floor plinth");
-    let upper = stack_ring_3x4(&mut assembly, catalog, rng, &ground).expect("hall upper");
-    cap_up(&mut assembly, &upper, "ceiling").expect("hall ceiling");
-    assembly
-        .mate(stair, did("up"), pid("ceiling"), did("down"))
-        .expect("stair well cap");
-    let upper_floor = assembly
-        .mate(floor, did("up"), pid("floor"), did("down"))
-        .expect("upper hall floor");
-    assembly
-        .mate(upper_floor, did("up"), pid("ceiling"), did("down"))
-        .expect("upper floor ceiling");
-    (assembly, 2, Some(stair_cell))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RingRole {
+    Corner,
+    Straight,
+    Door,
 }
 
-fn ring_3x2(
+fn next_in_dock(role: RingRole) -> DockId {
+    match role {
+        RingRole::Corner => did("pos_z"),
+        RingRole::Straight | RingRole::Door => did("neg_x"),
+    }
+}
+
+fn build_indoor_ring(
     assembly: &mut Assembly<'_>,
     catalog: &Catalog,
     rng: &mut StdRng,
     origin: Cell,
-) -> ModularResult<[InstanceId; 6]> {
-    let corner = pick(catalog, "corner", rng);
-    let door = pick(catalog, "door", rng);
-    let north = pick(catalog, "straight", rng);
-    let sw = assembly.place(corner.clone(), origin, YawQuarter::Deg0)?;
-    let south = assembly.mate(sw, did("pos_x"), door, did("neg_x"))?;
-    let se = assembly.mate(south, did("pos_x"), corner.clone(), did("pos_z"))?;
-    let ne = assembly.mate(se, did("pos_x"), pick(catalog, "corner", rng), did("pos_z"))?;
-    let north_id = assembly.mate(ne, did("pos_x"), north, did("neg_x"))?;
-    let nw = assembly.mate(
-        north_id,
-        did("pos_x"),
-        pick(catalog, "corner", rng),
-        did("pos_z"),
-    )?;
-    assembly.join(nw, did("pos_x"), sw, did("pos_z"))?;
-    Ok([sw, south, se, ne, north_id, nw])
-}
-
-fn ring_3x4(
-    assembly: &mut Assembly<'_>,
-    catalog: &Catalog,
-    rng: &mut StdRng,
-    origin: Cell,
-) -> ModularResult<[InstanceId; 10]> {
-    let corner = pick(catalog, "corner", rng);
-    let door = pick(catalog, "door", rng);
-    let sw = assembly.place(corner.clone(), origin, YawQuarter::Deg0)?;
-    let south = assembly.mate(sw, did("pos_x"), door, did("neg_x"))?;
-    let se = assembly.mate(south, did("pos_x"), corner.clone(), did("pos_z"))?;
-    let e1 = assembly.mate(
-        se,
-        did("pos_x"),
-        pick(catalog, "straight", rng),
-        did("neg_x"),
-    )?;
-    let e2 = assembly.mate(
-        e1,
-        did("pos_x"),
-        pick(catalog, "straight", rng),
-        did("neg_x"),
-    )?;
-    let ne = assembly.mate(e2, did("pos_x"), pick(catalog, "corner", rng), did("pos_z"))?;
-    let north = assembly.mate(
-        ne,
-        did("pos_x"),
-        pick(catalog, "straight", rng),
-        did("neg_x"),
-    )?;
-    let nw = assembly.mate(
-        north,
-        did("pos_x"),
-        pick(catalog, "corner", rng),
-        did("pos_z"),
-    )?;
-    let w1 = assembly.mate(
-        nw,
-        did("pos_x"),
-        pick(catalog, "straight", rng),
-        did("neg_x"),
-    )?;
-    let w2 = assembly.mate(
-        w1,
-        did("pos_x"),
-        pick(catalog, "straight", rng),
-        did("neg_x"),
-    )?;
-    assembly.join(w2, did("pos_x"), sw, did("pos_z"))?;
-    Ok([sw, south, se, e1, e2, ne, north, nw, w1, w2])
-}
-
-fn stack_ring_3x2(
-    assembly: &mut Assembly<'_>,
-    catalog: &Catalog,
-    rng: &mut StdRng,
-    ground: &[InstanceId; 6],
-) -> ModularResult<[InstanceId; 6]> {
-    let mut upper = [ground[0]; 6];
-    for (i, &g) in ground.iter().enumerate() {
-        let piece = if i == 1 {
-            pick(catalog, "straight", rng)
-        } else if i == 0 || i == 2 || i == 3 || i == 5 {
-            pick(catalog, "corner", rng)
+    cells_x: u8,
+    cells_z: u8,
+) -> ModularResult<(Vec<InstanceId>, Vec<RingRole>)> {
+    let south_mids = usize::from(cells_x) - 2;
+    let east_mids = usize::from(cells_z) - 2;
+    let door_slot = south_mids / 2;
+    let mut roles = Vec::new();
+    roles.push(RingRole::Corner);
+    for i in 0..south_mids {
+        roles.push(if i == door_slot {
+            RingRole::Door
         } else {
-            pick(catalog, "straight", rng)
-        };
-        upper[i] = assembly.mate(g, did("up"), piece, did("down"))?;
+            RingRole::Straight
+        });
     }
-    assembly.join(upper[5], did("pos_x"), upper[0], did("pos_z"))?;
-    assembly.join(upper[0], did("pos_x"), upper[1], did("neg_x"))?;
-    assembly.join(upper[1], did("pos_x"), upper[2], did("pos_z"))?;
-    assembly.join(upper[2], did("pos_x"), upper[3], did("pos_z"))?;
-    assembly.join(upper[3], did("pos_x"), upper[4], did("neg_x"))?;
-    assembly.join(upper[4], did("pos_x"), upper[5], did("pos_z"))?;
+    roles.push(RingRole::Corner);
+    for _ in 0..east_mids {
+        roles.push(RingRole::Straight);
+    }
+    roles.push(RingRole::Corner);
+    for _ in 0..south_mids {
+        roles.push(RingRole::Straight);
+    }
+    roles.push(RingRole::Corner);
+    for _ in 0..east_mids {
+        roles.push(RingRole::Straight);
+    }
+
+    let piece_for = |role: RingRole, rng: &mut StdRng| -> PieceId {
+        match role {
+            RingRole::Corner => pick(catalog, "corner", rng),
+            RingRole::Straight => pick(catalog, "straight", rng),
+            RingRole::Door => pick(catalog, "door", rng),
+        }
+    };
+    let first = piece_for(roles[0], rng);
+    let mut ids = Vec::with_capacity(roles.len());
+    ids.push(assembly.place(first, origin, YawQuarter::Deg0)?);
+    for i in 1..roles.len() {
+        let piece = piece_for(roles[i], rng);
+        let id = assembly.mate(ids[i - 1], did("pos_x"), piece, next_in_dock(roles[i]))?;
+        ids.push(id);
+    }
+    assembly.join(
+        *ids.last().expect("ring"),
+        did("pos_x"),
+        ids[0],
+        did("pos_z"),
+    )?;
+    Ok((ids, roles))
+}
+
+fn stack_indoor_ring(
+    assembly: &mut Assembly<'_>,
+    catalog: &Catalog,
+    rng: &mut StdRng,
+    ground: &[InstanceId],
+    roles: &[RingRole],
+) -> ModularResult<Vec<InstanceId>> {
+    let mut upper = Vec::with_capacity(ground.len());
+    for (i, &g) in ground.iter().enumerate() {
+        let family = match roles[i] {
+            RingRole::Corner => "corner",
+            RingRole::Straight | RingRole::Door => "straight",
+        };
+        let piece = pick(catalog, family, rng);
+        upper.push(assembly.mate(g, did("up"), piece, did("down"))?);
+    }
+    let upper_roles: Vec<RingRole> = roles
+        .iter()
+        .map(|r| match r {
+            RingRole::Door => RingRole::Straight,
+            other => *other,
+        })
+        .collect();
+    for i in 0..upper.len() {
+        let next = (i + 1) % upper.len();
+        assembly.join(
+            upper[i],
+            did("pos_x"),
+            upper[next],
+            next_in_dock(upper_roles[next]),
+        )?;
+    }
     Ok(upper)
 }
 
-fn stack_ring_3x4(
+fn fill_indoor_floors(
     assembly: &mut Assembly<'_>,
-    catalog: &Catalog,
-    rng: &mut StdRng,
-    ground: &[InstanceId; 10],
-) -> ModularResult<[InstanceId; 10]> {
-    let mut upper = [ground[0]; 10];
-    for (i, &g) in ground.iter().enumerate() {
-        let piece = if i == 1 {
-            pick(catalog, "straight", rng)
-        } else if matches!(i, 0 | 2 | 5 | 7) {
-            pick(catalog, "corner", rng)
-        } else {
-            pick(catalog, "straight", rng)
-        };
-        upper[i] = assembly.mate(g, did("up"), piece, did("down"))?;
-    }
-    assembly.join(upper[9], did("pos_x"), upper[0], did("pos_z"))?;
-    assembly.join(upper[0], did("pos_x"), upper[1], did("neg_x"))?;
-    assembly.join(upper[1], did("pos_x"), upper[2], did("pos_z"))?;
-    assembly.join(upper[2], did("pos_x"), upper[3], did("neg_x"))?;
-    assembly.join(upper[3], did("pos_x"), upper[4], did("neg_x"))?;
-    assembly.join(upper[4], did("pos_x"), upper[5], did("pos_z"))?;
-    assembly.join(upper[5], did("pos_x"), upper[6], did("neg_x"))?;
-    assembly.join(upper[6], did("pos_x"), upper[7], did("pos_z"))?;
-    assembly.join(upper[7], did("pos_x"), upper[8], did("neg_x"))?;
-    assembly.join(upper[8], did("pos_x"), upper[9], did("neg_x"))?;
-    Ok(upper)
-}
-
-fn cap_ring(
-    assembly: &mut Assembly<'_>,
-    ring: &[InstanceId],
-    plinth: &str,
-    ceiling: &str,
+    brief: DwellingBrief,
+    stair_cell: Cell,
 ) -> ModularResult<()> {
-    cap_down(assembly, ring, plinth)?;
-    cap_up(assembly, ring, ceiling)
+    let max_x = i32::from(brief.cells_x) - 2;
+    let max_z = i32::from(brief.cells_z) - 2;
+    for x in 1..=max_x {
+        for z in 1..=max_z {
+            if x == stair_cell.x && z == stair_cell.z {
+                continue;
+            }
+            let ground = assembly.place(pid("floor"), Cell::new(x, 0, z), YawQuarter::Deg0)?;
+            assembly.mate(ground, did("down"), pid("plinth"), did("up"))?;
+            let upper = assembly.mate(ground, did("up"), pid("floor"), did("down"))?;
+            assembly.mate(upper, did("up"), pid("ceiling"), did("down"))?;
+        }
+    }
+    Ok(())
 }
 
 fn cap_down(assembly: &mut Assembly<'_>, ring: &[InstanceId], plinth: &str) -> ModularResult<()> {
@@ -561,12 +542,13 @@ fn shift_xz(places: &mut [PlacedMesh], origin: Vec3) {
 }
 
 fn cover_upper_floors(
-    catalog_id: &str,
+    brief: DwellingBrief,
     origin: Vec3,
     existing: &[PlacedMesh],
     stair_cell: Option<Cell>,
 ) -> Vec<PlacedMesh> {
-    let (cells_x, cells_z) = room_cells(catalog_id);
+    let cells_x = i32::from(brief.cells_x);
+    let cells_z = i32::from(brief.cells_z);
     let mut out = Vec::new();
     for x in 0..cells_x {
         for z in 0..cells_z {
@@ -592,16 +574,12 @@ fn cover_upper_floors(
     out
 }
 
-fn room_cells(catalog_id: &str) -> (i32, i32) {
-    if catalog_id == "house_hall_large" {
-        (3, 4)
-    } else {
-        (3, 2)
-    }
+fn room_cells(brief: DwellingBrief) -> (i32, i32) {
+    (i32::from(brief.cells_x), i32::from(brief.cells_z))
 }
 
-fn room_inner(catalog_id: &str) -> (f32, f32) {
-    let (cells_x, cells_z) = room_cells(catalog_id);
+fn room_inner(brief: DwellingBrief) -> (f32, f32) {
+    let (cells_x, cells_z) = room_cells(brief);
     (
         cells_x as f32 * CELL_M * 0.5 - WALL_T,
         cells_z as f32 * CELL_M * 0.5 - WALL_T,
@@ -618,31 +596,33 @@ enum Wall {
 
 /// Furniture sits on finished faces. Door is local −Z; keep that aisle clear.
 fn decorate(
-    catalog_id: &str,
+    brief: DwellingBrief,
     seed: u64,
     storeys: u32,
     stair_local: Option<Vec3>,
 ) -> Vec<PlacedMesh> {
     let _ = seed;
-    let (inner_x, inner_z) = room_inner(catalog_id);
+    let (inner_x, inner_z) = room_inner(brief);
     let ground = Room {
         inner_x,
         inner_z,
         y: 0.0,
     };
     let mut out = Vec::new();
-    out.push(ground.against(Wall::North, -2.4, "bed"));
-    out.push(ground.against(Wall::North, 2.6, "shelf"));
-    out.push(ground.against(Wall::East, 1.4, "hearth"));
-    out.push(ground.against(Wall::East, -2.2, "chest"));
-    out.push(ground.against(Wall::West, 1.3, "cupboard"));
-    out.push(ground.against(Wall::West, -2.0, "shelf"));
-    out.push(ground.open_floor("table", 0.9, 0.2));
-    out.push(ground.against(Wall::South, 2.5, "bench"));
-    if catalog_id == "house_hall_large" {
+    let margin_x = (inner_x - 0.8).max(0.5);
+    let margin_z = (inner_z - 0.8).max(0.5);
+    out.push(ground.against(Wall::North, (-2.4_f32).max(-margin_x), "bed"));
+    out.push(ground.against(Wall::North, 2.6_f32.min(margin_x), "shelf"));
+    out.push(ground.against(Wall::East, 1.4_f32.min(margin_z), "hearth"));
+    out.push(ground.against(Wall::East, (-2.2_f32).max(-margin_z), "chest"));
+    out.push(ground.against(Wall::West, 1.3_f32.min(margin_z), "cupboard"));
+    out.push(ground.against(Wall::West, (-2.0_f32).max(-margin_z), "shelf"));
+    out.push(ground.open_floor("table", 0.9_f32.min(inner_x - 1.0).max(0.0), 0.2));
+    out.push(ground.against(Wall::South, 2.5_f32.min(margin_x), "bench"));
+    if brief.cells_z >= 4 {
         out.push(ground.against(Wall::North, 0.0, "bench"));
-        out.push(ground.against(Wall::South, -2.5, "bench"));
-        out.push(ground.against(Wall::East, 3.8, "bench"));
+        out.push(ground.against(Wall::South, (-2.5_f32).max(-margin_x), "bench"));
+        out.push(ground.against(Wall::East, 3.8_f32.min(margin_z), "bench"));
         if let Some(stair) = stair_local {
             assert!(
                 stair.z > -1.2 || stair.x.abs() > 1.4,
@@ -656,12 +636,18 @@ fn decorate(
             inner_z,
             y: STOREY_M,
         };
-        out.push(upper.against(Wall::North, -2.2, "bed"));
-        out.push(upper.against(Wall::West, 0.4, "chest"));
-        out.push(upper.against(Wall::East, 0.8, "shelf"));
-        out.push(upper.against(Wall::South, 2.5, "bench"));
+        out.push(upper.against(Wall::North, (-2.2_f32).max(-margin_x), "bed"));
+        out.push(upper.against(Wall::West, 0.4_f32.min(margin_z), "chest"));
+        out.push(upper.against(Wall::East, 0.8_f32.min(margin_z), "shelf"));
+        out.push(upper.against(Wall::South, 2.5_f32.min(margin_x), "bench"));
         if stair_local.is_none() {
-            out.push(furn_at("stair", 2.2, 0.0, 1.6, 0.0));
+            out.push(furn_at(
+                "stair",
+                2.2_f32.min(inner_x - 1.0).max(0.5),
+                0.0,
+                1.6_f32.min(inner_z - 1.0).max(0.5),
+                0.0,
+            ));
         }
     }
     for item in &out {
@@ -722,46 +708,58 @@ fn assert_clear_of_door(item: &PlacedMesh) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hamlet::HouseTheme;
+
+    fn brief(cells_x: u8, cells_z: u8, storeys: u8) -> DwellingBrief {
+        DwellingBrief::new(cells_x, cells_z, storeys, HouseTheme::Any)
+    }
 
     #[test]
-    fn indoor_recipes_close_their_seams() {
-        for id in [
-            "house_hut_thatch",
-            "house_cabin_timber",
-            "house_cottage_stone",
-            "house_hall_large",
+    fn indoor_layouts_close_their_seams() {
+        for brief in [
+            brief(3, 2, 1),
+            brief(3, 2, 2),
+            brief(3, 4, 2),
+            brief(4, 3, 1),
+            brief(5, 4, 2),
         ] {
-            let layout = assemble(id, 7);
-            assert!(!layout.pieces.is_empty(), "{id} indoor kit placed nothing");
+            let layout = assemble(brief, 7);
+            assert!(
+                !layout.pieces.is_empty(),
+                "{} indoor kit placed nothing",
+                brief.label()
+            );
             assert!(
                 layout.furniture.iter().any(|p| p.piece.as_str() == "table"),
-                "{id} has no table"
+                "{} has no table",
+                brief.label()
             );
             assert!(
                 layout.furniture.iter().any(|p| p.piece.as_str() == "shelf"),
-                "{id} has no wall shelf"
+                "{} has no wall shelf",
+                brief.label()
             );
             assert!(
                 layout
                     .furniture
                     .iter()
                     .any(|p| p.piece.as_str() == "cupboard"),
-                "{id} has no cupboard"
+                "{} has no cupboard",
+                brief.label()
             );
-            let (inner_x, inner_z) = room_inner(id);
+            let (inner_x, inner_z) = room_inner(brief);
             for item in &layout.furniture {
                 if matches!(item.piece.as_str(), "table" | "stair") {
                     continue;
-                }
-                if item.place.position.y > 1.0 && item.piece.as_str() == "bench" {
-                    // upstairs south bench is still on a wall
                 }
                 let p = item.place.position;
                 let on_wall = p.x.abs() > inner_x - 1.1 || p.z.abs() > inner_z - 1.1;
                 assert!(
                     on_wall,
-                    "{id} {} sits in the room middle at {:?}",
-                    item.piece, p
+                    "{} {} sits in the room middle at {:?}",
+                    brief.label(),
+                    item.piece,
+                    p
                 );
             }
         }
@@ -769,7 +767,7 @@ mod tests {
 
     #[test]
     fn planked_floor_replaces_the_stretched_slab() {
-        let layout = assemble("house_hut_thatch", 7);
+        let layout = assemble(brief(3, 2, 1), 7);
         assert!(
             layout
                 .pieces
@@ -795,7 +793,7 @@ mod tests {
 
     #[test]
     fn hall_keeps_a_stair_off_the_door() {
-        let layout = assemble("house_hall_large", 3);
+        let layout = assemble(brief(3, 4, 2), 3);
         let stair = layout.stair_local.expect("hall stair");
         assert!(
             stair.z > -1.0,
@@ -806,7 +804,7 @@ mod tests {
 
     #[test]
     fn portal_pose_uses_the_authored_door_wall() {
-        let layout = assemble("house_hut_thatch", 7);
+        let layout = assemble(brief(3, 2, 1), 7);
         assert!(layout.door_local.position.x.abs() < 1e-4);
         assert!(
             (layout.door_local.position.z - (-4.0 + WALL_T * 0.5)).abs() < 1e-4,

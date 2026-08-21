@@ -116,7 +116,7 @@ impl HamletLab {
                 ShapeKind::Market => {}
                 ShapeKind::Castle => self.draw_castle(painter, origin, shape),
                 ShapeKind::House => {
-                    let color = catalog_color(&shape.catalog_id);
+                    let color = house_color(shape);
                     self.draw_obb(
                         painter,
                         origin,
@@ -222,6 +222,30 @@ impl HamletLab {
             .map(|p| self.world_to_panel(origin, *p))
             .collect();
         painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+    }
+}
+
+fn house_color(shape: &Shape) -> Color32 {
+    if !shape.catalog_id.is_empty() {
+        return catalog_color(&shape.catalog_id);
+    }
+    let Some(brief) = shape.dwelling else {
+        return Color32::from_rgb(190, 150, 110);
+    };
+    let area = u16::from(brief.cells_x) * u16::from(brief.cells_z);
+    let base = match area {
+        0..=6 => Color32::from_rgb(196, 168, 120),
+        7..=12 => Color32::from_rgb(178, 142, 104),
+        _ => Color32::from_rgb(150, 118, 88),
+    };
+    if brief.storeys >= 2 {
+        Color32::from_rgb(
+            base.r().saturating_sub(24),
+            base.g().saturating_sub(18),
+            base.b().saturating_sub(12),
+        )
+    } else {
+        base
     }
 }
 
@@ -384,11 +408,16 @@ fn main() {
                     lab.plan.castle_count,
                     lab.plan.markets.len()
                 ));
-                if lab.plan.castle_count > 0 {
-                    if let Some(shape) =
-                        lab.plan.shapes.iter().find(|s| s.kind == ShapeKind::Castle)
-                    {
-                        ui.label(shape.catalog_id.as_str());
+                let mut sizes = std::collections::BTreeMap::<String, u32>::new();
+                for shape in &lab.plan.shapes {
+                    if let Some(brief) = shape.dwelling {
+                        *sizes.entry(brief.label()).or_default() += 1;
+                    }
+                }
+                if !sizes.is_empty() {
+                    ui.label("dwellings by size×storeys:");
+                    for (label, count) in sizes {
+                        ui.label(format!("  {label}: {count}"));
                     }
                 }
                 ui.label(format!("envelope {:.1} m", lab.plan.built_envelope));

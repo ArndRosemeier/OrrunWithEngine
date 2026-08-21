@@ -31,8 +31,8 @@ use super::world_stream::{WorldStream, NEAR};
 use crate::hamlet::castle_kit;
 use crate::hamlet::kit::{self, KitError};
 use crate::hamlet::{
-    castle_layout, plan_on, spec_for, HamletError, HamletLabConfig, Plan2D, Plot, Shape, ShapeKind,
-    DOOR_SINK_M,
+    castle_layout, generate_dwelling, plan_on, spec_for, DwellingBrief, HamletError, HamletLabConfig,
+    Plan2D, Plot, Shape, ShapeKind, DOOR_SINK_M, FOUNDATION_M,
 };
 
 /// How far from the player a pin still gets a layout. Sized with the walked ring.
@@ -118,7 +118,7 @@ struct YardPose {
 #[derive(Clone, Debug)]
 pub struct HouseDoor {
     pub id: u64,
-    pub catalog_id: String,
+    pub brief: DwellingBrief,
     pub seed: u64,
     pub leaf_piece: String,
     pub at: GlobalPosition,
@@ -233,7 +233,6 @@ struct Packing {
     ground: ContactSnapshot,
     piece_ids: Vec<PieceId>,
     castle_piece_ids: Vec<PieceId>,
-    dwelling_recipes: Arc<kit::DwellingRecipes>,
     castle_recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
 }
 
@@ -250,7 +249,6 @@ struct Pending {
 pub struct SettlementLayer {
     pieces: Vec<PieceProto>,
     castle_pieces: Vec<PieceProto>,
-    dwelling_recipes: Arc<kit::DwellingRecipes>,
     castle_recipes: Arc<HashMap<String, Vec<PlacedMesh>>>,
     well: EntityId,
     seed: i32,
@@ -274,8 +272,6 @@ pub struct SettlementLayer {
 impl SettlementLayer {
     /// Upload kit piece meshes and the well once; nothing is seated yet.
     pub fn install(world: &mut World, seed: i32) -> Result<Self, SettlementError> {
-        let catalog = kit::catalog();
-        let dwelling_recipes = Arc::new(kit::DwellingRecipes::roll(&catalog)?);
         let pieces = spawn_batches(world, kit::PIECE_GLBS, kit::load_piece_mesh)?;
         let castle_catalog = castle_kit::catalog();
         let castle_recipes = castle_kit::castle_recipes(&castle_catalog)?;
@@ -286,7 +282,6 @@ impl SettlementLayer {
         Ok(Self {
             pieces,
             castle_pieces,
-            dwelling_recipes,
             castle_recipes: Arc::new(castle_recipes),
             well,
             seed,
@@ -461,7 +456,6 @@ impl SettlementLayer {
                         .iter()
                         .map(|batch| batch.piece.clone())
                         .collect(),
-                    dwelling_recipes: Arc::clone(&self.dwelling_recipes),
                     castle_recipes: Arc::clone(&self.castle_recipes),
                 };
                 self.pending = Some(Pending {
@@ -780,7 +774,6 @@ impl Packing {
                 &self.piece_ids,
                 &self.castle_piece_ids,
                 self.seed,
-                &self.dwelling_recipes,
                 &self.castle_recipes,
                 &mut standing,
                 &mut houses,
@@ -968,12 +961,7 @@ fn filter_houses_on_cut(plan: &mut Plan2D, pin: SettlementPin, cut: &[Vec2]) -> 
     plan.house_count = plan
         .shapes
         .iter()
-        .filter(|s| {
-            s.kind == ShapeKind::House
-                && spec_for(&s.catalog_id)
-                    .map(|spec| spec.is_dwelling())
-                    .unwrap_or(false)
-        })
+        .filter(|s| s.kind == ShapeKind::House && s.dwelling.is_some())
         .count() as u32;
     plan.house_count
 }
@@ -1032,7 +1020,6 @@ fn seat_plan(
     piece_ids: &[PieceId],
     castle_piece_ids: &[PieceId],
     world_seed: i32,
-    dwelling_recipes: &kit::DwellingRecipes,
     castle_recipes: &HashMap<String, Vec<PlacedMesh>>,
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
@@ -1046,6 +1033,7 @@ fn seat_plan(
         origin: pin.at,
         roads: nearby_road_segs(surface, pin.at, layout_config(pin).max_settle_radius + 24.0),
     };
+    let catalog = kit::catalog();
     for shape in &plan.shapes {
         match shape.kind {
             ShapeKind::Market => continue,
@@ -1063,9 +1051,9 @@ fn seat_plan(
                 shape,
                 pin,
                 &plot,
+                &catalog,
                 piece_ids,
                 world_seed,
-                dwelling_recipes,
                 out,
                 houses,
                 plots,
@@ -1079,14 +1067,31 @@ fn seat_house(
     shape: &Shape,
     pin: SettlementPin,
     plot: &GroundPlot<'_>,
+    catalog: &modular::prelude::Catalog,
     piece_ids: &[PieceId],
     world_seed: i32,
-    dwelling_recipes: &kit::DwellingRecipes,
     out: &mut Vec<Standing>,
     houses: &mut Vec<GlobalXZ>,
     plots: &mut Vec<BuildingPlot>,
     doors: &mut Vec<HouseDoor>,
 ) {
+    if let Some(brief) = shape.dwelling {
+        seat_dwelling(
+            shape,
+            brief,
+            pin,
+            plot,
+            catalog,
+            piece_ids,
+            world_seed,
+            out,
+            houses,
+            plots,
+            doors,
+        );
+        return;
+    }
+
     let Some(spec) = spec_for(&shape.catalog_id) else {
         panic!(
             "planned building '{}' is not in the catalog",
@@ -1121,10 +1126,44 @@ fn seat_house(
     if spec.is_civic() {
         return;
     }
+    panic!(
+        "house shape '{}' has no dwelling brief and is not a civic",
+        shape.catalog_id
+    );
+}
+
+fn seat_dwelling(
+    shape: &Shape,
+    brief: DwellingBrief,
+    pin: SettlementPin,
+    plot: &GroundPlot<'_>,
+    catalog: &modular::prelude::Catalog,
+    piece_ids: &[PieceId],
+    world_seed: i32,
+    out: &mut Vec<Standing>,
+    houses: &mut Vec<GlobalXZ>,
+    plots: &mut Vec<BuildingPlot>,
+    doors: &mut Vec<HouseDoor>,
+) {
+    let sample = crate::hamlet::sample_footprint(
+        plot,
+        shape.center,
+        shape.half_size.x,
+        shape.half_size.y,
+        shape.yaw,
+    );
+    let Some(seat) = crate::hamlet::seat_building(&sample, FOUNDATION_M) else {
+        return;
+    };
+    let yaw_deg = shape.yaw.to_degrees();
+    let x = pin.at.x + f64::from(shape.center.x);
+    let z = pin.at.z + f64::from(shape.center.y);
+    houses.push(GlobalXZ::at(x, z));
 
     let seed = house_seed(world_seed, pin.id, shape.center.x, shape.center.y);
     let tint = house_tint(seed);
-    let recipe = dwelling_recipes.get(spec.id, seed);
+    let places = generate_dwelling(catalog, brief, seed)
+        .unwrap_or_else(|err| panic!("dwelling {} failed: {err}", brief.label()));
     let floor_y = seat.floor_z - DOOR_SINK_M;
     plots.push(BuildingPlot::House(HousePlot {
         at: GlobalXZ::at(x, z),
@@ -1134,7 +1173,7 @@ fn seat_house(
         floor_y,
     }));
     let id = door_key(pin.id, x, z);
-    for item in recipe {
+    for item in &places {
         let p = item.place.position;
         let (dx, dz) = kit::yaw_xz(p.x, p.z, yaw_deg);
         let index = piece_ids
@@ -1150,7 +1189,7 @@ fn seat_house(
         if leaf {
             doors.push(HouseDoor {
                 id,
-                catalog_id: spec.id.to_string(),
+                brief,
                 seed,
                 leaf_piece: item.piece.to_string(),
                 at,
@@ -1801,6 +1840,7 @@ mod tests {
                     yaw: 0.0,
                     radius: 8.0,
                     catalog_id: "castle_keep_8x6".into(),
+                    dwelling: None,
                     polygon: Vec::new(),
                 },
                 Shape {
@@ -1809,7 +1849,13 @@ mod tests {
                     half_size: Vec2::new(4.0, 3.0),
                     yaw: 0.0,
                     radius: 4.0,
-                    catalog_id: "Cottage_A".into(),
+                    catalog_id: String::new(),
+                    dwelling: Some(crate::hamlet::DwellingBrief::new(
+                        3,
+                        2,
+                        1,
+                        crate::hamlet::HouseTheme::Any,
+                    )),
                     polygon: Vec::new(),
                 },
                 Shape {
@@ -1818,7 +1864,13 @@ mod tests {
                     half_size: Vec2::new(4.0, 3.0),
                     yaw: 0.0,
                     radius: 4.0,
-                    catalog_id: "Cottage_A".into(),
+                    catalog_id: String::new(),
+                    dwelling: Some(crate::hamlet::DwellingBrief::new(
+                        3,
+                        2,
+                        1,
+                        crate::hamlet::HouseTheme::Any,
+                    )),
                     polygon: Vec::new(),
                 },
             ],

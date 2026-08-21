@@ -1,17 +1,12 @@
-//! Village footprints. Dwellings are Modular medieval kit recipes; civics keep lab sizes.
+//! Village footprints for civics and castles. Dwellings use [`DwellingBrief`].
+
+use super::dwelling::FOUNDATION_M;
 
 /// Storey/plinth cell height from `catalogs/medieval.json`.
-const KIT_STOREY_M: f32 = 2.7;
-/// 3×2 ring at 4 m pitch: door on the long (−Z) wall.
-const COTTAGE_SIZE_X: f32 = 12.0;
-const COTTAGE_SIZE_Z: f32 = 8.0;
-/// 3×4 ring at 4 m pitch: same door wall, two extra cells of depth.
-const HALL_SIZE_X: f32 = 12.0;
-const HALL_SIZE_Z: f32 = 16.0;
+pub const KIT_STOREY_M: f32 = FOUNDATION_M;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildingRole {
-    Dwelling,
     Civic,
     Castle,
 }
@@ -37,10 +32,6 @@ impl BuildingSpec {
         self.size_z * 0.5
     }
 
-    pub fn is_dwelling(self) -> bool {
-        self.role == BuildingRole::Dwelling
-    }
-
     pub fn is_civic(self) -> bool {
         self.role == BuildingRole::Civic
     }
@@ -51,42 +42,6 @@ impl BuildingSpec {
 }
 
 const SPECS: &[BuildingSpec] = &[
-    BuildingSpec {
-        id: "house_hut_thatch",
-        role: BuildingRole::Dwelling,
-        min_tier: 0,
-        size_x: COTTAGE_SIZE_X,
-        size_z: COTTAGE_SIZE_Z,
-        yaw_offset: 0.0,
-        foundation_m: KIT_STOREY_M,
-    },
-    BuildingSpec {
-        id: "house_cabin_timber",
-        role: BuildingRole::Dwelling,
-        min_tier: 0,
-        size_x: COTTAGE_SIZE_X,
-        size_z: COTTAGE_SIZE_Z,
-        yaw_offset: 0.0,
-        foundation_m: KIT_STOREY_M,
-    },
-    BuildingSpec {
-        id: "house_cottage_stone",
-        role: BuildingRole::Dwelling,
-        min_tier: 0,
-        size_x: COTTAGE_SIZE_X,
-        size_z: COTTAGE_SIZE_Z,
-        yaw_offset: 0.0,
-        foundation_m: KIT_STOREY_M,
-    },
-    BuildingSpec {
-        id: "house_hall_large",
-        role: BuildingRole::Dwelling,
-        min_tier: 1,
-        size_x: HALL_SIZE_X,
-        size_z: HALL_SIZE_Z,
-        yaw_offset: 0.0,
-        foundation_m: KIT_STOREY_M,
-    },
     BuildingSpec {
         id: "Well",
         role: BuildingRole::Civic,

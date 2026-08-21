@@ -47,19 +47,30 @@ fn hamlet_tier0_places_well_and_dwellings() {
     );
 
     let mut saw_well = false;
+    let mut footprints = std::collections::HashSet::new();
     for s in &plan.shapes {
         if s.kind != ShapeKind::House {
+            continue;
+        }
+        if let Some(brief) = s.dwelling {
+            assert!((s.half_size.x * 2.0 - brief.size_x()).abs() < 1e-4);
+            assert!((s.half_size.y * 2.0 - brief.size_z()).abs() < 1e-4);
+            footprints.insert((brief.cells_x, brief.cells_z));
             continue;
         }
         let spec = catalog::spec_for(&s.catalog_id).expect("catalog");
         assert!((s.half_size.x * 2.0 - spec.size_x).abs() < 1e-4);
         assert!((s.half_size.y * 2.0 - spec.size_z).abs() < 1e-4);
-        assert!(spec.is_dwelling() || spec.is_civic());
+        assert!(spec.is_civic());
         if s.catalog_id == "Well" {
             saw_well = true;
         }
     }
     assert!(saw_well);
+    assert!(
+        footprints.len() >= 2,
+        "expected mixed footprints, got {footprints:?}"
+    );
 }
 
 #[test]
@@ -116,6 +127,7 @@ fn same_seed_is_deterministic() {
     for (sa, sb) in a.shapes.iter().zip(b.shapes.iter()) {
         assert_eq!(sa.kind, sb.kind);
         assert_eq!(sa.catalog_id, sb.catalog_id);
+        assert_eq!(sa.dwelling, sb.dwelling);
         assert!((sa.center - sb.center).length() < 1e-5);
         assert!((sa.yaw - sb.yaw).abs() < 1e-5);
     }
@@ -134,11 +146,17 @@ fn houses_do_not_overlap() {
         .collect();
     for i in 0..houses.len() {
         for j in (i + 1)..houses.len() {
+            let label_i = houses[i]
+                .dwelling
+                .map(|d| d.label())
+                .unwrap_or_else(|| houses[i].catalog_id.clone());
+            let label_j = houses[j]
+                .dwelling
+                .map(|d| d.label())
+                .unwrap_or_else(|| houses[j].catalog_id.clone());
             assert!(
                 !house_obb_overlap(houses[i], houses[j]),
-                "overlap {} vs {}",
-                houses[i].catalog_id,
-                houses[j].catalog_id
+                "overlap {label_i} vs {label_j}"
             );
         }
     }
@@ -149,7 +167,7 @@ fn higher_tier_has_more_market_sides() {
     assert!(super::tier_market_sides(0) < super::tier_market_sides(1));
     assert!(super::tier_market_sides(1) < super::tier_market_sides(2));
     assert_eq!(super::tier_market_sides(3), 24);
-    assert!(!catalog::ids_with_role(BuildingRole::Dwelling, 0).is_empty());
+    assert!(!catalog::ids_with_role(BuildingRole::Civic, 0).is_empty());
 }
 
 fn castle_cfg(tier: u8, seed: u64) -> HamletLabConfig {
@@ -247,11 +265,17 @@ fn houses_do_not_overlap_the_castle() {
     assert!(buildings.iter().any(|s| s.kind == ShapeKind::Castle));
     for i in 0..buildings.len() {
         for j in (i + 1)..buildings.len() {
+            let label_i = buildings[i]
+                .dwelling
+                .map(|d| d.label())
+                .unwrap_or_else(|| buildings[i].catalog_id.clone());
+            let label_j = buildings[j]
+                .dwelling
+                .map(|d| d.label())
+                .unwrap_or_else(|| buildings[j].catalog_id.clone());
             assert!(
                 !house_obb_overlap(buildings[i], buildings[j]),
-                "overlap {} vs {}",
-                buildings[i].catalog_id,
-                buildings[j].catalog_id
+                "overlap {label_i} vs {label_j}"
             );
         }
     }
@@ -398,4 +422,25 @@ fn plan_on_water_cannot_place_the_well() {
     cfg.seed = 1;
     let err = super::plan_on(&cfg, Some(&Wet)).expect_err("well cannot sit in water");
     assert!(err.to_string().contains("Well"), "{err}");
+}
+
+#[test]
+fn dwelling_storeys_include_both_heights() {
+    let mut cfg = HamletLabConfig::default();
+    cfg.apply_tier_defaults(1);
+    cfg.seed = 21;
+    cfg.dwelling_min = 40;
+    cfg.dwelling_max = 40;
+    let plan = plan(&cfg).expect("plan");
+    let mut one = 0u32;
+    let mut two = 0u32;
+    for s in &plan.shapes {
+        match s.dwelling.map(|d| d.storeys) {
+            Some(1) => one += 1,
+            Some(2) => two += 1,
+            _ => {}
+        }
+    }
+    assert!(one > 0, "expected some 1-storey houses");
+    assert!(two > 0, "expected some 2-storey houses");
 }
