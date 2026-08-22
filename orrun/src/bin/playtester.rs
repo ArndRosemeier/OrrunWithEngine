@@ -96,8 +96,20 @@ fn main() {
         "incoming.png",
         "camp.json",
         "camp.png",
+        "door.json",
+        "door.png",
         "status.json",
         "status.png",
+        "pip.json",
+        "pip.png",
+        "con.json",
+        "con.png",
+        "con_hard.json",
+        "con_hard.png",
+        "nameplate.json",
+        "nameplate.png",
+        "cd_sweep.json",
+        "cd_sweep.png",
     ] {
         let _ = fs::remove_file(shots.join(name));
     }
@@ -184,6 +196,9 @@ fn main() {
         site_kind: None,
         site_melee_at: None,
         village_speed_sample: None,
+        pending_interact: false,
+        door_interact_sent: false,
+        door_stand: None,
     };
 
     driver.write_running_report();
@@ -370,6 +385,10 @@ enum Phase {
     VillageLive,
     CampTravel,
     CampLive,
+    DoorTravel,
+    DoorApproach,
+    DoorOpen,
+    DoorLive,
     CairnTravel,
     CairnLive,
     HutTravel,
@@ -439,7 +458,11 @@ struct Driver {
     site_kind: Option<SiteKind>,
     site_melee_at: Option<f32>,
     village_speed_sample: Option<(f64, f64, f32)>,
+    pending_interact: bool,
+    door_interact_sent: bool,
+    door_stand: Option<GlobalXZ>,
 }
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ControlsStage {
@@ -513,9 +536,13 @@ impl Driver {
                 | Some("cast_bar")
                 | Some("incoming")
                 | Some("status")
+                | Some("pip")
+                | Some("con")
+                | Some("con_hard")
+                | Some("nameplate")
         );
         if paint_combat_hud {
-            draw_combat_hud(&self.session, frame);
+            draw_combat_hud(&self.session, world, frame);
         }
         if matches!(
             self.phase,
@@ -533,7 +560,7 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" || name == "village" {
+                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" || name == "village" || name == "door" || name == "pip" || name == "con" || name == "con_hard" || name == "nameplate" {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -839,7 +866,7 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
-            Phase::VillageTravel | Phase::CampTravel | Phase::CairnTravel | Phase::HutTravel => {
+            Phase::VillageTravel | Phase::CampTravel | Phase::DoorTravel | Phase::CairnTravel | Phase::HutTravel => {
                 input.skip_travel = true;
             }
             Phase::CairnLive | Phase::HutLive => {
@@ -908,8 +935,27 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
+            Phase::DoorApproach => {
+                if self.session.locomotion() == Some(Locomotion::Fly) {
+                    input.toggle_fly = true;
+                }
+                if let (Some(stand), Some(pos)) = (self.door_stand, self.session.player_position()) {
+                    input = walk_toward(pos.horizontal(), stand, dt);
+                    input.yaw_delta_degrees = self.pending_yaw_delta;
+                    input.pitch_delta_degrees = self.pending_pitch_delta;
+                }
+            }
+            Phase::DoorOpen | Phase::DoorLive => {
+                if self.session.locomotion() == Some(Locomotion::Fly) {
+                    input.toggle_fly = true;
+                }
+                input.interact = self.pending_interact;
+                input.yaw_delta_degrees = self.pending_yaw_delta;
+                input.pitch_delta_degrees = self.pending_pitch_delta;
+            }
             _ => {}
         }
+        self.pending_interact = false;
         input
     }
 
@@ -969,6 +1015,10 @@ impl Driver {
             Phase::VillageLive => self.tick_village_live(world, frame),
             Phase::CampTravel => self.tick_camp_travel(world, frame),
             Phase::CampLive => self.tick_camp_live(world, frame),
+            Phase::DoorTravel => self.tick_door_travel(world, frame),
+            Phase::DoorApproach => self.tick_door_approach(world, frame),
+            Phase::DoorOpen => self.tick_door_open(world, frame),
+            Phase::DoorLive => self.tick_door_live(world, frame),
             Phase::CairnTravel | Phase::HutTravel => self.tick_site_travel(world, frame),
             Phase::CairnLive | Phase::HutLive => self.tick_site_live(world, frame),
             Phase::NextHook => {
@@ -993,7 +1043,8 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" | "pip" | "con" | "nameplate" => self.start_combat(world, frame),
+            "con_hard" => self.start_combat_yeti(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
             "loot_sparkle" => self.start_loot_sparkle(world, frame),
@@ -1009,6 +1060,7 @@ impl Driver {
             "controls" => self.start_controls(world, frame),
             "village" => self.start_village(world, frame),
             "camp" => self.start_camp(world, frame),
+            "door" => self.start_door(world, frame),
             "cairn" | "taken_cairn" | "overworld_cairn" => {
                 self.start_site(world, frame, SiteKind::TakenCairn)
             }
@@ -2781,6 +2833,43 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
+        if self.current_hook() == Some("con_hard") {
+            let combat = self.session.combat();
+            let player_level = combat.player.stats.level;
+            let Some(h) = combat.hostiles.iter().find(|h| Some(h.idx) == combat.lock) else {
+                self.fail_current("con_hard: locked yeti missing");
+                self.advance_after_fail(world, frame);
+                return;
+            };
+            let band = orrun::combat::con_band(player_level, h.level);
+            let (r, g, b) = band.rgb();
+            if band != orrun::combat::ConBand::Red {
+                self.fail_current(&format!(
+                    "con_hard: L{player_level} vs yeti L{} want red, got {}",
+                    h.level,
+                    band.as_str()
+                ));
+                self.advance_after_fail(world, frame);
+                return;
+            }
+            self.write_json(
+                "con_hard",
+                json!({
+                    "status": "ok",
+                    "shot": "con_hard.png",
+                    "player_level": player_level,
+                    "mob_level": h.level,
+                    "mob_name": name,
+                    "con": band.as_str(),
+                    "name_rgba": [r, g, b, 255],
+                }),
+            );
+            self.ok_hook("con_hard");
+            world.mark_ready();
+            self.queue_shot(world, frame, "con_hard");
+            self.phase = Phase::NextHook;
+            return;
+        }
         if !self.session.incoming_hit() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat_yeti: incoming Punch never landed");
@@ -3159,6 +3248,133 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
+    fn tick_pip(&mut self, world: &mut World, frame: &Frame) {
+        self.aim_at_wolf_line();
+        if !self.session.attack_pip() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("pip: attack pip never opened after lock");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.write_json(
+            "pip",
+            json!({
+                "status": "ok",
+                "pip_on": true,
+                "shot": "pip.png",
+            }),
+        );
+        self.ok_hook("pip");
+        world.mark_ready();
+        self.queue_shot(world, frame, "pip");
+        self.phase = Phase::NextHook;
+    }
+
+    fn tick_con(&mut self, world: &mut World, frame: &Frame) {
+        self.aim_at_wolf_line();
+        let Some((name, hp)) = self.session.lock_name_hp() else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("con: lock name/hp unset");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let combat = self.session.combat();
+        let player_level = combat.player.stats.level;
+        let Some(h) = combat.hostiles.iter().find(|h| Some(h.idx) == combat.lock && h.alive) else {
+            self.fail_current("con: locked hostile missing");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let band = orrun::combat::con_band(player_level, h.level);
+        let (r, g, b) = band.rgb();
+        if band != orrun::combat::ConBand::White {
+            self.fail_current(&format!(
+                "con: L1 vs L{} {} want white, got {}",
+                h.level,
+                name,
+                band.as_str()
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if hp <= 0.0 {
+            self.fail_current("con: locked target is dead");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.write_json(
+            "con",
+            json!({
+                "status": "ok",
+                "shot": "con.png",
+                "player_level": player_level,
+                "mob_level": h.level,
+                "mob_name": name,
+                "con": band.as_str(),
+                "name_rgba": [r, g, b, 255],
+            }),
+        );
+        self.ok_hook("con");
+        world.mark_ready();
+        self.queue_shot(world, frame, "con");
+        self.phase = Phase::NextHook;
+    }
+
+    fn tick_nameplate(&mut self, world: &mut World, frame: &Frame) {
+        self.aim_at_wolf_line();
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let aspect = frame.aspect.max(0.1);
+        let view_proj = world.camera.view_projection(aspect);
+        let plates = hud::nameplate_report(
+            self.session.combat(),
+            eye,
+            view_proj,
+            frame.width as f32,
+            frame.height as f32,
+        );
+        let on_screen: Vec<_> = plates.iter().filter(|p| p.on_screen).collect();
+        if on_screen.len() < 2 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "nameplate: want >=2 on-screen plates, got {} (total {})",
+                    on_screen.len(),
+                    plates.len()
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let report: Vec<_> = on_screen
+            .iter()
+            .map(|p| {
+                json!({
+                    "name": p.name,
+                    "level": p.level,
+                    "con": p.con,
+                    "on_screen": p.on_screen,
+                })
+            })
+            .collect();
+        self.write_json(
+            "nameplate",
+            json!({
+                "status": "ok",
+                "shot": "nameplate.png",
+                "plate_count": on_screen.len(),
+                "plates": report,
+            }),
+        );
+        self.ok_hook("nameplate");
+        world.mark_ready();
+        self.queue_shot(world, frame, "nameplate");
+        self.phase = Phase::NextHook;
+    }
+
     fn tick_cast_bar(&mut self, world: &mut World, frame: &Frame) {
         if self.combat_cast_bar_at.is_none() {
             let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
@@ -3481,6 +3697,18 @@ impl Driver {
         }
         if self.current_hook() == Some("cast_bar") {
             self.tick_cast_bar(world, frame);
+            return;
+        }
+        if self.current_hook() == Some("pip") {
+            self.tick_pip(world, frame);
+            return;
+        }
+        if self.current_hook() == Some("con") {
+            self.tick_con(world, frame);
+            return;
+        }
+        if self.current_hook() == Some("nameplate") {
+            self.tick_nameplate(world, frame);
             return;
         }
         match self.session.first_auto_hit() {
@@ -4104,6 +4332,22 @@ impl Driver {
                 dist / elapsed.max(1e-4)
             }
         };
+        let configured = WorldSession::village_walk_mps();
+        if !(1.2..=1.5).contains(&configured) {
+            self.fail_current(&format!(
+                "village: configured walk_mps={configured} outside human band [1.2, 1.5]"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        if (measured_mps - configured).abs() > 0.35 {
+            self.fail_current(&format!(
+                "village: sampled walk {measured_mps:.2} m/s vs configured {configured} (band ±0.35)"
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        // Layer speed_mps is a single-frame reading (pause/hitch can dip); JSON only.
         let horiz = stand.distance(person.horizontal());
         let high_enough = (pos.y - cam.y).abs() < 1.6;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
@@ -4111,7 +4355,7 @@ impl Driver {
         let looking = village_look(&self.session).is_some_and(|(eye, target)| {
             view_angle_degrees(eye, yaw, pitch, target) < 16.0
         });
-        if horiz > 5.5 || !high_enough || !looking {
+        if horiz > 5.5 || !high_enough || !looking || pitch > 2.0 {
             self.village_speed_sample = None;
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
@@ -4318,10 +4562,314 @@ impl Driver {
         self.phase = Phase::NextHook;
     }
 
+    fn start_door(&mut self, world: &mut World, frame: &Frame) {
+        self.door_interact_sent = false;
+        self.door_stand = None;
+        self.pending_interact = false;
+        let from = self
+            .session
+            .player_position()
+            .map(|p| p.horizontal())
+            .or_else(|| self.session.spawn().map(|s| s.ground()))
+            .unwrap_or(GlobalXZ::at(0.0, 0.0));
+        let Some(pin) = self.session.nearest_tier0_pin(from) else {
+            self.fail_current("door: no tier-0 pin on this atlas");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let dist = pin.at.distance(from);
+        if dist > 80.0 || self.session.state() != SessionState::World {
+            match WorldEntryRequest::at_global(self.session.surface().bounds(), pin.at) {
+                Ok(request) => match self.session.begin_entry(world, request) {
+                    Ok(()) => {
+                        self.phase = Phase::DoorTravel;
+                        self.phase_t0 = frame.time;
+                    }
+                    Err(err) => {
+                        self.fail_current(&format!("door entry failed: {err}"));
+                        self.advance_after_fail(world, frame);
+                    }
+                },
+                Err(err) => {
+                    self.fail_current(&format!("door pin is not a valid entry: {err}"));
+                    self.advance_after_fail(world, frame);
+                }
+            }
+        } else {
+            self.phase = Phase::DoorApproach;
+            self.phase_t0 = frame.time;
+        }
+    }
+
+    fn tick_door_travel(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() == SessionState::World {
+            self.phase = Phase::DoorApproach;
+            self.phase_t0 = frame.time;
+            return;
+        }
+        if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+            self.fail_current("door: timed out travelling to the hamlet");
+            self.advance_after_fail(world, frame);
+        }
+    }
+
+    fn tick_door_approach(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.state() != SessionState::World {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: never reached World");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        if !self.session.stream().required_ready(pos.horizontal()) {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: required_ready stayed false");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let doors = self.session.village_doors();
+        if doors.is_empty() {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: seated hamlet has no house doors");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(door) = self.session.nearest_village_door(pos.horizontal()).filter(|d| {
+            // Prefer a ground-floor leaf; loft doors put the stand in thatch.
+            let ground = self
+                .session
+                .contact_height(d.outside_stand())
+                .unwrap_or(d.floor_y);
+            (d.floor_y - ground).abs() < 1.5
+        }).or_else(|| {
+            self.session.village_doors().iter().find(|d| {
+                let ground = self
+                    .session
+                    .contact_height(d.outside_stand())
+                    .unwrap_or(d.floor_y);
+                (d.floor_y - ground).abs() < 1.5
+            })
+        }) else {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: no ground-floor house door on this hamlet");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        };
+        let stand = door.outside_stand();
+        let look = door.look_target();
+        let floor_y = door.floor_y;
+        self.door_stand = Some(stand);
+        self.aim_at_door_look(look);
+        let horiz = pos.horizontal().distance(stand);
+        if horiz > 0.55 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("door: never reached outside stand (horiz={horiz:.1})"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        if view_angle_degrees(eye, yaw, pitch, look) > 18.0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: never faced the leaf");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        // Feet must be near door floor, not up in thatch.
+        if (pos.y as f32 - floor_y).abs() > 1.2 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "door: feet at y={:.1} vs floor_y={floor_y:.1} (in the roof?)",
+                    pos.y
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.session.door_hint() != Some("E open") {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "door: expected E open hint, got {:?}",
+                    self.session.door_hint()
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.phase = Phase::DoorOpen;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_door_open(&mut self, world: &mut World, frame: &Frame) {
+        self.aim_at_nearest_door();
+        if !self.door_interact_sent {
+            self.pending_interact = true;
+            self.door_interact_sent = true;
+            return;
+        }
+        // Wait for the leaf to open (hint flips to close) before walking in.
+        if self.session.door_hint() != Some("E close") {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "door: interact never opened (hint={:?})",
+                    self.session.door_hint()
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let Some(door) = self.session.nearest_village_door(pos.horizontal()) else {
+            self.fail_current("door: door lost after open");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        // Stay on the street: Reviewer shot faces the open leaf, not the loft.
+        self.door_stand = Some(door.outside_stand());
+        self.phase = Phase::DoorLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn tick_door_live(&mut self, world: &mut World, frame: &Frame) {
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let Some(door) = self
+            .session
+            .village_doors()
+            .iter()
+            .find(|d| {
+                let ground = self
+                    .session
+                    .contact_height(d.outside_stand())
+                    .unwrap_or(d.floor_y);
+                (d.floor_y - ground).abs() < 1.5
+                    && d.outside_stand().distance(pos.horizontal()) < 8.0
+            })
+            .or_else(|| self.session.nearest_village_door(pos.horizontal()))
+        else {
+            self.fail_current("door: no door for street shot");
+            self.advance_after_fail(world, frame);
+            return;
+        };
+        let stand = door.outside_stand();
+        let look = door.look_target();
+        let floor_y = door.floor_y;
+        let door_count = self.session.village_doors().len();
+        self.door_stand = Some(stand);
+        let horiz = pos.horizontal().distance(stand);
+        if horiz > 0.7 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("door: never sat on street stand (horiz={horiz:.1})"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if (pos.y as f32 - floor_y).abs() > 1.2 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "door: street feet at y={:.1} vs floor_y={floor_y:.1} (roof?)",
+                    pos.y
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        self.aim_at_door_look(look);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        if view_angle_degrees(eye, yaw, pitch, look) > 18.0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current("door: never faced the open leaf");
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if pitch > 8.0 {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!("door: pitch={pitch:.1} looks into the roof"));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if self.session.door_hint() != Some("E close") {
+            if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                self.fail_current(&format!(
+                    "door: want open leaf, hint={:?}",
+                    self.session.door_hint()
+                ));
+                self.advance_after_fail(world, frame);
+            }
+            return;
+        }
+        if !self.session.house_portal_live() {
+            self.fail_current("door: portal not live after open");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.write_json(
+            "door",
+            json!({
+                "status": "ok",
+                "street_shot": true,
+                "portal_live": true,
+                "door_count": door_count,
+                "hint": self.session.door_hint(),
+                "pose": {
+                    "x": pos.x,
+                    "y": pos.y,
+                    "z": pos.z,
+                    "yaw_degrees": yaw,
+                    "pitch_degrees": pitch,
+                },
+            }),
+        );
+        self.ok_hook("door");
+        world.mark_ready();
+        self.queue_shot(world, frame, "door");
+        self.phase = Phase::NextHook;
+    }
+
+    fn aim_at_door_look(&mut self, target: Vec3) {
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+        let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+        let (dyaw, dpitch) = look_deltas(eye, target, yaw, pitch);
+        self.pending_yaw_delta = dyaw;
+        self.pending_pitch_delta = dpitch;
+    }
+
+    fn aim_at_nearest_door(&mut self) {
+        let Some(pos) = self.session.player_position() else {
+            return;
+        };
+        let Some(door) = self.session.nearest_village_door(pos.horizontal()) else {
+            return;
+        };
+        self.aim_at_door_look(door.look_target());
+    }
+
     fn start_site(&mut self, world: &mut World, frame: &Frame, kind: SiteKind) {
         self.site_kind = Some(kind);
         self.site_melee_at = None;
         self.combat_tab_sent = false;
+        // Combat fixtures set skip_roster_pins; leave that mode before seating bandits.
+        self.session.restore_overland_sites(world);
         let name = kind.as_str();
         let site = self.session.overland_site(kind).or_else(|| {
             let pins = self.session.surface().settlements();
@@ -4462,6 +5010,26 @@ impl Driver {
             }
             return;
         }
+        if kind == SiteKind::TakenCairn {
+            let sites = if self.session.overland_sites().is_empty() {
+                let pins = self.session.surface().settlements();
+                let hamlets = self.session.hamlets();
+                orrun::world::plan_overland_sites(self.session.surface(), pins, hamlets)
+            } else {
+                self.session.overland_sites().to_vec()
+            };
+            let want = orrun::world::expected_overland_prop_count(&sites);
+            let props = self.session.site_prop_count();
+            if props < want {
+                if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
+                    self.fail_current(&format!(
+                        "cairn: want {want} overland props (menhir stamp + hut), got {props}"
+                    ));
+                    self.advance_after_fail(world, frame);
+                }
+                return;
+            }
+        }
         self.aim_site(site);
         let Some(stand) = site_camera_stand(&self.session, Some(kind)) else {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -4530,6 +5098,11 @@ impl Driver {
                 "bandits": bandit_n,
                 "bandit_gap_m": gap,
                 "props": self.session.site_prop_count(),
+                "menhir_height_m": if kind == SiteKind::TakenCairn {
+                    Some(orrun::world::CAIRN_MENHIR_HEIGHT_M)
+                } else {
+                    None
+                },
                 "pose": {
                     "x": pos.x,
                     "y": pos.y,
@@ -5014,11 +5587,12 @@ fn site_camera_stand(session: &WorldSession, kind: Option<SiteKind>) -> Option<G
             let yaw = site.yaw_deg.to_radians();
             let fx = f64::from(yaw.sin());
             let fz = f64::from(yaw.cos());
+            // Closer stand so the stacked pile fills the frame (not a distant crate).
             let cands = [
-                GlobalXZ::at(site.at.x - fx * 11.0, site.at.z - fz * 11.0),
-                GlobalXZ::at(site.at.x + fx * 11.0, site.at.z + fz * 11.0),
-                GlobalXZ::at(site.at.x - fz * 11.0, site.at.z + fx * 11.0),
-                GlobalXZ::at(site.at.x + fz * 11.0, site.at.z - fx * 11.0),
+                GlobalXZ::at(site.at.x - fx * 9.5, site.at.z - fz * 9.5),
+                GlobalXZ::at(site.at.x + fx * 9.5, site.at.z + fz * 9.5),
+                GlobalXZ::at(site.at.x - fz * 9.5, site.at.z + fx * 9.5),
+                GlobalXZ::at(site.at.x + fz * 9.5, site.at.z - fx * 9.5),
             ];
             *cands
                 .iter()
@@ -5044,7 +5618,11 @@ fn site_look(session: &WorldSession, site: OverlandSite) -> Option<(Vec3, Vec3)>
     let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
     let ground = session.surface().column(site.at).ground();
     let (tx, ty, tz) = match site.kind {
-        SiteKind::TakenCairn => (site.at.x as f32, ground + 1.05, site.at.z as f32),
+        SiteKind::TakenCairn => (
+            site.at.x as f32,
+            ground + orrun::world::CAIRN_MENHIR_HEIGHT_M * 0.78,
+            site.at.z as f32,
+        ),
         SiteKind::WoodsHut => {
             let (dx, dz) = yaw_xz(0.15, -0.7, site.yaw_deg);
             (
@@ -5059,20 +5637,30 @@ fn site_look(session: &WorldSession, site: OverlandSite) -> Option<(Vec3, Vec3)>
 
 fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {
     let person = session.village_corridor_human()?;
+    // Prefer the yard camp stand when the walker is in the plaza — dirt ribbon
+    // + houses + tent, not a stilt dock looking through trees.
+    if let Some(stand) = session.village_camp_stand() {
+        if stand.horizontal().distance(person.horizontal()) <= 8.5 {
+            return Some(stand);
+        }
+    }
     let cut = session.village_cut();
     let at = person.horizontal();
     let (dx, dz) = if cut.len() >= 2 {
         let a = cut[0];
         let b = cut[cut.len() - 1];
-        let tx = b.x - a.x;
-        let tz = b.y - a.y;
+        let tx = f64::from(b.x - a.x);
+        let tz = f64::from(b.y - a.y);
         let len = (tx * tx + tz * tz).sqrt().max(1e-6);
-        // Three-quarter: off the road a few metres, not a top-down speck.
-        ((-tz / len) * 3.6, (tx / len) * 3.6)
+        let ux = tx / len;
+        let uz = tz / len;
+        let toward_well = (f64::from(b.x) - at.x) * ux + (f64::from(b.y) - at.z) * uz;
+        let back = if toward_well >= 0.0 { -1.0 } else { 1.0 };
+        (ux * 2.8 * back + (-uz) * 3.6, uz * 2.8 * back + ux * 3.6)
     } else {
         (3.6, 0.0)
     };
-    let stand = GlobalXZ::at(at.x + f64::from(dx), at.z + f64::from(dz));
+    let stand = GlobalXZ::at(at.x + dx, at.z + dz);
     let contact = session
         .contact_height(stand)
         .unwrap_or(person.y as f32);
@@ -5084,7 +5672,8 @@ fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     let at = person.horizontal();
     let pos = session.player_position()?;
     let eye = Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
-    let target = Vec3::new(at.x as f32, person.y as f32 + 1.2, at.z as f32);
+    // Chest height, not scalp — positive pitch put the tree canopy in frame.
+    let target = Vec3::new(at.x as f32, person.y as f32 + 0.85, at.z as f32);
     Some((eye, target))
 }
 
@@ -5117,7 +5706,7 @@ fn view_angle_degrees(eye: Vec3, yaw: f32, pitch: f32, target: Vec3) -> f32 {
     look.dot(to).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
+fn draw_combat_hud(session: &WorldSession, world: &World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
     let hp = session.player_hp();
     let hp_max = session.player_hp_max().max(1.0);
@@ -5204,6 +5793,11 @@ fn draw_combat_hud(session: &WorldSession, frame: &Frame) {
                 });
         });
     hud::draw_hotbar_and_log(&ctx, session.combat(), session.key_binds());
+    if let Some(pos) = session.player_position() {
+        let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
+        let view_proj = world.camera.view_projection(frame.aspect.max(0.1));
+        hud::draw_nameplates(&ctx, session.combat(), eye, view_proj);
+    }
 }
 
 fn copy_combat_wav(shots: &PathBuf, name: &str) -> String {

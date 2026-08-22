@@ -109,14 +109,27 @@ impl VillagerLayer {
         if cut.len() < 2 {
             return None;
         }
-        self.people.iter().find_map(|p| {
-            let q = Vec2::new(p.pos.x as f32, p.pos.z as f32);
-            if dist_to_polyline(q, cut) < CORRIDOR_M {
-                Some(p.pos)
-            } else {
-                None
-            }
-        })
+        // Prefer a walker in the yard (near the well end). Far spur walkers
+        // made village.png a riverside skyline instead of lived-in dirt.
+        const YARD_M: f32 = 16.0;
+        let plaza = *cut.last().unwrap();
+        self.people
+            .iter()
+            .filter_map(|p| {
+                let q = Vec2::new(p.pos.x as f32, p.pos.z as f32);
+                if dist_to_polyline(q, cut) < CORRIDOR_M {
+                    let d = q.distance(plaza);
+                    if d <= YARD_M {
+                        Some((d, p.pos))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, pos)| pos)
     }
 
     pub fn mesh_count(&self, world: &World) -> usize {

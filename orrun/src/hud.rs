@@ -3,8 +3,9 @@
 use engine::egui::{self, Color32, Sense, StrokeKind};
 use engine::world::World;
 use engine::Frame;
+use glam::{Vec3, Vec4};
 
-use crate::combat::WorldCombat;
+use crate::combat::{con_band, WorldCombat};
 use crate::controls::{Action, KeyBinds};
 
 const HOTBAR: [Action; 9] = [
@@ -152,6 +153,9 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     } else {
         Color32::from_rgb(40, 180, 64)
     };
+    let band = con_band(combat.player.stats.level, h.level);
+    let (nr, ng, nb) = band.rgb();
+    let name_color = Color32::from_rgb(nr, ng, nb);
     let screen = ctx.screen_rect();
     let x = (screen.width() * 0.5 - 110.0).max(12.0);
     egui::Area::new(egui::Id::new("target_frame"))
@@ -163,9 +167,9 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(&h.name)
+                        egui::RichText::new(format!("{}  ({})", h.name, band.as_str()))
                             .size(16.0)
-                            .color(Color32::from_rgb(240, 210, 80)),
+                            .color(name_color),
                     );
                     ui.add(
                         egui::ProgressBar::new(frac)
@@ -175,6 +179,94 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
                     );
                 });
         });
+}
+
+/// One on-screen nameplate for playtester JSON and HUD draw.
+#[derive(Clone, Debug)]
+pub struct NameplateInfo {
+    pub name: String,
+    pub level: i32,
+    pub con: &'static str,
+    pub on_screen: bool,
+    pub screen_x: f32,
+    pub screen_y: f32,
+}
+
+const NAMEPLATE_RANGE_M: f64 = 28.0;
+
+/// Nearby living hostiles projected to screen. Locked target is included.
+pub fn nameplate_report(
+    combat: &WorldCombat,
+    eye: Vec3,
+    view_proj: glam::Mat4,
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<NameplateInfo> {
+    let mut out = Vec::new();
+    for h in &combat.hostiles {
+        if !h.alive {
+            continue;
+        }
+        let dx = h.x - f64::from(eye.x);
+        let dz = h.z - f64::from(eye.z);
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist > NAMEPLATE_RANGE_M {
+            continue;
+        }
+        let band = con_band(combat.player.stats.level, h.level);
+        let world = Vec4::new(h.x as f32, 1.55, h.z as f32, 1.0);
+        let clip = view_proj * world;
+        if clip.w.abs() < 1e-5 {
+            continue;
+        }
+        let ndc = clip.truncate() / clip.w;
+        let on_screen = ndc.z >= 0.0 && ndc.z <= 1.0 && ndc.x.abs() <= 1.05 && ndc.y.abs() <= 1.05;
+        let sx = (ndc.x * 0.5 + 0.5) * screen_w;
+        let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * screen_h;
+        out.push(NameplateInfo {
+            name: h.name.clone(),
+            level: h.level,
+            con: band.as_str(),
+            on_screen,
+            screen_x: sx,
+            screen_y: sy,
+        });
+    }
+    out
+}
+
+pub fn draw_nameplates(
+    ctx: &egui::Context,
+    combat: &WorldCombat,
+    eye: Vec3,
+    view_proj: glam::Mat4,
+) {
+    if combat.dead {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let plates = nameplate_report(combat, eye, view_proj, screen.width(), screen.height());
+    for (i, plate) in plates.iter().enumerate() {
+        if !plate.on_screen {
+            continue;
+        }
+        let band = con_band(combat.player.stats.level, plate.level);
+        let (r, g, b) = band.rgb();
+        let color = Color32::from_rgb(r, g, b);
+        let x = plate.screen_x - 40.0;
+        let y = plate.screen_y - 28.0;
+        egui::Area::new(egui::Id::new(("nameplate", i)))
+            .fixed_pos(egui::pos2(x, y))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}  {}", plate.name, plate.level))
+                        .size(13.0)
+                        .color(color),
+                );
+            });
+    }
 }
 
 pub fn draw_cast_bar(ctx: &egui::Context, combat: &WorldCombat) {

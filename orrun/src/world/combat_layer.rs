@@ -38,8 +38,10 @@ const STRAFE_M: f64 = 1.8;
 const FLINCH_S: f32 = 4.0;
 const FLINCH_PEAK: f32 = 1.32;
 const RING_LIFT_M: f64 = 0.14;
-const RING_MAJOR_M: f32 = 2.55;
-const RING_MINOR_M: f32 = 0.22;
+/// Keep the lock tell on one body. Wolves/bandits sit ±1.8 m; a 2.55 m major
+/// wrapped the whole pack and broke "one lock = one body".
+const RING_MAJOR_M: f32 = 0.95;
+const RING_MINOR_M: f32 = 0.16;
 /// Small chest tell. Not the 3.7 m ground carpet (half 1.85).
 const SPARKLE_HALF_M: f32 = 0.34;
 /// Prone-orc torso above the Death-posed mesh feet.
@@ -74,6 +76,8 @@ pub enum CombatSfx {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureKind {
+    /// No published pack; overland sites may seat.
+    None,
     WolfLine,
     Orc,
     Bones,
@@ -140,7 +144,7 @@ impl CombatLayer {
             mesh_anchors: Vec::new(),
             wolf_model: None,
             models: HashMap::new(),
-            fixture_kind: FixtureKind::WolfLine,
+            fixture_kind: FixtureKind::None,
             pending_melee: None,
             skull_tele: HashMap::new(),
             mage_tele: HashMap::new(),
@@ -202,6 +206,12 @@ impl CombatLayer {
     /// Playtester HOLD rearms stay fixture-only: no overland sites, no roster pins.
     pub fn skip_roster_pins(&mut self) {
         self.skip_roster_pins = true;
+    }
+
+    /// Leave fixture-only mode so overland sites can seat again.
+    pub fn allow_roster_pins(&mut self) {
+        self.skip_roster_pins = false;
+        self.fixture_kind = FixtureKind::None;
     }
 
     /// Keep current hostiles. Next world tick will not reseat the wolf line.
@@ -579,6 +589,7 @@ impl CombatLayer {
                 slow_s: 0.0,
                 root_s: 0.0,
                 name: sheet.name.clone(),
+                level: sheet.level,
                 mob_id: sheet.id.clone(),
                 entity: None,
                 damage: sheet.damage,
@@ -648,6 +659,7 @@ impl CombatLayer {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
+            level: sheet.level,
             mob_id: "orc".into(),
             entity: None,
             damage: sheet.damage,
@@ -724,6 +736,7 @@ impl CombatLayer {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
+            level: sheet.level,
             mob_id: "yeti".into(),
             entity: None,
             damage: sheet.damage,
@@ -800,6 +813,7 @@ impl CombatLayer {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
+            level: sheet.level,
             mob_id: "demon".into(),
             entity: None,
             damage: sheet.damage,
@@ -876,6 +890,7 @@ impl CombatLayer {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
+            level: sheet.level,
             mob_id: "blue_demon".into(),
             entity: None,
             damage: sheet.damage,
@@ -953,6 +968,7 @@ impl CombatLayer {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
+            level: sheet.level,
             mob_id: "tribal_veteran".into(),
             entity: None,
             damage: sheet.damage,
@@ -2035,6 +2051,7 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) 
         slow_s: 0.0,
         root_s: 0.0,
         name: sheet.name.clone(),
+        level: sheet.level,
         mob_id: mob_id.into(),
         entity: None,
         damage: sheet.damage,
@@ -2357,6 +2374,14 @@ mod tests {
         let mesh = lock_ring_mesh().expect("ring mesh");
         assert!(mesh.point_count() > 32);
         assert!(mesh.face_count() > 32);
+    }
+
+    #[test]
+    fn lock_ring_major_stays_inside_one_strafe_gap() {
+        assert!(
+            RING_MAJOR_M < STRAFE_M as f32,
+            "ring major {RING_MAJOR_M} must stay under strafe {STRAFE_M} so one lock reads as one body"
+        );
     }
 
     #[test]

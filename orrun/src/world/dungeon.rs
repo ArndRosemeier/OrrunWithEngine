@@ -21,6 +21,7 @@ use engine::model::Model;
 use engine::place::GlobalPlace;
 use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
+use engine::portal::{PortalId, PortalSettings};
 use engine::SpaceId;
 use glam::Vec3;
 use modular::prelude::{Cell, CellVolume, PieceId, PlacedMesh};
@@ -103,8 +104,7 @@ struct LiveDungeon {
     space: SpaceId,
     entities: Vec<EntityId>,
     hatch_out: EntityId,
-    hatch_in: EntityId,
-    linked: bool,
+    portal: PortalId,
     landing_y: f32,
     landing_yaw: f32,
     mouth_at: GlobalPosition,
@@ -584,7 +584,7 @@ impl DungeonLayer {
         let mut entities = spawn_layout(world, &layout.placed, &layout.meshes, placement)?;
         entities.push(hatch_in);
         world.in_space(SpaceId::DEFAULT)?;
-        world.link(hatch_out, hatch_in)?;
+        let portal = world.create_portal(hatch_out, hatch_in, PortalSettings::TELEPORTING)?;
         self.last_shrine = Some(GlobalPlace::at(GlobalPosition::at(plot.at.x, f64::from(hatch_y), plot.at.z)).with_yaw_deg(mouth.place.yaw_degrees));
         let ground = GroundPlan::from_places(&layout.placed);
         let colliders: Vec<StaticCollider> = colliders_for(&layout.placed, &ground)
@@ -619,8 +619,7 @@ impl DungeonLayer {
             space,
             entities,
             hatch_out,
-            hatch_in,
-            linked: true,
+            portal,
             landing_y,
             landing_yaw,
             mouth_at: placement.mouth_world,
@@ -635,9 +634,7 @@ impl DungeonLayer {
         let Some(live) = self.live.take() else {
             return Ok(());
         };
-        if live.linked {
-            world.unlink(live.hatch_out, live.hatch_in)?;
-        }
+        world.destroy_portal(live.portal)?;
         world.despawn(live.hatch_out);
         for id in live.entities {
             world.despawn(id);

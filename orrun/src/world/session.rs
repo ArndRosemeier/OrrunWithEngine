@@ -734,108 +734,98 @@ impl WorldSession {
         WALK_SPEED
     }
 
-    /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
-    pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
+    /// Drop fixture meshes/props and clear Shaken so the next rearm measures
+    /// clean outgoing damage (Strike 16, not Shaken 14). Snap back to world
+    /// spawn so packs do not seat inside a hamlet from a prior village hook.
+    fn begin_fixture_rearm(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
         self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
-        self.combat_layer.request_wolf_fixture();
+        self.roster_pins_seated = false;
+        self.combat.player.shaken = None;
         self.combat_layer.skip_roster_pins();
+        self.dungeon_skulls_for = None;
+        if let Some(spawn) = self.spawn {
+            if let Some(player) = self.player.as_mut() {
+                player.position = spawn.position();
+                player.yaw_degrees = spawn.heading().degrees();
+                player.pitch_degrees = -12.0;
+                player.vy = 0.0;
+                player.airborne = false;
+            }
+        }
+    }
+
+    /// Leave fixture-only mode and reseat Taken Cairn / Woods Hut on the next tick.
+    pub fn restore_overland_sites(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world);
+        self.clear_ground_loot(world);
+        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
+        self.combat.hostiles.clear();
+        self.combat.lock = None;
+        self.overland_sites.clear();
+        self.roster_pins_seated = false;
+        self.combat_layer.allow_roster_pins();
         self.combat_layer.rearm();
         self.dungeon_skulls_for = None;
+    }
+
+    /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
+    pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
+        self.begin_fixture_rearm(world);
+        self.combat_layer.request_wolf_fixture();
+        self.combat_layer.rearm();
     }
 
     /// Reseats one published orc on the next world tick. Meshes despawn now.
     pub fn rearm_orc_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_orc_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
-        self.dungeon_skulls_for = None;
     }
 
     /// Reseats one published yeti on the next world tick. Meshes despawn now.
     pub fn rearm_yeti_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_yeti_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
-        self.dungeon_skulls_for = None;
     }
 
     /// Reseats one published demon on the next world tick. Meshes despawn now.
     pub fn rearm_demon_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_demon_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
-        self.dungeon_skulls_for = None;
     }
 
     /// Reseats one published blue_demon on the next world tick. Meshes despawn now.
     pub fn rearm_bluedemon_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_bluedemon_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
-        self.dungeon_skulls_for = None;
     }
 
     /// Reseats one published tribal_veteran on the next world tick. Meshes despawn now.
     pub fn rearm_tribal_veteran_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_tribal_veteran_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
-        self.dungeon_skulls_for = None;
     }
 
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_bones_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
         self.combat.lock = None;
-        self.dungeon_skulls_for = None;
     }
 
     pub fn rearm_mage_fixture(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
-        super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        super::sites::clear_overland_sites(&mut self.combat);
-        self.overland_sites.clear();
+        self.begin_fixture_rearm(world);
         self.combat_layer.request_mage_fixture();
-        self.combat_layer.skip_roster_pins();
         self.combat_layer.rearm();
         self.combat.lock = None;
-        self.dungeon_skulls_for = None;
     }
 
     pub fn key_binds(&self) -> &KeyBinds {
@@ -1908,7 +1898,7 @@ impl WorldSession {
                 if in_dungeon {
                     move_dungeon_walker(world, &mut player, dx, dz, input.jump, input.dt);
                 } else {
-                    let to = world.move_actor(&player.body, player.position.horizontal(), dx, dz);
+                    let to = world.move_actor(&player.body, player.position, dx, dz);
                     player.position.x = to.x;
                     player.position.z = to.z;
                 }
@@ -2285,6 +2275,36 @@ impl WorldSession {
         self.doors
             .hint()
             .or_else(|| self.dungeons.as_ref().and_then(DungeonLayer::hint))
+    }
+
+    /// True while a house portal is live (leaf hidden / swung open).
+    pub fn house_portal_live(&self) -> bool {
+        self.doors.hidden_leaf().is_some()
+    }
+
+    /// True while the player stands inside a live house portal space.
+    pub fn in_house(&self, world: &World) -> bool {
+        let Some(player) = self.player else {
+            return false;
+        };
+        self.doors.indoor_floor_y(world, player.position).is_some()
+    }
+
+    /// Indoor floor height when living in an open house; none outdoors.
+    pub fn house_indoor_floor_y(&self, world: &World) -> Option<f32> {
+        let player = self.player?;
+        self.doors.indoor_floor_y(world, player.position)
+    }
+
+    /// Nearest seated house door to `from`, if any.
+    pub fn nearest_village_door(&self, from: GlobalXZ) -> Option<&HouseDoor> {
+        self.village_doors().iter().min_by(|a, b| {
+            a.at
+                .horizontal()
+                .distance(from)
+                .partial_cmp(&b.at.horizontal().distance(from))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// True while a nearby dungeon layout is still on the worker.

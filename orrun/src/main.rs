@@ -1874,6 +1874,16 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                 });
         });
     hud::draw_target_frame(&ctx, session.combat());
+    if let Some(pos) = session.player_position() {
+        let eye = glam::Vec3::new(
+            pos.x as f32,
+            pos.y as f32 + 1.7,
+            pos.z as f32,
+        );
+        let aspect = (frame.width.max(1) as f32) / (frame.height.max(1) as f32);
+        let view_proj = world.camera.view_projection(aspect);
+        hud::draw_nameplates(&ctx, session.combat(), eye, view_proj);
+    }
     hud::draw_hotbar(&ctx, session.combat(), session.key_binds());
     hud::draw_cast_bar(&ctx, session.combat());
     hud::draw_combat_log(&ctx, session.combat());

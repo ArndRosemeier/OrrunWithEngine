@@ -356,6 +356,7 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64) -> WorldHostile {
         slow_s: 0.0,
         root_s: 0.0,
         name: sheet.name.clone(),
+        level: sheet.level,
         mob_id: sheet.id.clone(),
         entity: None,
         damage: sheet.damage,
@@ -423,12 +424,35 @@ fn load_static(rel: &str) -> EngineResult<Mesh> {
     })
 }
 
-const CAIRN_ROCKS: &[(&str, f32, f32, f32)] = &[
-    ("props/rocks/rock_fieldstone_low.glb", 0.0, 0.0, 0.0),
-    ("props/rocks/rock_cobble_worn.glb", 0.85, 0.15, 18.0),
-    ("props/rocks/rock_boulder_round.glb", -0.70, 0.40, -12.0),
+/// Taken Cairn menhir baked height (scale 1.0). Playtester + camera use this.
+pub const CAIRN_MENHIR_HEIGHT_M: f32 = 3.5;
+/// Props spawned for a Taken Cairn stamp (kit pieces + crate).
+pub const CAIRN_STAMP_PIECES: usize = 6;
+
+/// (mesh, local x, local z, lift y, yaw°, pitch°, scale)
+const CAIRN_STAMP: &[(&str, f32, f32, f32, f32, f32, f32)] = &[
+    // Rubble mound the menhir rises from.
+    ("props/rocks/cairn_pile_base.glb", 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+    // Leaning dark standing stone — pitch leans toward the road camera.
+    ("props/rocks/cairn_menhir_lean.glb", 0.05, -0.25, 0.55, -6.0, 14.0, 1.05),
+    // Flat offering slab; crate loot sits here, not on the menhir.
+    ("props/rocks/cairn_offering_slab.glb", 1.20, 0.95, 0.06, 22.0, 0.0, 1.0),
+    // Wing rubble so the pile reads wider than one mesh.
+    ("props/rocks/rock_chunk_angular.glb", -1.10, 0.60, 0.0, -38.0, 0.0, 1.15),
+    ("props/rocks/rock_talus_shard.glb", 0.85, -0.55, 0.0, 58.0, 0.0, 1.10),
 ];
-const CAIRN_CRATE: (&str, f32, f32, f32) = ("props/crate_small.glb", 1.35, -0.55, 25.0);
+const CAIRN_CRATE: (&str, f32, f32, f32, f32) = ("props/crate_small.glb", 1.30, 0.82, 0.32, 18.0);
+
+/// Props spawned for all planned overland sites (cairn stamp + woods hut kit).
+pub fn expected_overland_prop_count(sites: &[OverlandSite]) -> usize {
+    sites
+        .iter()
+        .map(|site| match site.kind {
+            SiteKind::TakenCairn => CAIRN_STAMP_PIECES,
+            SiteKind::WoodsHut => kit::assemble_woods_hut().len(),
+        })
+        .sum()
+}
 
 fn local_xz(dx: f32, dz: f32, yaw_deg: f32) -> (f64, f64) {
     let (x, z) = kit::yaw_xz(dx, dz, yaw_deg);
@@ -449,7 +473,7 @@ pub fn spawn_site_props(
         let one = (|| -> EngineResult<()> {
         match site.kind {
             SiteKind::TakenCairn => {
-                for (rel, dx, dz, yaw) in CAIRN_ROCKS {
+                for (rel, dx, dz, dy, yaw, pitch, scale) in CAIRN_STAMP {
                     let mesh = if let Some(m) = statics.get(rel) {
                         m.clone()
                     } else {
@@ -458,11 +482,18 @@ pub fn spawn_site_props(
                         m
                     };
                     let (wx, wz) = local_xz(*dx, *dz, site.yaw_deg);
-                    let at = GlobalPosition::at(site.at.x + wx, f64::from(ground), site.at.z + wz);
-                    let place = GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + *yaw);
+                    let at = GlobalPosition::at(
+                        site.at.x + wx,
+                        f64::from(ground + *dy),
+                        site.at.z + wz,
+                    );
+                    let place = GlobalPlace::at(at)
+                        .with_yaw_deg(site.yaw_deg + *yaw)
+                        .with_pitch_deg(*pitch)
+                        .with_scale(*scale);
                     ids.push(world.spawn_anchored(mesh, place)?);
                 }
-                let (rel, dx, dz, yaw) = CAIRN_CRATE;
+                let (rel, dx, dz, dy, yaw) = CAIRN_CRATE;
                 let mesh = if let Some(m) = statics.get(rel) {
                     m.clone()
                 } else {
@@ -471,7 +502,11 @@ pub fn spawn_site_props(
                     m
                 };
                 let (wx, wz) = local_xz(dx, dz, site.yaw_deg);
-                let at = GlobalPosition::at(site.at.x + wx, f64::from(ground), site.at.z + wz);
+                let at = GlobalPosition::at(
+                    site.at.x + wx,
+                    f64::from(ground + dy),
+                    site.at.z + wz,
+                );
                 let place = GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + yaw);
                 ids.push(world.spawn_anchored(mesh, place)?);
             }
@@ -611,6 +646,60 @@ mod tests {
         }
         let again = plan_overland_sites(&surface, pins, &hamlets);
         assert_eq!(sites, again, "sites must be seed-stable");
+    }
+
+    #[test]
+    fn cairn_menhir_reads_tall_enough() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/props/rocks/cairn_menhir_lean.glb");
+        let mesh = engine::model::Model::load(&path)
+            .expect("cairn menhir loads")
+            .build();
+        let max_y = mesh
+            .positions
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_y >= CAIRN_MENHIR_HEIGHT_M * 0.9,
+            "menhir should read as a standing stone, got max_y={max_y}"
+        );
+        assert_eq!(CAIRN_STAMP.len() + 1, CAIRN_STAMP_PIECES);
+    }
+
+    #[test]
+    fn atlas_travel_targets_resolve_on_seed1_size64() {
+        use crate::world::entry::WorldEntryRequest;
+
+        let surface = world_of(1, 64);
+        let pins = surface.settlements();
+        let hamlets = hamlets_for(pins);
+        let sites = plan_overland_sites(&surface, pins, &hamlets);
+        let bounds = surface.bounds();
+
+        let yard = pins
+            .iter()
+            .filter(|p| p.tier <= 1)
+            .min_by(|a, b| {
+                a.at
+                    .distance(GlobalXZ::at(0.0, 0.0))
+                    .partial_cmp(&b.at.distance(GlobalXZ::at(0.0, 0.0)))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("seed 1 size 64 must have a tier-0/1 pin for hamlet yard travel");
+        WorldEntryRequest::at_global(bounds, yard.at).expect("hamlet yard travel entry");
+
+        let cairn = sites
+            .iter()
+            .find(|s| s.kind == SiteKind::TakenCairn)
+            .expect("Taken Cairn travel target");
+        WorldEntryRequest::at_global(bounds, cairn.at).expect("Taken Cairn travel entry");
+
+        let hut = sites
+            .iter()
+            .find(|s| s.kind == SiteKind::WoodsHut)
+            .expect("Woods Hut travel target");
+        WorldEntryRequest::at_global(bounds, hut.at).expect("Woods Hut travel entry");
     }
 
     fn dist_point_seg(p: glam::Vec2, a: glam::Vec2, b: glam::Vec2) -> f32 {

@@ -16,6 +16,7 @@ use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
 use glam::{Vec2, Vec3};
 
+use super::coords::CHUNK_SAMPLE_M;
 use super::ponds::PondField;
 use super::settlement::{HamletStand, ROAD_CLEAR_M};
 use super::surface::{ContinentalSurface, SurfaceColumn};
@@ -25,9 +26,14 @@ use crate::hamlet::WATERLINE_MARGIN;
 const REACH_M: f64 = NEAR.covers_m();
 const RESEED_M: f64 = 80.0;
 const SAMPLE_M: f32 = 6.0;
-/// How far the dirt sits above sampled ground so the 4 m grass grid cannot
-/// poke through a chord. Walking still uses the terrain, not this ribbon.
-const ROAD_LIFT_M: f32 = 0.16;
+/// Packed bed above the drawn terrain mesh.
+const ROAD_BED_LIFT_M: f32 = 0.05;
+/// Lip above the bed; berm skirts run from here down to the mesh.
+const ROAD_RIM_LIFT_M: f32 = 0.03;
+/// When a bump would poke through the chord, lift both lips part-way (not fully).
+const ROAD_CROWN_FRAC: f32 = 0.45;
+/// Berm foot nudges into the grass mesh so the lip does not leave a hairline gap.
+const BERM_FOOT_LIFT_M: f32 = 0.015;
 /// Drape the visible strip this finely; bridge detection stays on `SAMPLE_M`.
 const RIBBON_STEP_M: f32 = 2.0;
 const PRIMARY_WIDTH: f32 = 5.2;
@@ -68,6 +74,9 @@ const PIER_FOOT: f32 = 1.4;
 
 fn road_dirt() -> Color {
     Color::rgb(92, 72, 52)
+}
+fn road_berm() -> Color {
+    Color::rgb(68, 52, 38)
 }
 fn deck_wood() -> Color {
     Color::rgb(130, 98, 68)
@@ -367,6 +376,34 @@ fn column_at(surface: &ContinentalSurface, ponds: &PondField, p: Vec2) -> Surfac
     column
 }
 
+/// Ground height of the drawn terrain mesh under `p`.
+///
+/// Roads must use the same 4 m lattice and triangle split as [`chunk_mesh`],
+/// not a fresh `column()` sample. On slopes the continuous surface sits above
+/// the flat terrain quads and the ribbon looked like it was floating.
+fn ribbon_ground_at(surface: &ContinentalSurface, ponds: &PondField, p: Vec2) -> f32 {
+    let step = CHUNK_SAMPLE_M as f32;
+    let x0 = (p.x / step).floor() * step;
+    let z0 = (p.y / step).floor() * step;
+    let corner = |x: f32, z: f32| {
+        let g = GlobalXZ::at(f64::from(x), f64::from(z));
+        let mut column = surface.column_for_grid(g, step, 0.0);
+        ponds.carve(g, &mut column);
+        column.ground()
+    };
+    let h00 = corner(x0, z0);
+    let h10 = corner(x0 + step, z0);
+    let h01 = corner(x0, z0 + step);
+    let h11 = corner(x0 + step, z0 + step);
+    let u = (p.x - x0) / step;
+    let v = (p.y - z0) / step;
+    if v >= u {
+        h00 * (1.0 - v) + h01 * (v - u) + h11 * u
+    } else {
+        h00 * (1.0 - u) + h10 * (u - v) + h11 * v
+    }
+}
+
 fn sample_runs(
     surface: &ContinentalSurface,
     ponds: &PondField,
@@ -608,7 +645,7 @@ fn dry_runs(samples: &[Sample], spans: &[Span], hamlets: &[HamletStand]) -> Vec<
             }
             continue;
         }
-        cur.push(Vec3::new(s.at.x, s.ground + ROAD_LIFT_M, s.at.y));
+        cur.push(Vec3::new(s.at.x, s.ground + ROAD_BED_LIFT_M, s.at.y));
     }
     if cur.len() >= 2 {
         runs.push(cur);
@@ -626,8 +663,11 @@ fn in_hamlet(p: Vec2, hamlets: &[HamletStand]) -> bool {
 fn drape_cut(surface: &ContinentalSurface, ponds: &PondField, cut: &[Vec2]) -> Vec<Vec3> {
     cut.iter()
         .map(|p| {
-            let col = column_at(surface, ponds, *p);
-            Vec3::new(p.x, col.ground() + ROAD_LIFT_M, p.y)
+            Vec3::new(
+                p.x,
+                ribbon_ground_at(surface, ponds, *p) + ROAD_BED_LIFT_M,
+                p.y,
+            )
         })
         .collect()
 }
@@ -635,7 +675,7 @@ fn drape_cut(surface: &ContinentalSurface, ponds: &PondField, cut: &[Vec2]) -> V
 #[cfg(test)]
 fn cut_centreline(cut: &[Vec2], ground: f32) -> Vec<Vec3> {
     cut.iter()
-        .map(|p| Vec3::new(p.x, ground + ROAD_LIFT_M, p.y))
+        .map(|p| Vec3::new(p.x, ground + ROAD_BED_LIFT_M, p.y))
         .collect()
 }
 
@@ -667,14 +707,14 @@ fn on_deck(p: Vec2, deck: &Deck) -> Option<f32> {
     }
 }
 
-/// Seat both edges on the real ground. A centreline ridge that would poke
-/// through a flat strip lifts the whole cross-section just enough to clear it.
+/// Seat both lips on the drawn mesh with a packed bed and berm.
 fn drape_edges(left_ground: f32, centre_ground: f32, right_ground: f32) -> (f32, f32) {
     let mid = (left_ground + right_ground) * 0.5;
-    let crown = (centre_ground - mid).max(0.0);
+    let crown = (centre_ground - mid).max(0.0) * ROAD_CROWN_FRAC;
+    let lip = ROAD_BED_LIFT_M + ROAD_RIM_LIFT_M + crown;
     (
-        left_ground + crown + ROAD_LIFT_M,
-        right_ground + crown + ROAD_LIFT_M,
+        left_ground + lip,
+        right_ground + lip,
     )
 }
 
@@ -699,6 +739,29 @@ fn densify_xz(points: &[Vec3], step: f32) -> Vec<Vec3> {
     out
 }
 
+struct RibbonSection {
+    left_top: Vec3,
+    right_top: Vec3,
+    left_base: Vec3,
+    right_base: Vec3,
+}
+
+fn add_colored_quad(
+    mesh: &mut Mesh,
+    corners: [Vec3; 4],
+    color: Color,
+) -> EngineResult<()> {
+    let a = mesh.add_point(corners[0])?;
+    mesh.set_point_color(a, color)?;
+    let b = mesh.add_point(corners[1])?;
+    mesh.set_point_color(b, color)?;
+    let c = mesh.add_point(corners[2])?;
+    mesh.set_point_color(c, color)?;
+    let d = mesh.add_point(corners[3])?;
+    mesh.set_point_color(d, color)?;
+    mesh.add_quad(a, b, c, d)
+}
+
 fn add_ribbon(
     mesh: &mut Mesh,
     origin: Vec3,
@@ -713,8 +776,8 @@ fn add_ribbon(
         return Ok(());
     }
     let half = width * 0.5;
-    let mut left = Vec::new();
-    let mut right = Vec::new();
+    let berm = road_berm();
+    let mut sections = Vec::with_capacity(points.len());
     for i in 0..points.len() {
         let p = points[i];
         let tangent = if i + 1 < points.len() {
@@ -726,23 +789,35 @@ fn add_ribbon(
         let centre = Vec2::new(p.x, p.z);
         let left_at = centre - perp * half;
         let right_at = centre + perp * half;
-        let lg = column_at(surface, ponds, left_at).ground();
-        let cg = column_at(surface, ponds, centre).ground();
-        let rg = column_at(surface, ponds, right_at).ground();
+        let lg = ribbon_ground_at(surface, ponds, left_at);
+        let cg = ribbon_ground_at(surface, ponds, centre);
+        let rg = ribbon_ground_at(surface, ponds, right_at);
         let (ly, ry) = drape_edges(lg, cg, rg);
-        left.push(Vec3::new(left_at.x, ly, left_at.y) - origin);
-        right.push(Vec3::new(right_at.x, ry, right_at.y) - origin);
+        sections.push(RibbonSection {
+            left_top: Vec3::new(left_at.x, ly, left_at.y) - origin,
+            right_top: Vec3::new(right_at.x, ry, right_at.y) - origin,
+            left_base: Vec3::new(left_at.x, lg + BERM_FOOT_LIFT_M, left_at.y) - origin,
+            right_base: Vec3::new(right_at.x, rg + BERM_FOOT_LIFT_M, right_at.y) - origin,
+        });
     }
-    for i in 0..left.len() - 1 {
-        let a = mesh.add_point(left[i])?;
-        mesh.set_point_color(a, color)?;
-        let b = mesh.add_point(right[i])?;
-        mesh.set_point_color(b, color)?;
-        let c = mesh.add_point(right[i + 1])?;
-        mesh.set_point_color(c, color)?;
-        let d = mesh.add_point(left[i + 1])?;
-        mesh.set_point_color(d, color)?;
-        mesh.add_quad(a, b, c, d)?;
+    for i in 0..sections.len() - 1 {
+        let s0 = &sections[i];
+        let s1 = &sections[i + 1];
+        add_colored_quad(
+            mesh,
+            [s0.left_top, s0.right_top, s1.right_top, s1.left_top],
+            color,
+        )?;
+        add_colored_quad(
+            mesh,
+            [s0.left_top, s1.left_top, s1.left_base, s0.left_base],
+            berm,
+        )?;
+        add_colored_quad(
+            mesh,
+            [s0.right_top, s0.right_base, s1.right_base, s1.right_top],
+            berm,
+        )?;
     }
     Ok(())
 }
@@ -1306,7 +1381,7 @@ mod tests {
             "cut ribbon must start on the rim"
         );
         assert!(
-            (well.y - (10.0 + ROAD_LIFT_M)).abs() < 1e-5,
+            (well.y - (10.0 + ROAD_BED_LIFT_M)).abs() < 1e-5,
             "cut ribbon must sit on the dirt lift"
         );
     }
@@ -1319,10 +1394,10 @@ mod tests {
         for p in &runs[0] {
             assert!(p.y > 10.0, "ribbon still sunk into the ground at {}", p.y);
             assert!(
-                (p.y - (10.0 + ROAD_LIFT_M)).abs() < 1e-5,
+                (p.y - (10.0 + ROAD_BED_LIFT_M)).abs() < 1e-5,
                 "ribbon hover was {}, expected {}",
                 p.y,
-                10.0 + ROAD_LIFT_M
+                10.0 + ROAD_BED_LIFT_M
             );
         }
     }
@@ -1330,21 +1405,29 @@ mod tests {
     #[test]
     fn a_side_slope_road_follows_both_edges() {
         let (left, right) = drape_edges(10.0, 8.0, 6.0);
-        assert!((left - (10.0 + ROAD_LIFT_M)).abs() < 1e-5);
-        assert!((right - (6.0 + ROAD_LIFT_M)).abs() < 1e-5);
+        let lip = ROAD_BED_LIFT_M + ROAD_RIM_LIFT_M;
+        assert!((left - (10.0 + lip)).abs() < 1e-5);
+        assert!((right - (6.0 + lip)).abs() < 1e-5);
     }
 
     #[test]
-    fn a_crowned_road_clears_the_centre_bump() {
+    fn a_crowned_road_lifts_lips_over_a_centre_bump() {
         let (left, right) = drape_edges(6.0, 10.0, 6.0);
+        let lip = ROAD_BED_LIFT_M + ROAD_RIM_LIFT_M + (10.0 - 6.0) * ROAD_CROWN_FRAC;
+        assert!((left - (6.0 + lip)).abs() < 1e-5);
+        assert!((right - (6.0 + lip)).abs() < 1e-5);
         assert!(
-            left >= 10.0 + ROAD_LIFT_M - 1e-5,
-            "left edge still under the bump: {left}"
+            left > 6.0 + ROAD_BED_LIFT_M + ROAD_RIM_LIFT_M,
+            "bump clearance should add to the berm"
         );
-        assert!(
-            right >= 10.0 + ROAD_LIFT_M - 1e-5,
-            "right edge still under the bump: {right}"
-        );
+    }
+
+    #[test]
+    fn road_rims_sit_above_the_packed_bed() {
+        let (left, right) = drape_edges(5.0, 5.0, 5.0);
+        let bed_only = 5.0 + ROAD_BED_LIFT_M;
+        assert!(left > bed_only + ROAD_RIM_LIFT_M - 1e-5);
+        assert!(right > bed_only + ROAD_RIM_LIFT_M - 1e-5);
     }
 
     #[test]

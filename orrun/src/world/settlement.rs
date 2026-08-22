@@ -151,6 +151,35 @@ impl HouseDoor {
             self.house_at.z + f64::from(dz),
         )
     }
+
+    /// Feet stand clear of the front wall, on the street side of the leaf.
+    ///
+    /// Uses house −local Z (the opening face), not `at - house_at`, so a
+    /// high leaf origin or jetty leaf cannot pull the stand onto the roof.
+    pub fn outside_stand(&self) -> GlobalXZ {
+        let (ox, oz) = kit::yaw_xz(0.0, -(self.half_z + 2.2), self.house_yaw_deg);
+        GlobalXZ::at(self.house_at.x + f64::from(ox), self.house_at.z + f64::from(oz))
+    }
+
+    /// Just inside the threshold, used to walk through the open portal.
+    pub fn enter_stand(&self) -> GlobalXZ {
+        let (ix, iz) = kit::yaw_xz(0.0, -(self.half_z - 0.75), self.house_yaw_deg);
+        GlobalXZ::at(self.house_at.x + f64::from(ix), self.house_at.z + f64::from(iz))
+    }
+
+    /// Mid-doorway look target (handle height), never the roof.
+    pub fn look_target(&self) -> glam::Vec3 {
+        glam::Vec3::new(self.at.x as f32, self.floor_y + 1.15, self.at.z as f32)
+    }
+
+    /// Look into the room from the threshold: halfway to the house centre, waist height.
+    pub fn room_look_target(&self) -> glam::Vec3 {
+        glam::Vec3::new(
+            (self.at.x + self.house_at.x) as f32 * 0.5,
+            self.floor_y + 0.85,
+            (self.at.z + self.house_at.z) as f32 * 0.5,
+        )
+    }
 }
 
 /// One seated hamlet, in world metres.
@@ -239,6 +268,8 @@ struct Packing {
 struct PackResult {
     plans: HashMap<i32, (Plan2D, Vec<Vec2>)>,
     cities: Vec<(i32, SeatedCity)>,
+    /// Pins that could not be laid out this pass; do not respawn every frame.
+    failed: Vec<i32>,
 }
 
 struct Pending {
@@ -262,6 +293,8 @@ pub struct SettlementLayer {
     tile_queue: VecDeque<TileKey>,
     queued: HashSet<TileKey>,
     pending: Option<Pending>,
+    /// Layout failed for these pins while they were in reach; cleared when they leave.
+    unseatable: HashSet<i32>,
     doors: Vec<HouseDoor>,
     hidden_door: Option<u64>,
     camps: HashMap<i32, CampLive>,
@@ -295,6 +328,7 @@ impl SettlementLayer {
             tile_queue: VecDeque::new(),
             queued: HashSet::new(),
             pending: None,
+            unseatable: HashSet::new(),
             doors: Vec::new(),
             hidden_door: None,
             camps: HashMap::new(),
@@ -382,6 +416,7 @@ impl SettlementLayer {
         self.standing.clear();
         self.seated.clear();
         self.plans.clear();
+        self.unseatable.clear();
         self.hamlets.clear();
         self.doors.clear();
         self.hidden_door = None;
@@ -430,7 +465,9 @@ impl SettlementLayer {
         if self.pending.is_none() {
             let new_pins: Vec<SettlementPin> = nearby
                 .into_iter()
-                .filter(|pin| !self.seated.contains_key(&pin.id))
+                .filter(|pin| {
+                    !self.seated.contains_key(&pin.id) && !self.unseatable.contains(&pin.id)
+                })
                 .collect();
             if !new_pins.is_empty() {
                 let mut plans = HashMap::new();
@@ -589,10 +626,16 @@ impl SettlementLayer {
 
     fn install_cities(&mut self, bake: PackResult, nearby_ids: &HashSet<i32>) -> bool {
         self.plans.extend(bake.plans);
+        for id in bake.failed {
+            if nearby_ids.contains(&id) {
+                self.unseatable.insert(id);
+            }
+        }
         let mut changed = false;
         for (id, city) in bake.cities {
             if nearby_ids.contains(&id) {
                 self.seated.insert(id, city);
+                self.unseatable.remove(&id);
                 changed = true;
             }
         }
@@ -600,6 +643,7 @@ impl SettlementLayer {
     }
 
     fn drop_far_pins(&mut self, nearby_ids: &HashSet<i32>) -> bool {
+        self.unseatable.retain(|id| nearby_ids.contains(id));
         let before = self.seated.len();
         self.seated.retain(|id, _| nearby_ids.contains(id));
         before != self.seated.len()
@@ -756,11 +800,21 @@ impl Packing {
     fn pack(self) -> PackResult {
         let mut plans = self.plans;
         let mut cities = Vec::new();
+        let mut failed = Vec::new();
         for pin in self.pins {
-            let (plan, cut) = plans.entry(pin.id).or_insert_with(|| {
-                layout_for(self.seed, pin, &self.surface, &self.ponds)
-                    .unwrap_or_else(|err| panic!("hamlet at node {} failed: {err}", pin.id))
-            });
+            if !plans.contains_key(&pin.id) {
+                match layout_for(self.seed, pin, &self.surface, &self.ponds) {
+                    Ok(layout) => {
+                        plans.insert(pin.id, layout);
+                    }
+                    Err(err) => {
+                        eprintln!("hamlet at node {} failed: {err}", pin.id);
+                        failed.push(pin.id);
+                        continue;
+                    }
+                }
+            }
+            let (plan, cut) = &plans[&pin.id];
             let mut standing = Vec::new();
             let mut houses = Vec::new();
             let mut plots = Vec::new();
@@ -796,7 +850,11 @@ impl Packing {
                 },
             ));
         }
-        PackResult { plans, cities }
+        PackResult {
+            plans,
+            cities,
+            failed,
+        }
     }
 }
 

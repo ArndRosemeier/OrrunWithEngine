@@ -124,14 +124,32 @@ pub fn assemble(brief: DwellingBrief, seed: u64) -> InteriorLayout {
         .places()
         .unwrap_or_else(|err| panic!("{} indoor places: {err}", brief.label()));
     shift_xz(&mut pieces, origin);
+    if storeys > 1 {
+        tag_upper_storey_walls(&mut pieces);
+    }
+    pieces.retain(|p| match p.piece.as_str() {
+        "plinth" | "floor" => false,
+        "ceiling" => {
+            let pos = p.place.position;
+            !is_interior_cell(pos.x, pos.z, origin, brief)
+        }
+        _ => true,
+    });
+    if has_interior_floor_row(brief) {
+        let stair_well = stair_cell.map(|c| stair_well_xz(c, origin));
+        pieces.extend(floor_overlay(brief, 0.0, None));
+        if storeys == 1 {
+            pieces.extend(ceiling_overlay(brief, 0.0));
+        } else {
+            pieces.extend(floor_overlay(brief, STOREY_M, stair_well));
+            pieces.extend(ceiling_overlay(brief, STOREY_M));
+        }
+    }
     let door_local = pieces
         .iter()
         .find(|item| item.piece.as_str() == "door")
         .map(|item| opening_place(&item.place))
         .unwrap_or_else(|| panic!("{} indoor kit has no exterior door", brief.label()));
-    if storeys > 1 {
-        pieces.extend(cover_upper_floors(brief, origin, &pieces, stair_cell));
-    }
     let stair_local = stair_cell.map(|c| {
         Vec3::new(
             (c.x as f32 + 0.5) * CELL_M + origin.x,
@@ -180,6 +198,7 @@ pub fn piece_mesh(piece: &str) -> Mesh {
             ceiling_color(),
         ),
         "stair" => stair_mesh(),
+        "loft_floor" => loft_floor_mesh(),
         other => panic!("indoor kit has no mesh for '{other}'"),
     }
 }
@@ -331,6 +350,22 @@ fn stair_mesh() -> Mesh {
     mesh
 }
 
+/// Upper-storey floor plank with a centre opening for the stair run (matches
+/// the footprint used by [`crate::world::doors::DoorLayer::indoor_floor_y`]).
+fn loft_floor_mesh() -> Mesh {
+    let mut mesh = Mesh::new();
+    let y = 0.04;
+    let half = FLOOR_TILE_HALF;
+    let open_half_x = 0.7;
+    let side_w = half - open_half_x;
+    let side_cx = (half + open_half_x) * 0.5;
+    for sx in [-side_cx, side_cx] {
+        mesh.add_box((sx, y, 0.0), (side_w, 0.08, CELL_M), wood_color())
+            .expect("loft floor side");
+    }
+    mesh
+}
+
 fn assemble_for<'a>(
     catalog: &'a Catalog,
     brief: DwellingBrief,
@@ -360,7 +395,7 @@ fn assemble_for<'a>(
         assembly
             .mate(stair, did("down"), pid("plinth"), did("up"))
             .expect("stair plinth");
-        fill_indoor_floors(&mut assembly, brief, stair_cell).expect("indoor floors");
+        fill_indoor_floors(&mut assembly, brief, Some(stair_cell)).expect("indoor floors");
         let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
             .expect("indoor upper");
         cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
@@ -369,6 +404,7 @@ fn assemble_for<'a>(
             .expect("stair well cap");
         (assembly, storeys, Some(stair_cell))
     } else if brief.storeys >= 2 {
+        fill_indoor_floors(&mut assembly, brief, None).expect("indoor floors");
         let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
             .expect("indoor upper");
         cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
@@ -488,13 +524,13 @@ fn stack_indoor_ring(
 fn fill_indoor_floors(
     assembly: &mut Assembly<'_>,
     brief: DwellingBrief,
-    stair_cell: Cell,
+    stair_cell: Option<Cell>,
 ) -> ModularResult<()> {
     let max_x = i32::from(brief.cells_x) - 2;
     let max_z = i32::from(brief.cells_z) - 2;
     for x in 1..=max_x {
         for z in 1..=max_z {
-            if x == stair_cell.x && z == stair_cell.z {
+            if stair_cell.is_some_and(|c| c.x == x && c.z == z) {
                 continue;
             }
             let ground = assembly.place(pid("floor"), Cell::new(x, 0, z), YawQuarter::Deg0)?;
@@ -504,6 +540,140 @@ fn fill_indoor_floors(
         }
     }
     Ok(())
+}
+
+/// Half-extent of a floor tile in XZ (matches [`CELL_M`] and `furn_floor.glb`).
+pub(crate) const FLOOR_TILE_HALF: f32 = CELL_M * 0.5;
+
+/// Tile centres along one axis so every 4 m plank overlaps the span edges.
+fn axis_tile_centers(half_span: f32) -> Vec<f32> {
+    if half_span < 0.01 {
+        return Vec::new();
+    }
+    let mut centers = vec![-half_span + FLOOR_TILE_HALF];
+    loop {
+        let last = *centers.last().expect("axis starts with one centre");
+        if last + FLOOR_TILE_HALF >= half_span - 0.01 {
+            break;
+        }
+        let next = last + CELL_M;
+        if next + FLOOR_TILE_HALF > half_span + 0.01 {
+            let closing = half_span - FLOOR_TILE_HALF;
+            if closing > last + 0.01 {
+                centers.push(closing);
+            }
+            break;
+        }
+        centers.push(next);
+    }
+    centers
+}
+
+/// True when the footprint has an interior row behind the door ring.
+fn has_interior_floor_row(brief: DwellingBrief) -> bool {
+    i32::from(brief.cells_z) - 2 >= 1
+}
+
+fn is_ring_piece(piece: &str) -> bool {
+    matches!(
+        piece,
+        "wall" | "wall_b" | "partition" | "door" | "partition_door" | "corner"
+    )
+}
+
+/// Modular stacks the upper wall ring on the ground ring in the same XZ cells
+/// but does not lift [`place.position.y`]. Tag the upper copy so render,
+/// collision, and floor height agree on storey.
+fn tag_upper_storey_walls(pieces: &mut [PlacedMesh]) {
+    use std::collections::HashMap;
+    let mut stacks: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, p) in pieces.iter().enumerate() {
+        if !is_ring_piece(p.piece.as_str()) {
+            continue;
+        }
+        let key = (
+            (p.place.position.x * 100.0).round() as i32,
+            (p.place.position.z * 100.0).round() as i32,
+        );
+        stacks.entry(key).or_default().push(i);
+    }
+    for indices in stacks.into_values() {
+        if indices.len() != 2 {
+            continue;
+        }
+        let mut sorted = indices;
+        sorted.sort_unstable();
+        let upper = sorted[1];
+        pieces[upper].place.position.y = STOREY_M;
+    }
+}
+
+fn is_interior_cell(px: f32, pz: f32, origin: Vec3, brief: DwellingBrief) -> bool {
+    let gx = ((px - origin.x) / CELL_M - 0.5).round() as i32;
+    let gz = ((pz - origin.z) / CELL_M - 0.5).round() as i32;
+    let max_x = i32::from(brief.cells_x) - 2;
+    let max_z = i32::from(brief.cells_z) - 2;
+    (1..=max_x).contains(&gx) && (1..=max_z).contains(&gz)
+}
+
+fn stair_well_xz(stair: Cell, origin: Vec3) -> (f32, f32) {
+    (
+        (stair.x as f32 + 0.5) * CELL_M + origin.x,
+        (stair.z as f32 + 0.5) * CELL_M + origin.z,
+    )
+}
+
+/// Matches the walkable stair footprint in `doors::indoor_stand_y`.
+fn tile_overlaps_stair_opening(tx: f32, tz: f32, well: (f32, f32)) -> bool {
+    let (sx, sz) = well;
+    let tile_min_x = tx - FLOOR_TILE_HALF;
+    let tile_max_x = tx + FLOOR_TILE_HALF;
+    let tile_min_z = tz - FLOOR_TILE_HALF;
+    let tile_max_z = tz + FLOOR_TILE_HALF;
+    let open_min_x = sx - 1.2;
+    let open_max_x = sx + 1.2;
+    let open_min_z = sz - 2.2;
+    let open_max_z = sz + 2.2;
+    tile_max_x > open_min_x
+        && tile_min_x < open_max_x
+        && tile_max_z > open_min_z
+        && tile_min_z < open_max_z
+}
+
+fn floor_overlay(brief: DwellingBrief, y: f32, stair_well: Option<(f32, f32)>) -> Vec<PlacedMesh> {
+    let (inner_x, inner_z) = room_inner(brief);
+    let mut out = Vec::new();
+    for x in axis_tile_centers(inner_x) {
+        for z in axis_tile_centers(inner_z) {
+            let piece = if stair_well.is_some_and(|well| tile_overlaps_stair_opening(x, z, well)) {
+                pid("loft_floor")
+            } else {
+                pid("floor")
+            };
+            out.push(PlacedMesh {
+                piece,
+                place: Place::new(x, y, z),
+            });
+        }
+    }
+    out
+}
+
+/// Ceiling planks over the walkable interior. [`piece_mesh`] lifts the slab by
+/// [`STOREY_M`]; anchor at `y` in house-local metres (0 = single-storey top,
+/// [`STOREY_M`] = two-storey roof underside).
+fn ceiling_overlay(brief: DwellingBrief, y: f32) -> Vec<PlacedMesh> {
+    let (inner_x, inner_z) = room_inner(brief);
+    let mut out = Vec::new();
+    for x in axis_tile_centers(inner_x) {
+        for z in axis_tile_centers(inner_z) {
+            out.push(PlacedMesh {
+                piece: pid("ceiling"),
+                place: Place::new(x, y, z),
+            });
+        }
+    }
+    out
 }
 
 fn cap_down(assembly: &mut Assembly<'_>, ring: &[InstanceId], plinth: &str) -> ModularResult<()> {
@@ -539,39 +709,6 @@ fn shift_xz(places: &mut [PlacedMesh], origin: Vec3) {
         item.place.position.x += origin.x;
         item.place.position.z += origin.z;
     }
-}
-
-fn cover_upper_floors(
-    brief: DwellingBrief,
-    origin: Vec3,
-    existing: &[PlacedMesh],
-    stair_cell: Option<Cell>,
-) -> Vec<PlacedMesh> {
-    let cells_x = i32::from(brief.cells_x);
-    let cells_z = i32::from(brief.cells_z);
-    let mut out = Vec::new();
-    for x in 0..cells_x {
-        for z in 0..cells_z {
-            if stair_cell.is_some_and(|c| c.x == x && c.z == z) {
-                continue;
-            }
-            let px = (x as f32 + 0.5) * CELL_M + origin.x;
-            let pz = (z as f32 + 0.5) * CELL_M + origin.z;
-            if existing.iter().any(|item| {
-                item.piece.as_str() == "floor"
-                    && (item.place.position.x - px).abs() < 0.2
-                    && (item.place.position.z - pz).abs() < 0.2
-                    && (item.place.position.y - STOREY_M).abs() < 0.2
-            }) {
-                continue;
-            }
-            out.push(PlacedMesh {
-                piece: pid("floor"),
-                place: Place::new(px, STOREY_M, pz),
-            });
-        }
-    }
-    out
 }
 
 fn room_cells(brief: DwellingBrief) -> (i32, i32) {
@@ -762,18 +899,358 @@ mod tests {
                     p
                 );
             }
+            if has_interior_floor_row(brief) {
+                assert_interior_shell_covered(brief, &layout);
+            }
+        }
+    }
+
+    fn ceiling_tile_centres(layout: &InteriorLayout, anchor_y: f32) -> Vec<(f32, f32)> {
+        layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                p.piece.as_str() == "ceiling"
+                    && (p.place.position.y - anchor_y).abs() < 1e-4
+            })
+            .map(|p| (p.place.position.x, p.place.position.z))
+            .collect()
+    }
+
+    fn point_in_stair_opening(x: f32, z: f32, well: (f32, f32)) -> bool {
+        let (sx, sz) = well;
+        (x - sx).abs() < 1.2 && (z - sz).abs() < 2.2
+    }
+
+    fn probe_skips_stair(x: f32, z: f32, stair: Option<(f32, f32)>) -> bool {
+        stair.is_some_and(|well| point_in_stair_opening(x, z, well))
+    }
+
+    fn assert_floor_grid(
+        brief: DwellingBrief,
+        floor_tiles: &[(f32, f32)],
+        ceiling_tiles: Option<&[(f32, f32)]>,
+        stair: Option<(f32, f32)>,
+        label: &str,
+    ) {
+        let (inner_x, inner_z) = room_inner(brief);
+        assert!(!floor_tiles.is_empty(), "{label} has no floor tiles");
+        let skip_at_stair = if ceiling_tiles.is_some() {
+            stair
+        } else {
+            None
+        };
+        if let Some(ceiling_tiles) = ceiling_tiles {
+            for (fx, fz) in floor_tiles {
+                if probe_skips_stair(*fx, *fz, stair) {
+                    continue;
+                }
+                assert!(
+                    ceiling_tiles.iter().any(|(cx, cz)| {
+                        (cx - fx).abs() < 0.02 && (cz - fz).abs() < 0.02
+                    }),
+                    "{label} missing ceiling plank over floor at ({fx:.2}, {fz:.2})",
+                );
+            }
+        }
+        let mut x = -inner_x + 0.35;
+        while x <= inner_x - 0.35 {
+            let mut z = -inner_z + 0.35;
+            while z <= inner_z - 0.35 {
+                if x.abs() < 1.35 && z < -inner_z + 1.4 {
+                    z += 0.5;
+                    continue;
+                }
+                if probe_skips_stair(x, z, skip_at_stair) {
+                    z += 0.5;
+                    continue;
+                }
+                assert!(
+                    point_on_tile(floor_tiles, x, z),
+                    "{label} floor gap at ({x:.2}, {z:.2})",
+                );
+                if let Some(ceiling_tiles) = ceiling_tiles {
+                    assert!(
+                        point_on_tile(ceiling_tiles, x, z),
+                        "{label} ceiling gap at ({x:.2}, {z:.2})",
+                    );
+                }
+                z += 0.5;
+            }
+            x += 0.5;
+        }
+        for (x, z) in wall_floor_probes(brief) {
+            if probe_skips_stair(x, z, skip_at_stair) {
+                continue;
+            }
+            assert!(
+                point_on_tile(floor_tiles, x, z),
+                "{label} missing floor beside the wall at ({x:.2}, {z:.2})",
+            );
+            if let Some(ceiling_tiles) = ceiling_tiles {
+                assert!(
+                    point_on_tile(ceiling_tiles, x, z),
+                    "{label} missing ceiling beside the wall at ({x:.2}, {z:.2})",
+                );
+            }
+        }
+    }
+
+    fn assert_interior_shell_covered(brief: DwellingBrief, layout: &InteriorLayout) {
+        let ground = floor_tile_centres(layout, 0.0);
+        if brief.storeys == 1 {
+            let ceiling = ceiling_tile_centres(layout, 0.0);
+            assert_floor_grid(
+                brief,
+                &ground,
+                Some(&ceiling),
+                None,
+                &format!("{} ground", brief.label()),
+            );
+            for item in layout.furniture.iter() {
+                if item.piece.as_str() == "stair" || item.place.position.y > 0.5 {
+                    continue;
+                }
+                let p = item.place.position;
+                assert!(
+                    point_on_tile(&ground, p.x, p.z),
+                    "{} {} is not over floor at ({:.2}, {:.2})",
+                    brief.label(),
+                    item.piece,
+                    p.x,
+                    p.z
+                );
+            }
+        } else {
+            assert_floor_grid(
+                brief,
+                &ground,
+                None,
+                None,
+                &format!("{} ground", brief.label()),
+            );
+            let upper = floor_tile_centres(layout, STOREY_M);
+            let top = ceiling_tile_centres(layout, STOREY_M);
+            let stair_well = layout.stair_local.map(|p| (p.x, p.z));
+            assert_floor_grid(
+                brief,
+                &upper,
+                Some(&top),
+                stair_well,
+                &format!("{} upper", brief.label()),
+            );
+        }
+    }
+
+    fn floor_tile_count(inner: f32) -> usize {
+        axis_tile_centers(inner).len()
+    }
+
+    fn floor_tile_centres(layout: &InteriorLayout, y: f32) -> Vec<(f32, f32)> {
+        layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                matches!(p.piece.as_str(), "floor" | "loft_floor")
+                    && (p.place.position.y - y).abs() < 1e-4
+            })
+            .map(|p| (p.place.position.x, p.place.position.z))
+            .collect()
+    }
+
+    fn point_on_tile(tiles: &[(f32, f32)], x: f32, z: f32) -> bool {
+        tiles.iter().any(|(tx, tz)| {
+            (tx - x).abs() <= FLOOR_TILE_HALF + 0.01 && (tz - z).abs() <= FLOOR_TILE_HALF + 0.01
+        })
+    }
+
+    fn wall_floor_probes(brief: DwellingBrief) -> Vec<(f32, f32)> {
+        if !has_interior_floor_row(brief) {
+            return Vec::new();
+        }
+        let (inner_x, inner_z) = room_inner(brief);
+        let inset = WALL_T + 0.12;
+        vec![
+            (-inner_x + inset, 0.0),
+            (inner_x - inset, 0.0),
+            (0.0, inner_z - inset),
+            (1.4_f32.min(inner_x - 1.0), -inner_z + inset),
+        ]
+    }
+
+    #[test]
+    fn two_storey_ring_tags_upper_walls_to_the_loft() {
+        let brief = brief(4, 3, 2);
+        let layout = assemble(brief, 7);
+        let ground = layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.piece.as_str(),
+                    "wall" | "wall_b" | "partition" | "door" | "corner"
+                ) && p.place.position.y < 0.5
+            })
+            .count();
+        let upper = layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.piece.as_str(),
+                    "wall" | "wall_b" | "partition" | "door" | "corner"
+                ) && (p.place.position.y - STOREY_M).abs() < 0.1
+            })
+            .count();
+        assert_eq!(ground, upper);
+        let door = layout
+            .pieces
+            .iter()
+            .find(|p| p.piece.as_str() == "door")
+            .expect("door");
+        let key = (
+            (door.place.position.x * 100.0).round() as i32,
+            (door.place.position.z * 100.0).round() as i32,
+        );
+        let at_door = layout.pieces.iter().filter(|p| {
+            matches!(
+                p.piece.as_str(),
+                "wall" | "wall_b" | "partition" | "door" | "corner"
+            ) && {
+                let k = (
+                    (p.place.position.x * 100.0).round() as i32,
+                    (p.place.position.z * 100.0).round() as i32,
+                );
+                k == key
+            }
+        });
+        let loft_over_door = at_door
+            .clone()
+            .any(|p| (p.place.position.y - STOREY_M).abs() < 0.1);
+        assert!(
+            loft_over_door,
+            "door cell {:?} must include an upper ring piece",
+            key
+        );
+    }
+
+    #[test]
+    fn every_village_footprint_has_a_continuous_interior_shell() {
+        for &(cells_x, cells_z) in FOOTPRINTS {
+            for storeys in [1_u8, 2] {
+                let brief = brief(cells_x, cells_z, storeys);
+                if !has_interior_floor_row(brief) {
+                    continue;
+                }
+                let layout = assemble(brief, 7);
+                assert_interior_shell_covered(brief, &layout);
+            }
         }
     }
 
     #[test]
-    fn planked_floor_replaces_the_stretched_slab() {
-        let layout = assemble(brief(3, 2, 1), 7);
+    fn axis_tile_centers_close_both_edges() {
+        let half_span = 7.72;
+        let xs = axis_tile_centers(half_span);
+        assert!((xs[0] + half_span - FLOOR_TILE_HALF).abs() < 0.02);
+        assert!((xs.last().expect("centres") - half_span + FLOOR_TILE_HALF).abs() < 0.02);
+    }
+
+    #[test]
+    fn single_storey_tiles_the_full_interior() {
+        let brief = brief(4, 3, 1);
+        let layout = assemble(brief, 7);
+        let (inner_x, inner_z) = room_inner(brief);
+        let floors: Vec<_> = layout
+            .pieces
+            .iter()
+            .filter(|p| p.piece.as_str() == "floor")
+            .collect();
+        assert_eq!(
+            floors.len(),
+            floor_tile_count(inner_x) * floor_tile_count(inner_z),
+            "expected a full interior floor grid"
+        );
+        let ceilings: Vec<_> = layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                p.piece.as_str() == "ceiling" && p.place.position.y.abs() < 1e-4
+            })
+            .collect();
         assert!(
-            layout
-                .pieces
+            ceilings.len() >= floors.len(),
+            "ceiling must cover at least every floor tile"
+        );
+        assert!(
+            floors.iter().all(|p| p.place.position.y.abs() < 1e-4),
+            "ground floor tiles must sit on the doorway plane"
+        );
+        assert!(
+            ceilings
                 .iter()
-                .any(|p| p.piece.as_str() == "plinth" && p.place.stretch == Vec3::ONE),
-            "ground plinths must stay unstretched plank cells"
+                .filter(|p| {
+                    floors.iter().any(|f| {
+                        (f.place.position.x - p.place.position.x).abs() < 0.02
+                            && (f.place.position.z - p.place.position.z).abs() < 0.02
+                    })
+                })
+                .count()
+                == floors.len(),
+            "each floor tile needs a ceiling plank overhead"
+        );
+        assert!(
+            !layout.pieces.iter().any(|p| p.piece.as_str() == "plinth"),
+            "plinths are kit-only; they must not ship in the layout"
+        );
+    }
+
+    #[test]
+    fn floor_and_plinth_heights_for_a_room() {
+        let layout = assemble(brief(4, 3, 1), 7);
+        let mut floors = Vec::new();
+        let mut plinths = Vec::new();
+        for item in &layout.pieces {
+            match item.piece.as_str() {
+                "floor" => floors.push(item.place.position.y),
+                "plinth" => plinths.push(item.place.position.y),
+                _ => {}
+            }
+        }
+        assert!(
+            floors.iter().all(|y| y.abs() < 1e-4),
+            "every floor tile must sit on the doorway plane, got {floors:?}"
+        );
+        assert!(
+            plinths.is_empty(),
+            "layout must not include visible plinth meshes, got {plinths:?}"
+        );
+    }
+
+    #[test]
+    fn single_storey_gets_ground_floors() {
+        let layout = assemble(brief(3, 3, 1), 7);
+        let floors: Vec<_> = layout
+            .pieces
+            .iter()
+            .filter(|p| p.piece.as_str() == "floor")
+            .collect();
+        assert!(
+            !floors.is_empty(),
+            "single-storey interiors must tile the room floor"
+        );
+        assert!(
+            floors.iter().all(|p| p.place.position.y.abs() < 1e-4),
+            "ground floor tiles must sit on the doorway plane"
+        );
+    }
+
+    #[test]
+    fn planked_floor_replaces_the_stretched_slab() {
+        let layout = assemble(brief(3, 3, 1), 7);
+        assert!(
+            !layout.pieces.iter().any(|p| p.piece.as_str() == "plinth"),
+            "plinth meshes must not be spawned in the interior"
         );
         assert!(
             layout

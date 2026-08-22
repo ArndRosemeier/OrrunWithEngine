@@ -2,6 +2,7 @@
 //!
 //! One formula set. The `combat_sim` bin is a thin CLI over this crate.
 
+pub mod consideration;
 pub mod lock;
 pub mod log;
 pub mod math;
@@ -23,6 +24,7 @@ pub use sheets::{
 pub use sim::{
     fixture_scenario_1, match_published_rows, run_all, run_scenario, simulate_fight,
 };
+pub use consideration::{con_band, ConBand};
 pub use types::{
     melee_auto_legal, tab_candidates, Aggro, CombatResources, LivePlayer, Shaken, TargetLock,
     WorldCombat, WorldHostile,

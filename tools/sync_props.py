@@ -43,6 +43,9 @@ WANTED: dict[str, tuple[str, ...]] = {
         "rock_riverstone_flat",
         "rock_slab_veined",
         "rock_talus_shard",
+        "cairn_menhir_lean",
+        "cairn_pile_base",
+        "cairn_offering_slab",
     ),
     "trees": (
         "pine_alpine_short",

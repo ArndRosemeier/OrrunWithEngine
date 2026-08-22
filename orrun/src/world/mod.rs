@@ -55,7 +55,10 @@ pub use scatter::{
 };
 pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
 pub use settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
-pub use sites::{plan_overland_sites, OverlandSite, SiteKind};
+pub use sites::{
+    expected_overland_prop_count, plan_overland_sites, OverlandSite, SiteKind,
+    CAIRN_MENHIR_HEIGHT_M, CAIRN_STAMP_PIECES,
+};
 pub use villagers::VillagerLayer;
 pub use surface::{
     classify_settlement, ContinentalSurface, DungeonPin, SettlementPin, SurfaceColumn,

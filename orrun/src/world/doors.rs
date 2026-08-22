@@ -4,7 +4,7 @@ use engine::collision::{ActorBody, ColliderLayer, ColliderShape, StaticCollider}
 use engine::error::EngineResult;
 use engine::mesh::Mesh;
 use engine::place::GlobalPlace;
-use engine::portal::SpaceId;
+use engine::portal::{PortalId, PortalSettings, SpaceId};
 use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
 use glam::Vec2;
@@ -18,10 +18,6 @@ const LOOK_DOT: f32 = 0.35;
 const SWING_S: f32 = 0.40;
 const OPEN_YAW_DEG: f32 = 95.0;
 const OPENING_H: f32 = 2.16;
-const PORTAL_EYE_FROM_CENTER_M: f32 = 0.60;
-// Keep the oblique near plane safely in front of the virtual eye. A smaller
-// setback can collapse the portal clip volume to an empty image.
-const PORTAL_VIEW_SETBACK_M: f32 = 0.50;
 const DOOR_LAYER: ColliderLayer = 3;
 const INTERIOR_LAYER: ColliderLayer = 4;
 
@@ -38,9 +34,8 @@ struct LiveHouse {
     space: SpaceId,
     leaf: EntityId,
     door_out: EntityId,
-    door_in: EntityId,
     interior: Vec<EntityId>,
-    linked: bool,
+    portal: PortalId,
     swing: Swing,
     open01: f32,
     floor_y: f32,
@@ -180,16 +175,15 @@ impl DoorLayer {
         let mut interior = spawn_layout(world, door, &layout)?;
         interior.push(door_in);
         world.in_space(SpaceId::DEFAULT)?;
-        link_house_portal(world, door_out, door_in)?;
+        let portal = link_house_portal(world, door_out, door_in)?;
         replace_interior_colliders(world, space, door, &layout);
         self.live = Some(LiveHouse {
             door_id: door.id,
             space,
             leaf,
             door_out,
-            door_in,
             interior,
-            linked: true,
+            portal,
             swing: Swing::Opening,
             open01: 0.0,
             floor_y: door.floor_y,
@@ -229,16 +223,10 @@ impl DoorLayer {
         world.set_anchored_place(live.leaf, door.leaf_place(yaw))?;
 
         if matches!(live.swing, Swing::Closed) {
-            if live.linked {
-                world.unlink(live.door_out, live.door_in)?;
-                live.linked = false;
-            }
+            world.set_portal_enabled(live.portal, false)?;
             replace_door_collider(world, door, yaw);
         } else {
-            if !live.linked {
-                link_house_portal(world, live.door_out, live.door_in)?;
-                live.linked = true;
-            }
+            world.set_portal_enabled(live.portal, true)?;
             world.collision_mut().clear_layer(DOOR_LAYER);
         }
         Ok(())
@@ -248,9 +236,7 @@ impl DoorLayer {
         let Some(live) = self.live.take() else {
             return Ok(());
         };
-        if live.linked {
-            world.unlink(live.door_out, live.door_in)?;
-        }
+        world.destroy_portal(live.portal)?;
         world.despawn(live.leaf);
         world.despawn(live.door_out);
         for id in live.interior {
@@ -265,13 +251,12 @@ impl DoorLayer {
     }
 }
 
-fn link_house_portal(world: &mut World, outside: EntityId, inside: EntityId) -> EngineResult<()> {
-    world.link_threshold_view(
-        outside,
-        inside,
-        PORTAL_EYE_FROM_CENTER_M,
-        PORTAL_VIEW_SETBACK_M,
-    )
+fn link_house_portal(
+    world: &mut World,
+    outside: EntityId,
+    inside: EntityId,
+) -> EngineResult<PortalId> {
+    world.create_portal(outside, inside, PortalSettings::TELEPORTING)
 }
 
 fn settle_position(
@@ -286,7 +271,10 @@ fn settle_position(
     let (nx, nz) = kit::yaw_xz(0.0, normal_z * clearance, yaw_degrees);
     let safe = GlobalXZ::at(opening.x + f64::from(nx), opening.z + f64::from(nz));
     let wanted = feet.horizontal();
-    let settled = world.move_actor(body, safe, wanted.x - safe.x, wanted.z - safe.z);
+    // Slide from just inside the jamb toward the requested point. Starting at
+    // `feet` would add the portal offset twice and can tunnel through the room.
+    let start = GlobalPosition::at(safe.x, opening.y, safe.z);
+    let settled = world.move_actor(body, start, wanted.x - safe.x, wanted.z - safe.z);
     feet.x = settled.x;
     feet.z = settled.z;
 }
@@ -304,6 +292,9 @@ fn spawn_layout(
 ) -> EngineResult<Vec<EntityId>> {
     let mut ids = Vec::new();
     for item in layout.pieces.iter().chain(layout.furniture.iter()) {
+        if item.piece.as_str() == "plinth" {
+            continue;
+        }
         let (dx, dz) = crate::hamlet::kit::yaw_xz(
             item.place.position.x,
             item.place.position.z,
@@ -406,7 +397,7 @@ fn replace_interior_colliders(
             }
             // Stair height is handled by indoor_stand_y. A horizontal box
             // over its footprint would make the stair impossible to climb.
-            "stair" | "floor" | "ceiling" | "plinth" => {}
+            "stair" | "floor" | "loft_floor" | "ceiling" | "plinth" => {}
             other => panic!("indoor structural collider is undefined for '{other}'"),
         }
     }
@@ -458,6 +449,11 @@ fn push_door_jambs(
     }
 }
 
+fn piece_y_span(door: &HouseDoor, item: &modular::prelude::PlacedMesh) -> (f64, f64) {
+    let base = door.floor_y as f64 + f64::from(item.place.position.y);
+    (base, base + f64::from(STOREY_M))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_piece_box(
     colliders: &mut Vec<StaticCollider>,
@@ -481,12 +477,14 @@ fn push_piece_box(
         door.house_at.x + f64::from(piece_dx + shape_dx),
         door.house_at.z + f64::from(piece_dz + shape_dz),
     );
+    let (min_y, max_y) = piece_y_span(door, item);
     colliders.push(
         StaticCollider::new(
             at,
             (item_yaw + yaw_offset_deg).to_radians(),
             ColliderShape::Box { half_x, half_z },
         )
+        .with_y_span(min_y, max_y)
         .in_space(space),
     );
 }
@@ -613,10 +611,88 @@ mod tests {
         world.live_in(space).expect("live indoors");
 
         let body = ActorBody::player();
-        let to = world.move_actor(&body, GlobalXZ::at(0.0, -1.0), 0.0, 3.0);
+        let to = world.move_actor(
+            &body,
+            GlobalPosition::at(0.0, 0.0, -1.0),
+            0.0,
+            3.0,
+        );
         assert!(
             to.z > 1.0,
             "door jamb colliders closed the opening, z={}",
+            to.z
+        );
+    }
+
+    #[test]
+    fn two_storey_wall_piece_heights() {
+        let brief = crate::hamlet::DwellingBrief::new(4, 3, 2, crate::hamlet::HouseTheme::Any);
+        let layout = interior::assemble(brief, 7);
+        let ground = layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                matches!(p.piece.as_str(), "wall" | "wall_b" | "partition" | "door" | "corner")
+                    && p.place.position.y < 0.5
+            })
+            .count();
+        let upper = layout
+            .pieces
+            .iter()
+            .filter(|p| {
+                matches!(p.piece.as_str(), "wall" | "wall_b" | "partition" | "door" | "corner")
+                    && (p.place.position.y - STOREY_M).abs() < 0.1
+            })
+            .count();
+        assert_eq!(ground, upper, "each ring cell should have one wall per storey");
+        assert!(
+            layout
+                .pieces
+                .iter()
+                .any(|p| p.piece.as_str() == "door" && p.place.position.y < 0.5),
+            "ground door must stay on the lower storey"
+        );
+        assert!(
+            layout.pieces.iter().any(|p| {
+                matches!(
+                    p.piece.as_str(),
+                    "wall" | "wall_b" | "partition" | "door" | "corner"
+                ) && (p.place.position.y - STOREY_M).abs() < 0.1
+            }),
+            "upper wall over the door must be tagged to the loft"
+        );
+    }
+
+    #[test]
+    fn two_storey_upper_walls_do_not_block_the_doorway_at_ground_level() {
+        let mut door = door_at(0.0, 0.0, 180.0);
+        door.brief = crate::hamlet::DwellingBrief::new(4, 3, 2, crate::hamlet::HouseTheme::Any);
+        let layout = interior::assemble(door.brief, door.seed);
+        assert!(
+            layout
+                .pieces
+                .iter()
+                .any(|p| {
+                    matches!(p.piece.as_str(), "wall" | "wall_b" | "partition")
+                        && (p.place.position.y - STOREY_M).abs() < 0.1
+                }),
+            "expected an upper-storey wall ring"
+        );
+        let mut world = World::new();
+        let space = world.space("test-house").expect("space");
+        replace_interior_colliders(&mut world, space, &door, &layout);
+        world.live_in(space).expect("live indoors");
+
+        let body = ActorBody::player();
+        let to = world.move_actor(
+            &body,
+            GlobalPosition::at(0.0, 0.0, 2.0),
+            0.0,
+            -3.0,
+        );
+        assert!(
+            to.z < 0.5,
+            "upper-storey wall colliders blocked the doorway at ground level, z={}",
             to.z
         );
     }
@@ -660,6 +736,40 @@ mod tests {
             inside_place.position.z,
             landed.z
         );
+    }
+
+    #[test]
+    fn two_storey_portal_round_trip() {
+        let mut door = door_at(0.0, 0.0, 180.0);
+        door.brief = crate::hamlet::DwellingBrief::new(4, 3, 2, crate::hamlet::HouseTheme::Any);
+        let layout = interior::assemble(door.brief, door.seed);
+        let mut world = World::new();
+        let out = world
+            .spawn_anchored(
+                Mesh::opening(door.opening_width, OPENING_H).expect("opening"),
+                door.opening_out(),
+            )
+            .expect("outside opening");
+        let space = world.space("test-house").expect("space");
+        world.in_space(space).expect("spawn indoors");
+        let inside = world
+            .spawn_anchored(
+                Mesh::opening(door.opening_width, OPENING_H).expect("opening"),
+                house_place(&door, layout.door_local),
+            )
+            .expect("inside opening");
+        world.in_space(SpaceId::DEFAULT).expect("spawn outside");
+        link_house_portal(&mut world, out, inside).expect("link");
+
+        let mut yaw = 0.0;
+        let mut position = world
+            .to_render(GlobalPosition::at(0.0, 0.05, -1.0))
+            .expect("outside point");
+        assert!(world.travel(&mut position, &mut yaw).is_none());
+        position = world
+            .to_render(GlobalPosition::at(0.0, 0.05, 0.5))
+            .expect("entered point");
+        assert_eq!(world.travel(&mut position, &mut yaw), Some(space));
     }
 
     #[test]

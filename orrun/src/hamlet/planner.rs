@@ -174,18 +174,52 @@ fn place_castle(
     house_depth: f32,
     plot: Option<&dyn Plot>,
 ) -> Result<(), HamletError> {
-    let Some(catalog_id) = castle::id_for_tier(config.tier) else {
-        return Ok(());
-    };
+    for tier in (1..=config.tier).rev() {
+        let Some(catalog_id) = castle::id_for_tier(tier) else {
+            continue;
+        };
+        if try_place_castle(
+            config,
+            plan,
+            occ,
+            houses,
+            rng,
+            house_depth,
+            plot,
+            catalog_id,
+        )? {
+            if tier < config.tier {
+                eprintln!(
+                    "HamletLabPlanner: downgraded castle to {catalog_id} (tier {tier} < {})",
+                    config.tier
+                );
+            }
+            return Ok(());
+        }
+    }
+    eprintln!(
+        "HamletLabPlanner: no castle footprint fit (tier {}, seed {})",
+        config.tier, config.seed
+    );
+    Ok(())
+}
+
+/// Returns `true` when the keep was placed.
+fn try_place_castle(
+    config: &HamletLabConfig,
+    plan: &mut Plan2D,
+    occ: &mut Occupancy,
+    houses: &mut Vec<PlacedBuilding>,
+    rng: &mut ChaCha8Rng,
+    house_depth: f32,
+    plot: Option<&dyn Plot>,
+    catalog_id: &str,
+) -> Result<bool, HamletError> {
     let spec = catalog::spec_for(catalog_id).ok_or_else(|| HamletError::UnknownCatalogId {
         id: catalog_id.to_string(),
     })?;
     if spec.min_tier > config.tier {
-        return Err(HamletError::CivicTier {
-            id: catalog_id.to_string(),
-            min_tier: spec.min_tier,
-            settlement_tier: config.tier,
-        });
+        return Ok(false);
     }
     let half_x = spec.half_x();
     let half_z = spec.half_z();
@@ -207,9 +241,7 @@ fn place_castle(
     }
     let max_r = (config.max_settle_radius - reach).max(0.0);
     if min_r > max_r {
-        return Err(HamletError::PlaceFailed {
-            catalog_id: catalog_id.to_string(),
-        });
+        return Ok(false);
     }
 
     let mut pick: Option<Candidate> = None;
@@ -282,9 +314,7 @@ fn place_castle(
     }
 
     let Some(pick) = pick else {
-        return Err(HamletError::PlaceFailed {
-            catalog_id: catalog_id.to_string(),
-        });
+        return Ok(false);
     };
 
     plan.shapes.push(Shape {
@@ -307,7 +337,7 @@ fn place_castle(
         dwelling: None,
     });
     plan.castle_count = 1;
-    Ok(())
+    Ok(true)
 }
 
 fn civic_ids_for_tier(tier: u8) -> Result<Vec<&'static str>, HamletError> {

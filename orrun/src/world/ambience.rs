@@ -48,6 +48,8 @@ const COMBAT_HIT_CLIP: &str = "combat/hit.wav";
 const COMBAT_SWING_CLIP: &str = "combat/swing.wav";
 const COMBAT_HURT_CLIP: &str = "combat/hurt.wav";
 const COMBAT_PEAK: f32 = 0.45;
+/// Incoming mob strikes: softer swish, not a full outgoing hit.
+const COMBAT_INCOMING_PEAK: f32 = 0.30;
 
 #[derive(Debug, Error)]
 pub enum AmbienceError {
@@ -162,7 +164,7 @@ impl Ambience {
             self.combat_hurt,
             Play {
                 looped: false,
-                volume: COMBAT_PEAK,
+                volume: COMBAT_INCOMING_PEAK,
             },
         )?;
         Ok(())
@@ -529,6 +531,7 @@ mod tests {
             "ocean.wav",
             "combat/hit.wav",
             "combat/swing.wav",
+            "combat/hurt.wav",
         ] {
             let path = dir.join(name);
             assert!(
