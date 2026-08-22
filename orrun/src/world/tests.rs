@@ -2774,6 +2774,60 @@ fn a_lake_bound_river_reaches_its_lake() {
 }
 
 #[test]
+fn seed_20260809_underwater_beds_are_not_landform_cliffs_near_289108_712053() {
+    let (_atlas, surface) = world_of(20260809, 1000);
+    let cx = 289_108.0;
+    let cz = 712_053.0;
+    let mut max_step = 0.0_f32;
+    for dz in -12..=12 {
+        let mut prev: Option<f32> = None;
+        for dx in -12..=12 {
+            let x = cx + dx as f64 * 100.0;
+            let z = cz + dz as f64 * 100.0;
+            let c = surface.column(GlobalXZ::at(x, z));
+            if !c.is_wet() {
+                prev = None;
+                continue;
+            }
+            let depth = c.water_top().unwrap_or(0.0) - c.ground();
+            if depth < 100.0 {
+                prev = None;
+                continue;
+            }
+            if let Some(pg) = prev {
+                max_step = max_step.max((c.ground() - pg).abs());
+            }
+            prev = Some(c.ground());
+        }
+    }
+    assert!(
+        max_step < 20.0,
+        "deep wet beds must not carry landform cliffs: largest 100 m row step was {max_step:.1} m"
+    );
+}
+
+#[test]
+fn seed_20260809_has_no_coast_saturation_cliff_near_273358_716684() {
+    let (_atlas, surface) = world_of(20260809, 1000);
+    let z = 716_684.0;
+    let mut prev_ground: Option<f32> = None;
+    let mut max_step = 0.0_f32;
+    for i in -20..=20 {
+        let x = 273_358.0 + i as f64 * 100.0;
+        let p = GlobalXZ::at(x, z);
+        let ground = surface.column(p).ground();
+        if let Some(prev) = prev_ground {
+            max_step = max_step.max((ground - prev).abs());
+        }
+        prev_ground = Some(ground);
+    }
+    assert!(
+        max_step < 80.0,
+        "coast saturation must not cliff: largest 100 m step was {max_step:.1} m"
+    );
+}
+
+#[test]
 fn the_coast_index_matches_an_exhaustive_scan() {
     let (atlas, surface) = world_of(11, 48);
     let hydro = &atlas.hydro;

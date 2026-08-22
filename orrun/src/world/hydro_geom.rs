@@ -27,8 +27,10 @@ pub const COAST_QUERY_M: f32 = 2_400.0;
 /// all read [`HydroIndex::coast_signed`], which ends here.
 ///
 /// * A ring that actually reaches the point is the meandered waterline.
-/// * No ring, or a ring that only reports a saturated "outside", falls back
-///   to the atlas cell: ocean stays ocean, everything else is inland.
+/// * No ring in the cell index falls back to the atlas cell: ocean stays
+///   ocean, everything else is inland.
+/// * A saturated ring distance keeps its sign: deep outside a land ring stays
+///   ocean even when the atlas cell is dry land.
 pub fn resolve_coast_signed(ring_sd: Option<f32>, atlas_ocean: bool) -> f32 {
     match ring_sd {
         None if atlas_ocean => OPEN_OCEAN_SD,
@@ -36,7 +38,6 @@ pub fn resolve_coast_signed(ring_sd: Option<f32>, atlas_ocean: bool) -> f32 {
         Some(sd) if !sd.is_finite() => {
             panic!("coast ring signed distance must be finite, got {sd}")
         }
-        Some(sd) if sd < 0.0 && !atlas_ocean && sd <= -COAST_QUERY_M + 1.0 => COAST_QUERY_M,
         Some(sd) => sd,
     }
 }
@@ -254,10 +255,10 @@ mod resolve_tests {
     }
 
     #[test]
-    fn a_saturated_outside_on_land_is_inland_not_ocean() {
+    fn saturated_ocean_outside_a_land_ring_stays_ocean() {
         assert_eq!(
             resolve_coast_signed(Some(-COAST_QUERY_M), false),
-            COAST_QUERY_M
+            -COAST_QUERY_M
         );
     }
 }

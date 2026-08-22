@@ -1023,7 +1023,11 @@ impl ContinentalSurface {
             // cell already reads tens of metres down, and taking it directly at
             // the rim left a cliff between the last dry sample and the first wet
             // one.
-            ground = lerp(sea, ground.min(sea - depth), shelf);
+            //
+            // Knolls and ravines are landforms; carved underwater they read as
+            // sheets of water pouring down a wall through the transparent surface.
+            let bed = self.detail.elevation(&self.fields, x, z, 0.0);
+            ground = lerp(sea, bed.min(sea - depth), shelf);
         } else {
             let dryness = smoothstep(0.0, SHORE_BAND_M, coast_sd);
             let beach = sea + INLAND_FREEBOARD * dryness;
@@ -1038,7 +1042,8 @@ impl ContinentalSurface {
             if sd >= 0.0 {
                 let deep = smoothstep(0.0, LAKE_SHALLOW_M, sd);
                 let target = lerp(sheet - MIN_WATER_DEPTH, sheet - LAKE_BED_DEPTH, deep);
-                ground = ground.min(target);
+                let bed = self.detail.elevation(&self.fields, x, z, 0.0);
+                ground = bed.min(target);
             } else {
                 // Meet the sheet at the rim so the shore has no wall or spill.
                 let away = smoothstep(0.0, LAKE_BANK_M, -sd);
