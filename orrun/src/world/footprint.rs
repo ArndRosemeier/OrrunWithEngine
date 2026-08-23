@@ -291,12 +291,84 @@ impl DungeonPlot {
     }
 }
 
+/// Hillside bowl + sloped approach for a volumetric cave mouth.
+///
+/// Unlike [`DungeonPlot`] (a flat-floored pit), the mouth floor tilts along
+/// the hillside normal: the approach descends from `rim_y` at the downhill
+/// lip to `floor_y` at the portal, and the bowl itself is a smooth dish so
+/// the carved terrain reads as a natural hollow, not an excavated shaft.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CavePlot {
+    pub at: GlobalXZ,
+    /// Bowl radius (metres).
+    pub half: f32,
+    /// Ground height at the portal (lowest point of the bowl).
+    pub floor_y: f32,
+    /// Untouched terrain height at the rim.
+    pub rim_y: f32,
+    /// Yaw pointing uphill (away from the approach).
+    pub approach_yaw: f32,
+}
+
+impl CavePlot {
+    fn local_xz(self, p: GlobalXZ) -> (f32, f32) {
+        let dx = (p.x - self.at.x) as f32;
+        let dz = (p.z - self.at.z) as f32;
+        let (sin, cos) = (self.approach_yaw.sin(), self.approach_yaw.cos());
+        (dx * cos - dz * sin, dx * sin + dz * cos)
+    }
+
+    pub fn blocks_prop(self, p: GlobalXZ) -> bool {
+        let (lx, lz) = self.local_xz(p);
+        (lx * lx + lz * lz).sqrt() <= self.half + PROP_CLEAR_M
+    }
+
+    pub fn urban_cover(self, _p: GlobalXZ) -> bool {
+        false
+    }
+
+    /// Smooth hemispherical dish: full depth at the centre, zero at the rim,
+    /// with the deepest point biased toward the uphill wall where the portal
+    /// sits. The approach ramp blends linearly from the rim on the downhill
+    /// side — the hillside-normal variant of [`DungeonPlot::terrain_cap`].
+    pub fn terrain_cap(self, p: GlobalXZ) -> Option<f32> {
+        let (lx, lz) = self.local_xz(p);
+        let r = (lx * lx + lz * lz).sqrt();
+        if r > self.half {
+            return None;
+        }
+        // −1 at the uphill edge (portal), +1 at the downhill lip.
+        let bias = (lz / self.half).clamp(-1.0, 1.0);
+        // Dish depth: cosine falloff from centre to rim.
+        let t = (r / self.half).clamp(0.0, 1.0);
+        let dish = (1.0 - (t * std::f32::consts::FRAC_PI_2).cos()) * (self.rim_y - self.floor_y);
+        // Bias shifts the low point uphill; clamp keeps the rim exact.
+        let shift = bias * 0.25 * (self.rim_y - self.floor_y) * (1.0 - t);
+        Some(self.rim_y - (dish + shift).max(0.0))
+    }
+
+    fn aabb(self) -> (f64, f64, f64, f64) {
+        let reach = f64::from(self.half);
+        (
+            self.at.x - reach,
+            self.at.z - reach,
+            self.at.x + reach,
+            self.at.z + reach,
+        )
+    }
+
+    pub fn colliders(self) -> Vec<StaticCollider> {
+        Vec::new()
+    }
+}
+
 /// House room or castle ring/keep. Scatter and terrain query this, not a filled castle OBB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BuildingPlot {
     House(HousePlot),
     Castle(CastlePlot),
     Dungeon(DungeonPlot),
+    Cave(CavePlot),
 }
 
 impl BuildingPlot {
@@ -305,6 +377,7 @@ impl BuildingPlot {
             Self::House(h) => h.blocks_prop(p),
             Self::Castle(c) => c.blocks_prop(p),
             Self::Dungeon(d) => d.blocks_prop(p),
+            Self::Cave(v) => v.blocks_prop(p),
         }
     }
 
@@ -313,6 +386,7 @@ impl BuildingPlot {
             Self::House(h) => h.urban_cover(p),
             Self::Castle(c) => c.urban_cover(p),
             Self::Dungeon(d) => d.urban_cover(p),
+            Self::Cave(v) => v.urban_cover(p),
         }
     }
 
@@ -321,6 +395,7 @@ impl BuildingPlot {
             Self::House(h) => h.terrain_cap(p),
             Self::Castle(c) => c.terrain_cap(p),
             Self::Dungeon(d) => d.terrain_cap(p),
+            Self::Cave(v) => v.terrain_cap(p),
         }
     }
 
@@ -334,6 +409,7 @@ impl BuildingPlot {
             Self::House(h) => h.terrain_cap(p),
             Self::Castle(c) => c.terrain_cap(p),
             Self::Dungeon(_) => None,
+            Self::Cave(_) => None,
         }
     }
 
@@ -342,6 +418,7 @@ impl BuildingPlot {
             Self::House(h) => h.aabb(),
             Self::Castle(c) => c.aabb(),
             Self::Dungeon(d) => d.aabb(),
+            Self::Cave(v) => v.aabb(),
         }
     }
 
@@ -350,6 +427,7 @@ impl BuildingPlot {
             Self::House(h) => h.colliders(),
             Self::Castle(c) => c.colliders(),
             Self::Dungeon(d) => d.colliders(),
+            Self::Cave(v) => v.colliders(),
         }
     }
 }

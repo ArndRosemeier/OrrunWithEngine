@@ -84,7 +84,7 @@ pub fn best_settlement_entry(
     ponds: &PondField,
 ) -> Result<(SettlementPin, WorldEntryRequest), EntryError> {
     let bounds = surface.bounds();
-    let mut pins: Vec<SettlementPin> = surface.settlements().iter().copied().collect();
+    let mut pins: Vec<SettlementPin> = surface.settlements().to_vec();
     if pins.is_empty() {
         return Err(EntryError::NoSpawn {
             x: 0.0,
@@ -92,7 +92,7 @@ pub fn best_settlement_entry(
             radius: SEARCH_RADIUS_M,
         });
     }
-    pins.sort_by(|a, b| (b.tier, b.population, b.id).cmp(&(a.tier, a.population, a.id)));
+    pins.sort_by_key(|b| std::cmp::Reverse((b.tier, b.population, b.id)));
     let mut last = None;
     for pin in pins {
         let point = match MapPoint::from_global(bounds, pin.at) {

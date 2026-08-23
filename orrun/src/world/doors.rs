@@ -519,11 +519,7 @@ fn world_to_house_local(feet: GlobalPosition, house_at: GlobalXZ, yaw_deg: f32) 
     (dx * cos - dz * sin, dx * sin + dz * cos)
 }
 
-fn nearest_door<'a>(
-    doors: &'a [HouseDoor],
-    feet: GlobalPosition,
-    facing: Vec2,
-) -> Option<&'a HouseDoor> {
+fn nearest_door(doors: &[HouseDoor], feet: GlobalPosition, facing: Vec2) -> Option<&HouseDoor> {
     let mut best: Option<(&HouseDoor, f32)> = None;
     for door in doors {
         let dx = (door.at.x - feet.x) as f32;

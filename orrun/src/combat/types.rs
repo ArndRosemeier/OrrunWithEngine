@@ -372,9 +372,7 @@ impl WorldCombat {
         if self.player.stats.discipline != Discipline::Martial {
             return None;
         }
-        let Some(lock) = self.lock else {
-            return None;
-        };
+        let lock = self.lock?;
         let Some(hi) = self.hostiles.iter().position(|h| h.idx == lock && h.alive) else {
             self.lock = None;
             return None;

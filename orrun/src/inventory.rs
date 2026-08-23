@@ -213,12 +213,10 @@ impl Inventory {
     /// Put an item in the bag. Stacks potions/arrows. False if the bag is full.
     pub fn take_item(&mut self, item: Item) -> bool {
         if item.kind.stacks() {
-            for slot in &mut self.bag {
-                if let Some(have) = slot {
-                    if have.kind == item.kind {
-                        have.count = have.count.saturating_add(item.count);
-                        return true;
-                    }
+            for have in self.bag.iter_mut().flatten() {
+                if have.kind == item.kind {
+                    have.count = have.count.saturating_add(item.count);
+                    return true;
                 }
             }
         }

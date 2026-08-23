@@ -372,12 +372,9 @@ impl KeyBinds {
             return None;
         }
         let name = key.as_str();
-        for action in Action::ALL {
-            if self.slot(action) == Some(name) {
-                return Some(action);
-            }
-        }
-        None
+        Action::ALL
+            .into_iter()
+            .find(|&action| self.slot(action) == Some(name))
     }
 
     pub fn verb_for(&self, key: Key) -> Option<Action> {

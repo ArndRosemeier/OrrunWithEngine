@@ -5,7 +5,7 @@
 
 use engine::color::rgb;
 use engine::texture::{TerrainAlbedo, TerrainMaterialDesc, WaterMaterialDesc};
-use engine::world::{Haze, ShadowSettings, Sky, World};
+use engine::world::{Haze, ShadowSettings, Sky, TorchLight, World};
 
 use super::chunk_mesh::WATER_DEPTH_SCALE_M;
 use super::world_stream::FAR_VIEW_M;
@@ -47,6 +47,9 @@ pub fn install_daylight(world: &mut World) {
     let sky = Sky::daylight();
     world.set_sun(SUN_DIR, 0.34);
     world.light.color = sky.sun_color.to_vec3();
+    // The walker carries a lantern. In daylight it is drowned by the sun; in a
+    // cave or at dusk it is the only light there is.
+    world.set_torch(Some(TorchLight::lantern()));
     world.set_sky(Some(sky));
     world.set_clear_color(sky.horizon);
     world.set_haze(Some(

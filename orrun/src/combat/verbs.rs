@@ -127,10 +127,8 @@ impl WorldCombat {
             });
             return false;
         }
-        if verb != CombatVerb::Potion {
-            if self.cast_kind.is_some() || self.gcd > 0.0 {
-                return false;
-            }
+        if verb != CombatVerb::Potion && (self.cast_kind.is_some() || self.gcd > 0.0) {
+            return false;
         }
         if self.cd(verb.id()) > 0.0 {
             return false;

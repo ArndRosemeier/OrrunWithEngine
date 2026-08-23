@@ -332,13 +332,15 @@ fn player_ai_start(p: &mut Player, mobs: &mut [Mob], _kite: bool) {
         return;
     }
 
-    if disc == Discipline::Martial && p.rank(Discipline::Martial) >= 10 && !p.second_wind_used {
-        if p.hp < 0.25 * p.max_hp {
-            p.hp = (p.hp + SECOND_WIND_PCT * p.max_hp).min(p.max_hp);
-            p.second_wind_used = true;
-            p.bump_spell("SecondWind");
-            return;
-        }
+    if disc == Discipline::Martial
+        && p.rank(Discipline::Martial) >= 10
+        && !p.second_wind_used
+        && p.hp < 0.25 * p.max_hp
+    {
+        p.hp = (p.hp + SECOND_WIND_PCT * p.max_hp).min(p.max_hp);
+        p.second_wind_used = true;
+        p.bump_spell("SecondWind");
+        return;
     }
 
     if disc == Discipline::Martial {
@@ -681,37 +683,37 @@ pub fn tick(p: &mut Player, mobs: &mut [Mob], desired_range: f64, kite: bool) {
     }
 
     let grit = p.stats.attrs.grit;
-    for i in 0..mobs.len() {
-        if !mobs[i].alive || mobs[i].stun > 0.0 {
+    for mob in mobs.iter_mut() {
+        if !mob.alive || mob.stun > 0.0 {
             continue;
         }
-        if mobs[i].has_slam {
-            if mobs[i].tele > 0.0 {
-                mobs[i].tele = (mobs[i].tele - TICK).max(0.0);
-                if mobs[i].tele <= 0.0 && p.alive && dist(p, &mobs[i]) <= mobs[i].reach {
-                    let raw = trunc(mobs[i].slam_dmg * mobs[i].dmg_mult());
+        if mob.has_slam {
+            if mob.tele > 0.0 {
+                mob.tele = (mob.tele - TICK).max(0.0);
+                if mob.tele <= 0.0 && p.alive && dist(p, mob) <= mob.reach {
+                    let raw = trunc(mob.slam_dmg * mob.dmg_mult());
                     let dealt = mitigation(f64::from(raw), grit);
                     apply_player_damage(p, dealt, true);
                 }
             } else {
-                mobs[i].slam_cd -= TICK;
-                if mobs[i].slam_cd <= 0.0 {
-                    mobs[i].tele = mobs[i].tele_len;
-                    let every = mobs[i].sheet.slam_every_s.unwrap_or(8.0);
-                    mobs[i].slam_cd += every;
+                mob.slam_cd -= TICK;
+                if mob.slam_cd <= 0.0 {
+                    mob.tele = mob.tele_len;
+                    let every = mob.sheet.slam_every_s.unwrap_or(8.0);
+                    mob.slam_cd += every;
                 }
             }
         }
-        if dist(p, &mobs[i]) <= mobs[i].reach {
-            mobs[i].auto_cd -= TICK;
-            if mobs[i].auto_cd <= 0.0 {
-                let raw = trunc(mobs[i].base_dmg * mobs[i].dmg_mult());
+        if dist(p, mob) <= mob.reach {
+            mob.auto_cd -= TICK;
+            if mob.auto_cd <= 0.0 {
+                let raw = trunc(mob.base_dmg * mob.dmg_mult());
                 let dealt = mitigation(f64::from(raw), grit);
                 apply_player_damage(p, dealt, true);
-                if mobs[i].sheet.id == "crawler_scorpion" && p.alive {
+                if mob.sheet.id == "crawler_scorpion" && p.alive {
                     p.poison_t = SCORP_POISON_S;
                 }
-                mobs[i].auto_cd += mobs[i].swing;
+                mob.auto_cd += mob.swing;
             }
         }
     }
@@ -875,7 +877,7 @@ fn even_1v1_pass(r: &Value) -> (bool, &'static str) {
         return (false, "player must win");
     }
     let ttk = r["time_to_kill_s"].as_f64();
-    if ttk.map(|t| t < 8.0 || t > 14.0).unwrap_or(true) {
+    if ttk.map(|t| !(8.0..=14.0).contains(&t)).unwrap_or(true) {
         return (false, "TTK not in 8.0-14.0");
     }
     let hp = r["hp_remaining"].as_f64().unwrap_or(0.0);
@@ -917,7 +919,7 @@ fn pale_hall_pass(r: &Value) -> (bool, &'static str) {
         return (false, "must WIN");
     }
     let ttk = r["time_to_kill_s"].as_f64();
-    if ttk.map(|t| t < 20.0 || t > 50.0).unwrap_or(true) {
+    if ttk.map(|t| !(20.0..=50.0).contains(&t)).unwrap_or(true) {
         return (false, "TTK not in 20-50 (room)");
     }
     if r["hp_remaining"].as_i64().unwrap_or(0) <= 0 {
@@ -937,7 +939,7 @@ fn heart_pass(r: &Value) -> (bool, &'static str) {
         return (false, "must WIN");
     }
     let ttk = r["time_to_kill_s"].as_f64();
-    if ttk.map(|t| t < 25.0 || t > 45.0).unwrap_or(true) {
+    if ttk.map(|t| !(25.0..=45.0).contains(&t)).unwrap_or(true) {
         return (false, "TTK not in 25-45 (heart)");
     }
     let hp = r["hp_remaining"].as_f64().unwrap_or(0.0);

@@ -136,7 +136,7 @@ impl VillagerLayer {
         let animated: Vec<EntityId> = world.animated_entities().map(|(id, _)| *id).collect();
         self.people
             .iter()
-            .filter(|p| animated.iter().any(|id| *id == p.entity) || world.entity(p.entity).is_ok())
+            .filter(|p| animated.contains(&p.entity) || world.entity(p.entity).is_ok())
             .count()
     }
 
@@ -300,7 +300,7 @@ impl VillagerLayer {
         }
 
         for door in doors.iter().skip(linger_n) {
-            if spawned >= MIN_PEOPLE.max(6).min(MAX_PEOPLE) {
+            if spawned >= MIN_PEOPLE.clamp(6, MAX_PEOPLE) {
                 break;
             }
             let Some(model) = casual.clone() else {
@@ -791,11 +791,7 @@ fn alley_spot(hamlet: &HamletStand, plots: &[BuildingPlot]) -> Option<(GlobalXZ,
     let (s, c) = h.yaw.sin_cos();
     let side = f64::from(h.half_x + 0.6 + 0.8);
     let at = GlobalXZ::at(h.at.x + f64::from(c) * side, h.at.z + f64::from(s) * side);
-    if hamlet.covers(at, 0.0) && !houses.iter().any(|o| o.contains_xz(at)) {
-        Some((at, h.yaw.to_degrees()))
-    } else {
-        Some((at, h.yaw.to_degrees()))
-    }
+    Some((at, h.yaw.to_degrees()))
 }
 
 #[cfg(test)]

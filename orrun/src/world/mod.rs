@@ -14,6 +14,7 @@ mod combat_layer;
 mod coords;
 mod doors;
 mod dungeon;
+mod cave;
 mod entry;
 mod fauna;
 mod footprint;
@@ -43,10 +44,11 @@ pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,
 };
+pub use cave::{CaveError, CaveLayer, CAVE_LIVE_OPEN_M};
 pub use dungeon::{DungeonError, DungeonLayer, LIVE_OPEN_M};
 pub use entry::{best_settlement_entry, resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaRole, FaunaSpec};
-pub use footprint::{BuildingIndex, BuildingPlot, CastlePlot, DungeonPlot, HousePlot};
+pub use footprint::{BuildingIndex, BuildingPlot, CavePlot, CastlePlot, DungeonPlot, HousePlot};
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;
 pub use ponds::{Pond, PondField, PondWindow, SharedPonds, COVERS_M, REBUILD_M, SEED_RADIUS_M};
@@ -61,8 +63,8 @@ pub use sites::{
 };
 pub use villagers::VillagerLayer;
 pub use surface::{
-    classify_settlement, ContinentalSurface, DungeonPin, SettlementPin, SurfaceColumn,
-    SurfaceError, SurfaceMaterial, TerrainLayers, WaterBody, MIN_WATER_DEPTH,
+    classify_settlement, CaveMouthPin, ContinentalSurface, DungeonPin, SettlementPin,
+    SurfaceColumn, SurfaceError, SurfaceMaterial, TerrainLayers, WaterBody, MIN_WATER_DEPTH,
 };
 pub use travel::{
     ContinentProxySpec, TravelPhase, TravelTimings, TravelView, MAX_PROXY_AXIS, PROXY_EXAGGERATION,

@@ -44,6 +44,7 @@ path = "src/bin/combat_sim.rs"
 [dependencies]
 engine = { workspace = true }
 modular = { workspace = true }
+cave_gen = { workspace = true }
 dungeon_kit = { path = "../../Modular/examples/dungeon_kit" }
 glam = { workspace = true }
 thiserror = { workspace = true }

@@ -1557,12 +1557,10 @@ impl CombatLayer {
         mut ground_y: impl FnMut(f64, f64) -> f64,
         dt: f32,
     ) -> EngineResult<()> {
-        if let Some((id, clip)) = self.pending_melee.take() {
-            if let Some(id) = id {
-                world.play_animation(id, clip).map_err(|err| {
-                    EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
-                })?;
-            }
+        if let Some((Some(id), clip)) = self.pending_melee.take() {
+            world.play_animation(id, clip).map_err(|err| {
+                EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
+            })?;
         }
         self.play_death_poses(world, combat)?;
         self.sync_lock_ring(world, combat, &mut ground_y)?;
@@ -1887,10 +1885,8 @@ fn log_finished_cast(
                 combat.log.push(format!("You Mend for {heal}"));
             }
         }
-        "ward" => {
-            if combat.ward > ward {
-                combat.log.push("You Ward");
-            }
+        "ward" if combat.ward > ward => {
+            combat.log.push("You Ward");
         }
         _ => {}
     }
@@ -2062,13 +2058,12 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) 
 }
 
 pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
-    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     let sheet = orc_skull_sheet();
-    for p in spots {
+    let next = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    for (idx, p) in (next..).zip(spots.iter()) {
         combat
             .hostiles
             .push(hostile_from_sheet(idx, p.x, p.z, &sheet, "orc_skull"));
-        idx += 1;
     }
 }
 

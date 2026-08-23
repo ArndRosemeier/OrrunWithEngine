@@ -373,21 +373,11 @@ impl Default for Attrs {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ranks {
     pub martial: i32,
     pub hunt: i32,
     pub arcane: i32,
-}
-
-impl Default for Ranks {
-    fn default() -> Self {
-        Self {
-            martial: 0,
-            hunt: 0,
-            arcane: 0,
-        }
-    }
 }
 
 

@@ -144,7 +144,7 @@ impl ContinentProxySpec {
     /// Sample the canonical surface onto a regular lattice.
     pub fn build(surface: &ContinentalSurface) -> Self {
         let cells = surface.bounds().size();
-        let axis = cells.min(MAX_PROXY_AXIS).max(2);
+        let axis = cells.clamp(2, MAX_PROXY_AXIS);
         let cell_metres = surface.bounds().metres() as f32 / axis as f32;
         let sea_z = surface.sea_surface_z();
         let mut heights = Vec::with_capacity(axis * axis);

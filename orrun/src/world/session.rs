@@ -29,6 +29,7 @@ use thiserror::Error;
 
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::doors::DoorLayer;
+use super::cave::CaveError;
 use super::dungeon::{DungeonError, DungeonLayer};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::fauna::{FaunaError, FaunaLayer};
@@ -80,6 +81,9 @@ pub enum SessionError {
 
     #[error(transparent)]
     Dungeon(#[from] DungeonError),
+
+    #[error(transparent)]
+    Cave(#[from] CaveError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -324,6 +328,8 @@ pub struct WorldSession {
     doors: DoorLayer,
     /// Atlas dungeon mouths: pits, background generate, floor hatches.
     dungeons: Option<DungeonLayer>,
+    /// Volumetric cave mouths: hillside bowls, lazy chamber generation, portals.
+    caves: super::cave::CaveLayer,
     state: SessionState,
     /// The request being loaded, until the water under it has been scanned and
     /// the spawn it resolves to is known.
@@ -370,6 +376,7 @@ impl WorldSession {
             villagers: None,
             doors: DoorLayer::new(),
             dungeons: None,
+            caves: super::cave::CaveLayer::install(),
             state: SessionState::Atlas,
             entering: None,
             spawn: None,
@@ -941,6 +948,7 @@ impl WorldSession {
         if let Some(dungeons) = &self.dungeons {
             plots.extend(dungeons.plots());
         }
+        plots.extend(self.caves.plots());
         Arc::new(BuildingIndex::new(plots))
     }
 
@@ -1155,10 +1163,10 @@ impl WorldSession {
             panic!("SessionState::Travel without a travel record");
         }
         self.assert_proxy_resident(world);
-        if self.travel.as_ref().expect("travel").handed_off {
-            if self.update_loading(world)? {
-                self.travel.as_mut().expect("travel").destination_ready = true;
-            }
+        if self.travel.as_ref().expect("travel").handed_off
+            && self.update_loading(world)?
+        {
+            self.travel.as_mut().expect("travel").destination_ready = true;
         }
         self.place_travel_marker(world)?;
 
@@ -1424,6 +1432,7 @@ impl WorldSession {
                 self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
                 self.villagers = Some(VillagerLayer::new());
                 self.dungeons = Some(DungeonLayer::install());
+                self.caves = super::cave::CaveLayer::install();
             }
             if let Some(dungeons) = self.dungeons.as_mut() {
                 let rebuilt =
@@ -1432,6 +1441,10 @@ impl WorldSession {
                     let plots = self.plot_index();
                     self.stream.set_house_plots(world, (*plots).clone())?;
                 }
+            }
+            if self.caves.follow(world, &self.surface, request.requested())? {
+                let plots = self.plot_index();
+                self.stream.set_house_plots(world, (*plots).clone())?;
             }
             if !self.ponds.traced(request.requested()) {
                 return Ok(false);
@@ -1463,6 +1476,10 @@ impl WorldSession {
                 let plots = self.plot_index();
                 self.stream.set_house_plots(world, (*plots).clone())?;
             }
+        }
+        if self.caves.follow(world, &self.surface, focus)? {
+            let plots = self.plot_index();
+            self.stream.set_house_plots(world, (*plots).clone())?;
         }
         self.stream.sync(world, focus, None)?;
         if !self.stream.required_ready(focus) {
@@ -1895,7 +1912,7 @@ impl WorldSession {
                     .as_ref()
                     .and_then(|d| d.indoor_floor_y(world, player.position))
                     .is_some();
-                if in_dungeon {
+                if self.caves.living_in_cave(world) || in_dungeon {
                     move_dungeon_walker(world, &mut player, dx, dz, input.jump, input.dt);
                 } else {
                     let to = world.move_actor(&player.body, player.position, dx, dz);
@@ -2138,6 +2155,17 @@ impl WorldSession {
                 ),
             );
         }
+        {
+            let t = Instant::now();
+            self.caves
+                .follow(world, &self.surface, GlobalXZ::at(player.position.x, player.position.z))?;
+            self.caves.frame(world, player.position, player.yaw_degrees)?;
+            world.hitch_span(
+                "cave_frame",
+                hitch_ms(t),
+                format!("generating={}", self.caves.generating()),
+            );
+        }
         self.sync_dungeon_skulls(world, &player)?;
         let hidden_leaf = self.doors.hidden_leaf();
         if let Some(settlements) = self.settlements.as_mut() {
@@ -2194,6 +2222,13 @@ impl WorldSession {
                     &mut player.yaw_degrees,
                 );
             }
+            self.caves.settle_after_travel(
+                world,
+                &player.body,
+                entered,
+                &mut player.position,
+                &mut player.yaw_degrees,
+            );
         }
 
         match player.mode {
@@ -2207,7 +2242,7 @@ impl WorldSession {
                     .as_ref()
                     .and_then(|d| d.indoor_floor_y(world, player.position))
                     .is_some();
-                if !in_dungeon {
+                if !in_dungeon && !self.caves.living_in_cave(world) {
                     let indoor = self.doors.indoor_floor_y(world, player.position);
                     let ground = if indoor.is_some() {
                         indoor
@@ -2227,6 +2262,15 @@ impl WorldSession {
             }
             Locomotion::Fly => {}
         }
+
+        // The lantern is always lit; outdoors the sun drowns it, in a cave it
+        // is what lets you see. Swap to a headlamp's cooler cast underground.
+        let torch = if self.caves.living_in_cave(world) {
+            engine::world::TorchLight::headlamp()
+        } else {
+            engine::world::TorchLight::lantern()
+        };
+        world.set_torch(Some(torch));
 
         world.look_first_person_global(player.eye(), player.yaw_degrees, player.pitch_degrees)?;
 
@@ -2268,6 +2312,15 @@ impl WorldSession {
     /// How the player is currently getting around.
     pub fn locomotion(&self) -> Option<Locomotion> {
         self.player.map(|p| p.mode)
+    }
+
+    /// True while the player is living in a generated cave interior.
+    pub fn in_cave(&self, world: &World) -> bool {
+        let Some(player) = self.player else {
+            return false;
+        };
+        let _ = player;
+        world.living_in() != SpaceId::DEFAULT && self.caves.has_live()
     }
 
     /// HUD line when a house door is in reach.
@@ -2315,6 +2368,16 @@ impl WorldSession {
     /// HUD line while a nearby dungeon is still being cut.
     pub fn dungeon_build_status(&self) -> Option<String> {
         self.dungeons.as_ref().and_then(DungeonLayer::build_status)
+    }
+
+    /// HUD line while a nearby cave chamber is still growing.
+    pub fn cave_build_status(&self) -> Option<String> {
+        self.caves.build_status()
+    }
+
+    /// HUD hint at a seated cave mouth.
+    pub fn cave_hint(&self) -> Option<&str> {
+        self.caves.hint()
     }
 
     pub fn dungeon_ready_count(&self) -> usize {

@@ -965,6 +965,13 @@ fn dungeon_search_paths(file: &str) -> Vec<PathBuf> {
     tried
 }
 
+impl DungeonLayer {
+    /// Last hatch mouth. Death returns here; no extra shrine mesh.
+    pub fn shrine(&self) -> Option<GlobalPlace> {
+        self.last_shrine
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,12 +1306,5 @@ mod tests {
             0,
             "a mouth 1.5 km away must be dropped"
         );
-    }
-}
-
-impl DungeonLayer {
-    /// Last hatch mouth. Death returns here; no extra shrine mesh.
-    pub fn shrine(&self) -> Option<GlobalPlace> {
-        self.last_shrine
     }
 }

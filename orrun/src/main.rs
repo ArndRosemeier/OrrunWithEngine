@@ -68,6 +68,7 @@ struct AtlasViewer {
     note: Option<String>,
     show_hamlets: bool,
     show_dungeons: bool,
+    show_caves: bool,
 }
 
 impl AtlasViewer {
@@ -88,6 +89,7 @@ impl AtlasViewer {
             note: None,
             show_hamlets: false,
             show_dungeons: false,
+            show_caves: true,
         }
     }
 
@@ -373,6 +375,40 @@ impl AtlasViewer {
                     pin.tier_name(),
                     FontId::proportional(11.0),
                     Color32::from_rgb(210, 168, 128),
+                );
+            }
+        }
+    }
+
+    /// Volumetric cave mouths: dark hollow dots with a teal glint.
+    fn draw_cave_markers(&self, painter: &egui::Painter, panel_origin: Pos2) {
+        if !self.show_caves {
+            return;
+        }
+        for pin in self.surface.cave_pins() {
+            let Ok(point) = MapPoint::from_global(self.bounds, pin.at) else {
+                continue;
+            };
+            let p = self.point_panel(panel_origin, point);
+            let radius = (self.zoom * 0.20).max(2.8) + pin.tier as f32 * 0.5;
+            painter.circle_filled(
+                p,
+                radius * 1.5,
+                Color32::from_rgba_unmultiplied(8, 14, 12, 200),
+            );
+            painter.circle_filled(p, radius, Color32::from_rgb(24, 30, 28));
+            painter.circle_stroke(
+                p,
+                radius,
+                Stroke::new(1.2_f32, Color32::from_rgb(96, 214, 170)),
+            );
+            if self.zoom >= DETAIL_CELL_PX {
+                painter.text(
+                    p + Vec2::new(radius + 2.0, -radius),
+                    Align2::LEFT_BOTTOM,
+                    format!("cave ({})", pin.tier_name()),
+                    FontId::proportional(11.0),
+                    Color32::from_rgb(96, 214, 170),
                 );
             }
         }
@@ -690,13 +726,8 @@ fn main() {
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
     eprintln!("generating atlas seed={seed} size={size}…");
-    let mut generating: Option<
-        JoinHandle<(
-            Arc<ContinentAtlas>,
-            Arc<ContinentalSurface>,
-            ContinentProxySpec,
-        )>,
-    > = Some(
+    type AtlasJob = JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>, ContinentProxySpec)>;
+    let mut generating: Option<AtlasJob> = Some(
         std::thread::Builder::new()
             .name("atlas".into())
             .spawn(move || {
@@ -1067,6 +1098,7 @@ fn draw_atlas(
         .show(&ctx, |ui| {
             let mut go_largest = false;
             let mut go_dungeon = false;
+            let mut go_cave = false;
             let mut go_hamlet = false;
             let mut go_cairn = false;
             let mut go_hut = false;
@@ -1083,6 +1115,9 @@ fn draw_atlas(
                                 }
                                 if ui.button("Go to nearest dungeon").clicked() {
                                     go_dungeon = true;
+                                }
+                                if ui.button("Go to nearest cave").clicked() {
+                                    go_cave = true;
                                 }
                                 if ui.button("Go to hamlet yard").clicked() {
                                     go_hamlet = true;
@@ -1163,6 +1198,9 @@ fn draw_atlas(
             if go_dungeon {
                 travel_to_nearest_dungeon(viewer, session, world);
             }
+            if go_cave {
+                travel_to_nearest_cave(viewer, session, world);
+            }
             if go_hamlet {
                 travel_to_hamlet_yard(viewer, session, world);
             }
@@ -1203,6 +1241,7 @@ fn draw_atlas(
             viewer.draw_feature_overlays(&painter, rect.min);
             viewer.draw_settlement_markers(&painter, rect.min);
             viewer.draw_dungeon_markers(&painter, rect.min);
+            viewer.draw_cave_markers(&painter, rect.min);
             viewer.draw_overlays(&painter, rect.min);
             if let Some(stand) = session
                 .player_position()
@@ -1262,9 +1301,17 @@ fn draw_atlas(
                                         .color(Color32::from_rgb(210, 168, 128)),
                                 );
                             }
+                            if let Some(cave) = session.cave_build_status() {
+                                ui.label(
+                                    egui::RichText::new(cave)
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(96, 214, 170)),
+                                );
+                            }
                             ui.add_space(4.0);
                             ui.checkbox(&mut viewer.show_hamlets, "Show hamlets");
                             ui.checkbox(&mut viewer.show_dungeons, "Show dungeons");
+                            ui.checkbox(&mut viewer.show_caves, "Show caves");
                         });
                 });
         });
@@ -1328,6 +1375,50 @@ fn travel_to_nearest_dungeon(
         }
         Err(err) => {
             viewer.note = Some(format!("cannot land at the nearest dungeon: {err}"));
+            eprintln!("entry refused: {err}");
+        }
+    }
+}
+
+fn travel_to_nearest_cave(
+    viewer: &mut AtlasViewer,
+    session: &mut WorldSession,
+    world: &mut World,
+) {
+    let from = session
+        .player_position()
+        .map(|p| GlobalXZ::at(p.x, p.z))
+        .or_else(|| viewer.selection.map(|point| point.to_global()))
+        .unwrap_or_else(|| {
+            let half = viewer.bounds.metres() * 0.5;
+            GlobalXZ::at(half, half)
+        });
+    let Some(pin) = viewer.surface.nearest_cave(from) else {
+        viewer.note = Some("this continent has no cave mouths".into());
+        return;
+    };
+    let point = match MapPoint::from_global(viewer.bounds, pin.at) {
+        Ok(point) => point,
+        Err(err) => {
+            viewer.note = Some(format!("nearest cave is off the map: {err}"));
+            return;
+        }
+    };
+    // Land beside the mouth, not inside the bowl.
+    let offset = f64::from(pin.tier as f32 * 0.0 + 10.0);
+    let beside = GlobalXZ::at(pin.at.x + offset, pin.at.z);
+    let point = MapPoint::from_global(viewer.bounds, beside).unwrap_or(point);
+    viewer.selection = Some(point);
+    match session.begin_entry(world, WorldEntryRequest::at(point)) {
+        Ok(()) => {
+            viewer.note = Some(format!(
+                "travelling to a {} cave mouth",
+                pin.tier_name()
+            ));
+            eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
+        }
+        Err(err) => {
+            viewer.note = Some(format!("cannot land at the nearest cave: {err}"));
             eprintln!("entry refused: {err}");
         }
     }
@@ -1757,6 +1848,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     };
     let door = session.door_hint().unwrap_or("");
     let dungeon = session.dungeon_build_status();
+    let cave = session.cave_build_status();
     let text = format!(
         "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}{door}",
         p.x,
@@ -1789,6 +1881,13 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                             egui::RichText::new(dungeon)
                                 .size(14.0)
                                 .color(Color32::from_rgb(210, 168, 128)),
+                        );
+                    }
+                    if let Some(cave) = cave {
+                        ui.label(
+                            egui::RichText::new(cave)
+                                .size(14.0)
+                                .color(Color32::from_rgb(96, 214, 170)),
                         );
                     }
                     // Player HP / mana + attack pip stay in this same world_hud popup.

@@ -724,7 +724,7 @@ mod tests {
         };
         let inside = GlobalXZ::at(0.0, 10.0);
         assert!(hamlet.covers(inside, SITE_HAMLET_PAD_M));
-        assert!(hamlet_blocks(inside, &[hamlet.clone()], &[pin]));
+        assert!(hamlet_blocks(inside, std::slice::from_ref(&hamlet), &[pin]));
         let far = GlobalXZ::at(0.0, 200.0);
         assert!(!hamlet.covers(far, SITE_HAMLET_PAD_M));
         assert!(!hamlet_blocks(far, &[hamlet], &[pin]));

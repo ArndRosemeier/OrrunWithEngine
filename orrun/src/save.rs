@@ -490,15 +490,17 @@ mod tests {
         if !path.is_file() {
             return;
         }
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read remembered stand"))
+                .expect("remembered stand json");
         let stand = SavedStand::read_at(&path, 20260809, 1000)
             .expect("remembered stand must be migratable")
             .expect("present");
-        let parsed: serde_json::Value = serde_json::from_str(FORMAT_1_STAND).expect("fixture");
-        assert_eq!(stand.x, parsed["x"].as_f64().expect("x"));
-        assert_eq!(stand.z, parsed["z"].as_f64().expect("z"));
+        assert_eq!(stand.x, raw["x"].as_f64().expect("x"));
+        assert_eq!(stand.z, raw["z"].as_f64().expect("z"));
         assert_eq!(
             stand.yaw_degrees,
-            parsed["yaw_degrees"].as_f64().expect("yaw") as f32
+            raw["yaw_degrees"].as_f64().expect("yaw") as f32
         );
     }
 }

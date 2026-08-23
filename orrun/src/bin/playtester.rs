@@ -9,7 +9,7 @@
 //! `cargo run -p orrun --release --bin playtester -- --seed 1 --size 64 --hooks standing,dungeon_fill,bind,combat,controls,combat_body,combat_bones,combat_mage`
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use engine::egui::{self, Color32, Sense};
@@ -298,8 +298,8 @@ fn dry_settlement_entry(session: &WorldSession) -> Option<WorldEntryRequest> {
     let surface = session.surface();
     let ponds = session.ponds();
     let bounds = surface.bounds();
-    let mut pins: Vec<_> = surface.settlements().iter().copied().collect();
-    pins.sort_by(|a, b| (b.tier, b.population, b.id).cmp(&(a.tier, a.population, a.id)));
+    let mut pins: Vec<_> = surface.settlements().to_vec();
+    pins.sort_by_key(|b| std::cmp::Reverse((b.tier, b.population, b.id)));
     for pin in pins {
         let Ok(point) = MapPoint::from_global(bounds, pin.at) else {
             continue;
@@ -3913,7 +3913,6 @@ impl Driver {
             );
             self.incoming_hp = Some(self.session.player_hp());
             self.combat_hurt_sent = true;
-            return;
         }
     }
 
@@ -5800,7 +5799,7 @@ fn draw_combat_hud(session: &WorldSession, world: &World, frame: &Frame) {
     }
 }
 
-fn copy_combat_wav(shots: &PathBuf, name: &str) -> String {
+fn copy_combat_wav(shots: &Path, name: &str) -> String {
     let dest = shots.join(name);
     for dir in combat_audio_dirs() {
         let src = dir.join(name);

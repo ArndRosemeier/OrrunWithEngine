@@ -655,6 +655,27 @@ pub struct DungeonPin {
     pub seed: u64,
 }
 
+/// Atlas volumetric cave mouth, in world metres. The cave layer seats a
+/// hillside portal here; interiors generate on demand via `cave_gen`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaveMouthPin {
+    pub id: i32,
+    pub at: GlobalXZ,
+    /// 0=entrance (60 m), 1=cathedral (120 m destination chamber).
+    pub tier: u8,
+    pub seed: u64,
+}
+
+impl CaveMouthPin {
+    pub fn tier_name(self) -> &'static str {
+        match self.tier {
+            0 => "entrance",
+            1 => "cathedral",
+            other => panic!("cave mouth tier {other} is not 0..=1"),
+        }
+    }
+}
+
 impl DungeonPin {
     pub fn tier_name(self) -> &'static str {
         match self.tier {
@@ -737,8 +758,41 @@ fn ensure_settlement_ladder(ranked: &mut [(i32, SettlementPin)]) {
     }
 }
 
-fn dungeon_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[DungeonPin]> {
+/// Cave mouths reuse dungeon node placement (relief-filtered land cells) but
+/// are sparser: every 4th dungeon node becomes a cave mouth with its own
+/// stable seed. Tier 1 (cathedral) every 3rd mouth.
+fn cave_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[CaveMouthPin]> {
     atlas
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Dungeon)
+        .enumerate()
+        .filter(|(i, _)| i % 4 == 0)
+        .map(|(_, n)| {
+            let at = GlobalXZ::at(
+                (n.ax as f64 + 0.5) * f64::from(CELL_METRES),
+                (n.az as f64 + 0.5) * f64::from(CELL_METRES),
+            );
+            let mix = crate::atlas::feature_hash(&[
+                &atlas.world_seed.to_string(),
+                "cave",
+                &n.id.to_string(),
+            ]);
+            let tier = match (mix as u32) % 6 {
+                0 => 1,
+                _ => 0,
+            };
+            CaveMouthPin {
+                id: n.id,
+                at,
+                tier,
+                seed: mix as u64,
+            }
+        })
+        .collect()
+}
+
+fn dungeon_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[DungeonPin]> {    atlas
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Dungeon)
@@ -806,6 +860,7 @@ pub struct ContinentalSurface {
     detail: TerrainDetail,
     settlements: Arc<[SettlementPin]>,
     dungeons: Arc<[DungeonPin]>,
+    caves: Arc<[CaveMouthPin]>,
     roads: Arc<[RoadPath]>,
 }
 
@@ -834,6 +889,7 @@ impl ContinentalSurface {
             detail: TerrainDetail::new(atlas.world_seed, massifs),
             settlements: pins_from_atlas(atlas),
             dungeons: dungeon_pins_from_atlas(atlas),
+            caves: cave_pins_from_atlas(atlas),
             roads: bake_road_paths(atlas).into(),
         };
         surface.validate()?;
@@ -933,6 +989,22 @@ impl ContinentalSurface {
     /// Dungeon mouths on this continent, in world metres.
     pub fn dungeon_pins(&self) -> &[DungeonPin] {
         &self.dungeons
+    }
+
+    /// Volumetric cave mouths on this continent, in world metres.
+    pub fn cave_pins(&self) -> &[CaveMouthPin] {
+        &self.caves
+    }
+
+    /// Closest volumetric cave mouth to `from`. Ties break on the smaller id.
+    pub fn nearest_cave(&self, from: GlobalXZ) -> Option<CaveMouthPin> {
+        self.caves.iter().copied().min_by(|a, b| {
+            let da = a.at.distance(from);
+            let db = b.at.distance(from);
+            da.partial_cmp(&db)
+                .unwrap_or_else(|| panic!("cave distance from {from:?} is not finite"))
+                .then_with(|| a.id.cmp(&b.id))
+        })
     }
 
     /// Highest-tier settlement, then highest population, then stable id.

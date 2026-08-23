@@ -802,10 +802,10 @@ impl Packing {
         let mut cities = Vec::new();
         let mut failed = Vec::new();
         for pin in self.pins {
-            if !plans.contains_key(&pin.id) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = plans.entry(pin.id) {
                 match layout_for(self.seed, pin, &self.surface, &self.ponds) {
                     Ok(layout) => {
-                        plans.insert(pin.id, layout);
+                        entry.insert(layout);
                     }
                     Err(err) => {
                         eprintln!("hamlet at node {} failed: {err}", pin.id);

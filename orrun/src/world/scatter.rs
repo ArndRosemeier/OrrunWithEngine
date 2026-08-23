@@ -2698,7 +2698,7 @@ mod tests {
     #[test]
     fn far_draw_cells_sort_nearest_to_the_player() {
         let focus = GlobalXZ::at(2_500.0, 0.0);
-        let mut draws = vec![(0, 0), (2, 0), (5, 0)];
+        let mut draws = [(0, 0), (2, 0), (5, 0)];
         draws.sort_by_key(|&draw| far_draw_dist_key(draw, focus));
         assert_eq!(draws[0], (2, 0));
     }
