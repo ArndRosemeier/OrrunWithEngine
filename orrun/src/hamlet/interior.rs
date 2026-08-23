@@ -396,8 +396,8 @@ fn assemble_for<'a>(
             .mate(stair, did("down"), pid("plinth"), did("up"))
             .expect("stair plinth");
         fill_indoor_floors(&mut assembly, brief, Some(stair_cell)).expect("indoor floors");
-        let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
-            .expect("indoor upper");
+        let upper =
+            stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles).expect("indoor upper");
         cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
         assembly
             .mate(stair, did("up"), pid("ceiling"), did("down"))
@@ -405,8 +405,8 @@ fn assemble_for<'a>(
         (assembly, storeys, Some(stair_cell))
     } else if brief.storeys >= 2 {
         fill_indoor_floors(&mut assembly, brief, None).expect("indoor floors");
-        let upper = stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles)
-            .expect("indoor upper");
+        let upper =
+            stack_indoor_ring(&mut assembly, catalog, rng, &ground, &roles).expect("indoor upper");
         cap_up(&mut assembly, &upper, "ceiling").expect("indoor ceiling");
         (assembly, storeys, None)
     } else {
@@ -910,8 +910,7 @@ mod tests {
             .pieces
             .iter()
             .filter(|p| {
-                p.piece.as_str() == "ceiling"
-                    && (p.place.position.y - anchor_y).abs() < 1e-4
+                p.piece.as_str() == "ceiling" && (p.place.position.y - anchor_y).abs() < 1e-4
             })
             .map(|p| (p.place.position.x, p.place.position.z))
             .collect()
@@ -935,20 +934,16 @@ mod tests {
     ) {
         let (inner_x, inner_z) = room_inner(brief);
         assert!(!floor_tiles.is_empty(), "{label} has no floor tiles");
-        let skip_at_stair = if ceiling_tiles.is_some() {
-            stair
-        } else {
-            None
-        };
+        let skip_at_stair = if ceiling_tiles.is_some() { stair } else { None };
         if let Some(ceiling_tiles) = ceiling_tiles {
             for (fx, fz) in floor_tiles {
                 if probe_skips_stair(*fx, *fz, stair) {
                     continue;
                 }
                 assert!(
-                    ceiling_tiles.iter().any(|(cx, cz)| {
-                        (cx - fx).abs() < 0.02 && (cz - fz).abs() < 0.02
-                    }),
+                    ceiling_tiles
+                        .iter()
+                        .any(|(cx, cz)| { (cx - fx).abs() < 0.02 && (cz - fz).abs() < 0.02 }),
                     "{label} missing ceiling plank over floor at ({fx:.2}, {fz:.2})",
                 );
             }
@@ -1174,9 +1169,7 @@ mod tests {
         let ceilings: Vec<_> = layout
             .pieces
             .iter()
-            .filter(|p| {
-                p.piece.as_str() == "ceiling" && p.place.position.y.abs() < 1e-4
-            })
+            .filter(|p| p.piece.as_str() == "ceiling" && p.place.position.y.abs() < 1e-4)
             .collect();
         assert!(
             ceilings.len() >= floors.len(),

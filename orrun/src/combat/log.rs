@@ -43,6 +43,9 @@ mod tests {
             log.push(format!("line {i}"));
         }
         let got: Vec<_> = log.lines().collect();
-        assert_eq!(got, ["line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9", "line 10"]);
+        assert_eq!(
+            got,
+            ["line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9", "line 10"]
+        );
     }
 }

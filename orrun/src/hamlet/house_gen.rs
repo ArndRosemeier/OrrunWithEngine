@@ -168,11 +168,7 @@ fn build_ring(
     jetty: bool,
 ) -> ModularResult<(Vec<InstanceId>, Vec<RingRole>)> {
     let corner_fam = if jetty { "corner_jetty" } else { "corner" };
-    let straight_fam = if jetty {
-        "straight_jetty"
-    } else {
-        "straight"
-    };
+    let straight_fam = if jetty { "straight_jetty" } else { "straight" };
     let south_mids = usize::from(cells_x) - 2;
     let east_mids = usize::from(cells_z) - 2;
     let north_mids = south_mids;

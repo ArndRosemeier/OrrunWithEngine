@@ -121,7 +121,11 @@ pub fn tab_candidates(
             in_cone.push((dist, idx));
         }
     }
-    in_cone.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    in_cone.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     in_cone.into_iter().map(|(_, i)| i).collect()
 }
 
@@ -198,7 +202,6 @@ impl LivePlayer {
         true
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct WorldHostile {
@@ -307,7 +310,13 @@ impl WorldCombat {
 
     /// Tab: nearest hostile in 20 m / 90° cone; repeat cycles; off after last.
     pub fn press_tab(&mut self, player_x: f64, player_z: f64, facing_x: f64, facing_z: f64) {
-        let ids = tab_candidates(player_x, player_z, facing_x, facing_z, &self.hostile_pairs());
+        let ids = tab_candidates(
+            player_x,
+            player_z,
+            facing_x,
+            facing_z,
+            &self.hostile_pairs(),
+        );
         if ids.is_empty() {
             self.lock = None;
             self.cycle.clear();
@@ -318,7 +327,10 @@ impl WorldCombat {
             self.lock = Some(self.cycle[0]);
             return;
         }
-        match self.lock.and_then(|cur| self.cycle.iter().position(|&id| id == cur)) {
+        match self
+            .lock
+            .and_then(|cur| self.cycle.iter().position(|&id| id == cur))
+        {
             Some(i) if i + 1 < self.cycle.len() => self.lock = Some(self.cycle[i + 1]),
             Some(_) => self.lock = None,
             None => self.lock = Some(self.cycle[0]),
@@ -327,7 +339,13 @@ impl WorldCombat {
 
     /// Click body: lock nearest in the same 20 m / 90° cone.
     pub fn click_lock(&mut self, player_x: f64, player_z: f64, facing_x: f64, facing_z: f64) {
-        let ids = tab_candidates(player_x, player_z, facing_x, facing_z, &self.hostile_pairs());
+        let ids = tab_candidates(
+            player_x,
+            player_z,
+            facing_x,
+            facing_z,
+            &self.hostile_pairs(),
+        );
         self.lock = ids.first().copied();
         self.cycle = ids;
     }
@@ -344,7 +362,6 @@ impl WorldCombat {
         self.slain_by = None;
     }
 
-
     pub fn outgoing_raw(&self, raw: i32) -> i32 {
         let mut raw = raw;
         if let Some(shaken) = &self.player.shaken {
@@ -355,7 +372,6 @@ impl WorldCombat {
         }
         raw
     }
-
 
     /// Melee auto only if lock is in 2.8 m and 120° cone. Uses sim melee_raw.
     pub fn tick_melee_auto(

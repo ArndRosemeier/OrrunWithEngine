@@ -8,7 +8,9 @@ use std::process::ExitCode;
 
 use orrun::combat::math::{HARD_CAP_S, TICK};
 use orrun::combat::sheets::formulas;
-use orrun::combat::sim::{match_published_rows, print_table, run_all, run_scenario, scenario_ids, simulate_fight};
+use orrun::combat::sim::{
+    match_published_rows, print_table, run_all, run_scenario, scenario_ids, simulate_fight,
+};
 use orrun::combat::Discipline;
 use serde_json::json;
 
@@ -29,7 +31,16 @@ fn run() -> Result<ExitCode, String> {
             let disc = Discipline::parse(&args.discipline)
                 .ok_or_else(|| format!("unknown discipline: {}", args.discipline))?;
             let mut r = simulate_fight(
-                level, disc, &args.mob, args.count, args.seed, args.potions, None, args.mob_level, None, "",
+                level,
+                disc,
+                &args.mob,
+                args.count,
+                args.seed,
+                args.potions,
+                None,
+                args.mob_level,
+                None,
+                "",
             )?;
             r["band_pass"] = json!(null);
             r["title"] = json!(format!("L{level} {disc} vs {} {}", args.count, args.mob));
@@ -53,7 +64,11 @@ fn run() -> Result<ExitCode, String> {
         println!();
         let path = &payload["leveling_path"];
         let mins = path["total_minutes"].as_f64().unwrap_or(0.0);
-        let pass = if path["in_90_150"].as_bool() == Some(true) { "PASS" } else { "FAIL 90-150" };
+        let pass = if path["in_90_150"].as_bool() == Some(true) {
+            "PASS"
+        } else {
+            "FAIL 90-150"
+        };
         println!("XP path: {mins:.0} min to L10 ({}) {pass}", path["clears"]);
         let all_pass = payload["all_pass"].as_bool() == Some(true);
         println!("ALL BANDS: {}", if all_pass { "PASS" } else { "FAIL" });
@@ -65,19 +80,31 @@ fn run() -> Result<ExitCode, String> {
             write_out(&out, &text)?;
             println!("wrote {}", out.display());
         }
-        return Ok(if all_pass { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        return Ok(if all_pass {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
     }
 
-    let r = run_scenario(scenario, args.seed).map_err(|e| format!("{e}. ids: {:?}", scenario_ids()))?;
+    let r =
+        run_scenario(scenario, args.seed).map_err(|e| format!("{e}. ids: {:?}", scenario_ids()))?;
     print_table(std::slice::from_ref(&r));
-    println!("{}", serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?
+    );
     if let Some(out) = args.out {
         let mut text = serde_json::to_string_pretty(&json!({"formulas": formulas(), "fight": r}))
             .map_err(|e| e.to_string())?;
         text.push('\n');
         write_out(&out, &text)?;
     }
-    Ok(if r["band_pass"].as_bool() == Some(true) { ExitCode::SUCCESS } else { ExitCode::from(1) })
+    Ok(if r["band_pass"].as_bool() == Some(true) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn write_out(path: &PathBuf, text: &str) -> Result<(), String> {
@@ -116,21 +143,59 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--scenario" => scenario = Some(need(&mut raw, "--scenario")?),
             "--out" => out = Some(PathBuf::from(need(&mut raw, "--out")?)),
-            "--player-level" => player_level = Some(need(&mut raw, "--player-level")?.parse().map_err(|_| "--player-level wants an int")?),
+            "--player-level" => {
+                player_level = Some(
+                    need(&mut raw, "--player-level")?
+                        .parse()
+                        .map_err(|_| "--player-level wants an int")?,
+                )
+            }
             "--discipline" => discipline = need(&mut raw, "--discipline")?,
             "--mob" => mob = need(&mut raw, "--mob")?,
-            "--count" => count = need(&mut raw, "--count")?.parse().map_err(|_| "--count wants an int")?,
-            "--seed" => seed = need(&mut raw, "--seed")?.parse().map_err(|_| "--seed wants an int")?,
-            "--potions" => potions = Some(need(&mut raw, "--potions")?.parse().map_err(|_| "--potions wants an int")?),
-            "--mob-level" => mob_level = Some(need(&mut raw, "--mob-level")?.parse().map_err(|_| "--mob-level wants an int")?),
+            "--count" => {
+                count = need(&mut raw, "--count")?
+                    .parse()
+                    .map_err(|_| "--count wants an int")?
+            }
+            "--seed" => {
+                seed = need(&mut raw, "--seed")?
+                    .parse()
+                    .map_err(|_| "--seed wants an int")?
+            }
+            "--potions" => {
+                potions = Some(
+                    need(&mut raw, "--potions")?
+                        .parse()
+                        .map_err(|_| "--potions wants an int")?,
+                )
+            }
+            "--mob-level" => {
+                mob_level = Some(
+                    need(&mut raw, "--mob-level")?
+                        .parse()
+                        .map_err(|_| "--mob-level wants an int")?,
+                )
+            }
             "--help" | "-h" => {
-                eprintln!("combat_sim --scenario all|id [--out path] tick={TICK}s cap={HARD_CAP_S}s");
+                eprintln!(
+                    "combat_sim --scenario all|id [--out path] tick={TICK}s cap={HARD_CAP_S}s"
+                );
                 return Err("help".into());
             }
             other => return Err(format!("unknown arg: {other}")),
         }
     }
-    Ok(Args { scenario, out, player_level, discipline, mob, count, seed, potions, mob_level })
+    Ok(Args {
+        scenario,
+        out,
+        player_level,
+        discipline,
+        mob,
+        count,
+        seed,
+        potions,
+        mob_level,
+    })
 }
 
 fn need(raw: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {

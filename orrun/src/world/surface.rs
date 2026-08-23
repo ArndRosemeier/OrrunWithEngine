@@ -792,7 +792,8 @@ fn cave_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[CaveMouthPin]> {
         .collect()
 }
 
-fn dungeon_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[DungeonPin]> {    atlas
+fn dungeon_pins_from_atlas(atlas: &ContinentAtlas) -> Arc<[DungeonPin]> {
+    atlas
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::Dungeon)

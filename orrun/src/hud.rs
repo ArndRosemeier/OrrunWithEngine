@@ -129,7 +129,6 @@ pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
-
 pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     if combat.dead {
         return;
@@ -137,11 +136,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     let Some(id) = combat.lock else {
         return;
     };
-    let Some(h) = combat
-        .hostiles
-        .iter()
-        .find(|h| h.idx == id && h.alive)
-    else {
+    let Some(h) = combat.hostiles.iter().find(|h| h.idx == id && h.alive) else {
         return;
     };
     let max = h.max_hp.max(1.0);
@@ -312,7 +307,10 @@ pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
     };
     let screen = ctx.screen_rect();
     egui::Area::new(egui::Id::new("fail_toast"))
-        .fixed_pos(egui::pos2(screen.width() * 0.5 - 90.0, screen.height() * 0.38))
+        .fixed_pos(egui::pos2(
+            screen.width() * 0.5 - 90.0,
+            screen.height() * 0.38,
+        ))
         .order(egui::Order::Foreground)
         .interactable(false)
         .show(ctx, |ui| {
@@ -332,10 +330,9 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
     draw_fail_toast(ctx, combat);
 }
 
-
 use crate::inventory::{assets_dir, load_icon, EquipSlot, Family, Item};
-use engine::load_rgba8_png;
 use crate::world::WorldSession;
+use engine::load_rgba8_png;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -353,14 +350,14 @@ fn shaken_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         if let Some(tex) = map.get("shaken.png") {
             return Some(tex.clone());
         }
-        let path = assets_dir()?.join("icons").join("status").join("shaken.png");
+        let path = assets_dir()?
+            .join("icons")
+            .join("status")
+            .join("shaken.png");
         let (width, height, rgba) = load_rgba8_png(&path).ok()?;
         let tex = ctx.load_texture(
             "icon-shaken.png",
-            egui::ColorImage::from_rgba_unmultiplied(
-                [width as usize, height as usize],
-                &rgba,
-            ),
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba),
             egui::TextureOptions::NEAREST,
         );
         map.insert("shaken.png", tex.clone());
@@ -518,22 +515,14 @@ pub fn draw_loot_windows(session: &mut WorldSession, world: &mut World, frame: &
     let mut loot_open = session.loot_open();
     frame.ui.modal("Loot", &mut loot_open, |panel, open| {
         let ui = panel.ui();
-        ui.label(
-            egui::RichText::new("Take / Take all")
-                .size(14.0)
-                .color(INK),
-        );
+        ui.label(egui::RichText::new("Take / Take all").size(14.0).color(INK));
         ui.add_space(6.0);
         if let Some(pile) = session.ground_pile().cloned() {
             paint_coin_row(ui, pile.coin);
             for (i, item) in pile.items.iter().enumerate() {
                 ui.horizontal(|ui| {
                     let _ = paint_item_slot(ui, Some(*item), "");
-                    ui.label(
-                        egui::RichText::new(item.name())
-                            .size(15.0)
-                            .color(INK),
-                    );
+                    ui.label(egui::RichText::new(item.name()).size(15.0).color(INK));
                     if ui.button("Take").clicked() {
                         session.take_loot_item(world, i);
                     }

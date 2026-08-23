@@ -276,7 +276,14 @@ fn hit_mob(p: &mut Player, m: &mut Mob, mut raw: i32) -> i32 {
     dealt
 }
 
-fn start_cast(p: &mut Player, name: &'static str, duration: f64, mana: i32, kind: &'static str, target: Option<i32>) -> bool {
+fn start_cast(
+    p: &mut Player,
+    name: &'static str,
+    duration: f64,
+    mana: i32,
+    kind: &'static str,
+    target: Option<i32>,
+) -> bool {
     if p.busy > 0.0 || p.gcd > 0.0 {
         return false;
     }
@@ -323,7 +330,11 @@ fn player_ai_start(p: &mut Player, mobs: &mut [Mob], _kite: bool) {
         return;
     }
 
-    let pot_line = if disc == Discipline::Arcane { 0.30 } else { 0.35 };
+    let pot_line = if disc == Discipline::Arcane {
+        0.30
+    } else {
+        0.35
+    };
     if p.potions > 0 && p.cd("potion") <= 0.0 && p.hp < pot_line * p.max_hp {
         p.hp = (p.hp + f64::from(POTION_HEAL)).min(p.max_hp);
         p.potions -= 1;
@@ -420,7 +431,11 @@ fn player_ai_start(p: &mut Player, mobs: &mut [Mob], _kite: bool) {
         .copied()
         .filter(|&i| dist(p, &mobs[i]) <= EMBER_RANGE_M)
         .collect();
-    let focus_pool = if in_ember.is_empty() { live.clone() } else { in_ember.clone() };
+    let focus_pool = if in_ember.is_empty() {
+        live.clone()
+    } else {
+        in_ember.clone()
+    };
     let focus_i = lowest_hp(mobs, &focus_pool);
     let focus_idx = mobs[focus_i].idx;
     if p.rank(Discipline::Arcane) >= 5 && p.cd("bind") <= 0.0 {
@@ -445,7 +460,14 @@ fn player_ai_start(p: &mut Player, mobs: &mut [Mob], _kite: bool) {
     if !in_ember.is_empty() && p.cd("ember") <= 0.0 {
         if p.mana >= f64::from(EMBER_MANA) {
             p.lock = Some(focus_idx);
-            start_cast(p, "Ember", EMBER_CAST_S, EMBER_MANA, "ember", Some(focus_idx));
+            start_cast(
+                p,
+                "Ember",
+                EMBER_CAST_S,
+                EMBER_MANA,
+                "ember",
+                Some(focus_idx),
+            );
             p.set_cd("ember", EMBER_CD_S);
         } else {
             p.skipped_spell_for_mana = true;
@@ -458,7 +480,8 @@ fn finish_cast(p: &mut Player, mobs: &mut [Mob]) {
         return;
     };
     let find = |mobs: &mut [Mob]| -> Option<usize> {
-        cast.target.and_then(|idx| mobs.iter().position(|m| m.idx == idx))
+        cast.target
+            .and_then(|idx| mobs.iter().position(|m| m.idx == idx))
     };
     match cast.kind {
         "bash" => {
@@ -527,7 +550,10 @@ fn martial_auto(p: &mut Player, mobs: &mut [Mob]) {
     if live.is_empty() {
         return;
     }
-    if p.lock.map(|id| !mobs.iter().any(|m| m.idx == id && m.alive)).unwrap_or(true) {
+    if p.lock
+        .map(|id| !mobs.iter().any(|m| m.idx == id && m.alive))
+        .unwrap_or(true)
+    {
         p.lock = Some(mobs[live[0]].idx);
     }
     let lock = p.lock.unwrap();
@@ -561,7 +587,11 @@ fn move_entities(p: &mut Player, mobs: &mut [Mob], desired: f64) {
     if live.is_empty() {
         return;
     }
-    let chasing: Vec<usize> = live.iter().copied().filter(|&i| mobs[i].root <= 0.0).collect();
+    let chasing: Vec<usize> = live
+        .iter()
+        .copied()
+        .filter(|&i| mobs[i].root <= 0.0)
+        .collect();
     let ref_set = if chasing.is_empty() { live } else { chasing };
     let nearest = *ref_set
         .iter()
@@ -587,7 +617,12 @@ fn move_entities(p: &mut Player, mobs: &mut [Mob], desired: f64) {
         if m.stun > 0.0 || m.root > 0.0 {
             continue;
         }
-        let spd = m.speed * if m.slow > 0.0 { 1.0 - PIN_SLOW_PCT } else { 1.0 };
+        let spd = m.speed
+            * if m.slow > 0.0 {
+                1.0 - PIN_SLOW_PCT
+            } else {
+                1.0
+            };
         if m.x > px {
             m.x = px.max(m.x - spd * TICK);
         } else {
@@ -648,7 +683,11 @@ pub fn tick(p: &mut Player, mobs: &mut [Mob], desired_range: f64, kite: bool) {
         if m.slow > 0.0 {
             m.slow = (m.slow - TICK).max(0.0);
         }
-        if !m.enraged && m.max_hp > 0.0 && m.hp <= MOTHER_ENRAGE_HP * m.max_hp && m.id == "line_mother" {
+        if !m.enraged
+            && m.max_hp > 0.0
+            && m.hp <= MOTHER_ENRAGE_HP * m.max_hp
+            && m.id == "line_mother"
+        {
             m.enraged = true;
             m.swing = m.base_swing * MOTHER_ENRAGE_SWING;
         }
@@ -976,14 +1015,110 @@ struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
-    Scenario { id: "1_l1_martial_1wolf", title: "L1 Martial vs 1 wolf-spider", level: 1, discipline: Discipline::Martial, mob: "crawler_spider_wolf", count: 1, mob_level: 1, potions: 1, kite: false, band: "even_1v1", check: even_1v1_pass },
-    Scenario { id: "2_l1_martial_2wolf_nopot", title: "L1 Martial vs 2 wolf-spiders, no potion", level: 1, discipline: Discipline::Martial, mob: "crawler_spider_wolf", count: 2, mob_level: 1, potions: 0, kite: false, band: "2pull_nopot", check: two_pull_nopot_pass },
-    Scenario { id: "3_l1_martial_2wolf_pot", title: "L1 Martial vs 2 wolf-spiders, 1 potion", level: 1, discipline: Discipline::Martial, mob: "crawler_spider_wolf", count: 2, mob_level: 1, potions: 1, kite: false, band: "2pull_pot", check: two_pull_pot_pass },
-    Scenario { id: "4_l3_hunt_scorpion", title: "L3 Hunt vs 1 scorpion", level: 3, discipline: Discipline::Hunt, mob: "crawler_scorpion", count: 1, mob_level: 3, potions: 1, kite: true, band: "even_1v1", check: even_1v1_pass },
-    Scenario { id: "5_l5_arcane_pale_hall", title: "L5 Arcane vs Pale Hall (4 L4 wolves)", level: 5, discipline: Discipline::Arcane, mob: "crawler_spider_wolf", count: 4, mob_level: 4, potions: 1, kite: true, band: "pale_hall", check: pale_hall_pass },
-    Scenario { id: "6_l9_martial_line_mother", title: "L9 Martial vs Line-Mother", level: 9, discipline: Discipline::Martial, mob: "line_mother", count: 1, mob_level: 9, potions: 1, kite: false, band: "heart", check: heart_pass },
-    Scenario { id: "7_l2_martial_blob", title: "L2 Martial vs 1 GreenBlob", level: 2, discipline: Discipline::Martial, mob: "green_blob", count: 1, mob_level: 2, potions: 1, kite: false, band: "even_1v1", check: even_1v1_pass },
-    Scenario { id: "s_l2_martial_d1_pot", title: "SANITY L2 Martial vs D1 (2 L1 wolves) + potion", level: 2, discipline: Discipline::Martial, mob: "crawler_spider_wolf", count: 2, mob_level: 1, potions: 1, kite: false, band: "d1_clear", check: win_pass },
+    Scenario {
+        id: "1_l1_martial_1wolf",
+        title: "L1 Martial vs 1 wolf-spider",
+        level: 1,
+        discipline: Discipline::Martial,
+        mob: "crawler_spider_wolf",
+        count: 1,
+        mob_level: 1,
+        potions: 1,
+        kite: false,
+        band: "even_1v1",
+        check: even_1v1_pass,
+    },
+    Scenario {
+        id: "2_l1_martial_2wolf_nopot",
+        title: "L1 Martial vs 2 wolf-spiders, no potion",
+        level: 1,
+        discipline: Discipline::Martial,
+        mob: "crawler_spider_wolf",
+        count: 2,
+        mob_level: 1,
+        potions: 0,
+        kite: false,
+        band: "2pull_nopot",
+        check: two_pull_nopot_pass,
+    },
+    Scenario {
+        id: "3_l1_martial_2wolf_pot",
+        title: "L1 Martial vs 2 wolf-spiders, 1 potion",
+        level: 1,
+        discipline: Discipline::Martial,
+        mob: "crawler_spider_wolf",
+        count: 2,
+        mob_level: 1,
+        potions: 1,
+        kite: false,
+        band: "2pull_pot",
+        check: two_pull_pot_pass,
+    },
+    Scenario {
+        id: "4_l3_hunt_scorpion",
+        title: "L3 Hunt vs 1 scorpion",
+        level: 3,
+        discipline: Discipline::Hunt,
+        mob: "crawler_scorpion",
+        count: 1,
+        mob_level: 3,
+        potions: 1,
+        kite: true,
+        band: "even_1v1",
+        check: even_1v1_pass,
+    },
+    Scenario {
+        id: "5_l5_arcane_pale_hall",
+        title: "L5 Arcane vs Pale Hall (4 L4 wolves)",
+        level: 5,
+        discipline: Discipline::Arcane,
+        mob: "crawler_spider_wolf",
+        count: 4,
+        mob_level: 4,
+        potions: 1,
+        kite: true,
+        band: "pale_hall",
+        check: pale_hall_pass,
+    },
+    Scenario {
+        id: "6_l9_martial_line_mother",
+        title: "L9 Martial vs Line-Mother",
+        level: 9,
+        discipline: Discipline::Martial,
+        mob: "line_mother",
+        count: 1,
+        mob_level: 9,
+        potions: 1,
+        kite: false,
+        band: "heart",
+        check: heart_pass,
+    },
+    Scenario {
+        id: "7_l2_martial_blob",
+        title: "L2 Martial vs 1 GreenBlob",
+        level: 2,
+        discipline: Discipline::Martial,
+        mob: "green_blob",
+        count: 1,
+        mob_level: 2,
+        potions: 1,
+        kite: false,
+        band: "even_1v1",
+        check: even_1v1_pass,
+    },
+    Scenario {
+        id: "s_l2_martial_d1_pot",
+        title: "SANITY L2 Martial vs D1 (2 L1 wolves) + potion",
+        level: 2,
+        discipline: Discipline::Martial,
+        mob: "crawler_spider_wolf",
+        count: 2,
+        mob_level: 1,
+        potions: 1,
+        kite: false,
+        band: "d1_clear",
+        check: win_pass,
+    },
 ];
 
 pub fn run_scenario(id: &str, seed: i32) -> Result<Value, String> {
@@ -996,7 +1131,16 @@ pub fn run_scenario(id: &str, seed: i32) -> Result<Value, String> {
 
 fn run_scenario_sc(sc: &Scenario, seed: i32) -> Result<Value, String> {
     let mut r = simulate_fight(
-        sc.level, sc.discipline, sc.mob, sc.count, seed, Some(sc.potions), None, Some(sc.mob_level), Some(sc.kite), sc.title,
+        sc.level,
+        sc.discipline,
+        sc.mob,
+        sc.count,
+        seed,
+        Some(sc.potions),
+        None,
+        Some(sc.mob_level),
+        Some(sc.kite),
+        sc.title,
     )?;
     let (ok, why) = (sc.check)(&r);
     r["band"] = json!(sc.band);
@@ -1055,7 +1199,9 @@ pub fn run_all(seed: i32) -> Result<Value, String> {
     }
     results.push(oneshot_sanity());
     let path = leveling_path();
-    let all_pass = results.iter().all(|r| r["band_pass"].as_bool() == Some(true))
+    let all_pass = results
+        .iter()
+        .all(|r| r["band_pass"].as_bool() == Some(true))
         && path["in_90_150"].as_bool() == Some(true);
     Ok(json!({
         "formulas": formulas(),
@@ -1072,13 +1218,35 @@ pub fn run_all(seed: i32) -> Result<Value, String> {
 pub fn print_table(rows: &[Value]) {
     println!(
         "{:<46} {:<8} {:>6} {:>6} {:>6} {:>5} {:>5} {:>3} {:>3} {:>4} {:>4} {:<12} {:<6}",
-        "SCENARIO", "WIN", "TTK", "TTD", "HP%", "HP", "MANA", "SPR", "PIN", "DMG", "MDEC", "BAND", "PASS"
+        "SCENARIO",
+        "WIN",
+        "TTK",
+        "TTD",
+        "HP%",
+        "HP",
+        "MANA",
+        "SPR",
+        "PIN",
+        "DMG",
+        "MDEC",
+        "BAND",
+        "PASS"
     );
     println!("{}", "-".repeat(130));
     for r in rows {
-        let ttk = r["time_to_kill_s"].as_f64().map(|t| format!("{t:.1}")).unwrap_or_else(|| "-".into());
-        let ttd = r["time_to_die_s"].as_f64().map(|t| format!("{t:.1}")).unwrap_or_else(|| "-".into());
-        let title = r["title"].as_str().or_else(|| r["notes"].as_str()).or_else(|| r["scenario_id"].as_str()).unwrap_or("");
+        let ttk = r["time_to_kill_s"]
+            .as_f64()
+            .map(|t| format!("{t:.1}"))
+            .unwrap_or_else(|| "-".into());
+        let ttd = r["time_to_die_s"]
+            .as_f64()
+            .map(|t| format!("{t:.1}"))
+            .unwrap_or_else(|| "-".into());
+        let title = r["title"]
+            .as_str()
+            .or_else(|| r["notes"].as_str())
+            .or_else(|| r["scenario_id"].as_str())
+            .unwrap_or("");
         let title: String = title.chars().take(46).collect();
         let bp = r.get("band_pass").and_then(|v| v.as_bool());
         let mark = match bp {
@@ -1086,9 +1254,21 @@ pub fn print_table(rows: &[Value]) {
             Some(false) => "FAIL",
             None => "-",
         };
-        let spr = if r["player_sprinted"].as_bool() == Some(true) { "Y" } else { "n" };
-        let pin = if r["used_pin_or_bind"].as_bool() == Some(true) { "Y" } else { "n" };
-        let mdec = if r["mana_decision"].as_bool() == Some(true) { "Y" } else { "n" };
+        let spr = if r["player_sprinted"].as_bool() == Some(true) {
+            "Y"
+        } else {
+            "n"
+        };
+        let pin = if r["used_pin_or_bind"].as_bool() == Some(true) {
+            "Y"
+        } else {
+            "n"
+        };
+        let mdec = if r["mana_decision"].as_bool() == Some(true) {
+            "Y"
+        } else {
+            "n"
+        };
         println!(
             "{:<46} {:<8} {:>6} {:>6} {:>5.1}% {:>5} {:>5} {:>3} {:>3} {:>4} {:>4} {:<12} {:<6}",
             title,
@@ -1127,8 +1307,22 @@ pub fn match_published_rows(payload: &Value) -> Result<(), String> {
         ("2_l1_martial_2wolf_nopot", "mobs", None, Some(14.1), 0, 100),
         ("3_l1_martial_2wolf_pot", "player", Some(21.6), None, 5, 100),
         ("4_l3_hunt_scorpion", "player", Some(11.1), None, 124, 124),
-        ("5_l5_arcane_pale_hall", "player", Some(46.4), None, 148, 148),
-        ("6_l9_martial_line_mother", "player", Some(32.4), None, 94, 196),
+        (
+            "5_l5_arcane_pale_hall",
+            "player",
+            Some(46.4),
+            None,
+            148,
+            148,
+        ),
+        (
+            "6_l9_martial_line_mother",
+            "player",
+            Some(32.4),
+            None,
+            94,
+            196,
+        ),
         ("7_l2_martial_blob", "player", Some(10.8), None, 72, 112),
         ("s_l2_martial_d1_pot", "player", Some(19.8), None, 35, 112),
     ];
@@ -1173,4 +1367,3 @@ fn close_opt(a: Option<f64>, b: Option<f64>) -> bool {
         _ => false,
     }
 }
-

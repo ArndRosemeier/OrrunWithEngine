@@ -81,8 +81,7 @@ impl OverlandSite {
 }
 
 fn site_hash(world_seed: i32, pin_id: i32) -> u64 {
-    let mut x = (world_seed as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let mut x = (world_seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (pin_id as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -123,7 +122,8 @@ fn hamlet_blocks(p: GlobalXZ, hamlets: &[HamletStand], pins: &[SettlementPin]) -
     if hamlet_pad_blocks(p, hamlets) {
         return true;
     }
-    pins.iter().any(|pin| pin.at.distance(p) < pin_keepout_m(pin))
+    pins.iter()
+        .any(|pin| pin.at.distance(p) < pin_keepout_m(pin))
 }
 
 fn dry_land(surface: &ContinentalSurface, p: GlobalXZ) -> bool {
@@ -145,9 +145,8 @@ fn in_hinterland(p: GlobalXZ, pin: &SettlementPin, min_m: f64, max_m: f64) -> bo
 }
 
 fn owns_hinterland(p: GlobalXZ, pin: &SettlementPin, pins: &[SettlementPin]) -> bool {
-    pins.iter().all(|other| {
-        other.id == pin.id || pin.at.distance(p) <= other.at.distance(p) + 1e-6
-    })
+    pins.iter()
+        .all(|other| other.id == pin.id || pin.at.distance(p) <= other.at.distance(p) + 1e-6)
 }
 
 pub fn plan_overland_sites(
@@ -432,14 +431,54 @@ pub const CAIRN_STAMP_PIECES: usize = 6;
 /// (mesh, local x, local z, lift y, yaw°, pitch°, scale)
 const CAIRN_STAMP: &[(&str, f32, f32, f32, f32, f32, f32)] = &[
     // Rubble mound the menhir rises from.
-    ("props/rocks/cairn_pile_base.glb", 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+    (
+        "props/rocks/cairn_pile_base.glb",
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ),
     // Leaning dark standing stone — pitch leans toward the road camera.
-    ("props/rocks/cairn_menhir_lean.glb", 0.05, -0.25, 0.55, -6.0, 14.0, 1.05),
+    (
+        "props/rocks/cairn_menhir_lean.glb",
+        0.05,
+        -0.25,
+        0.55,
+        -6.0,
+        14.0,
+        1.05,
+    ),
     // Flat offering slab; crate loot sits here, not on the menhir.
-    ("props/rocks/cairn_offering_slab.glb", 1.20, 0.95, 0.06, 22.0, 0.0, 1.0),
+    (
+        "props/rocks/cairn_offering_slab.glb",
+        1.20,
+        0.95,
+        0.06,
+        22.0,
+        0.0,
+        1.0,
+    ),
     // Wing rubble so the pile reads wider than one mesh.
-    ("props/rocks/rock_chunk_angular.glb", -1.10, 0.60, 0.0, -38.0, 0.0, 1.15),
-    ("props/rocks/rock_talus_shard.glb", 0.85, -0.55, 0.0, 58.0, 0.0, 1.10),
+    (
+        "props/rocks/rock_chunk_angular.glb",
+        -1.10,
+        0.60,
+        0.0,
+        -38.0,
+        0.0,
+        1.15,
+    ),
+    (
+        "props/rocks/rock_talus_shard.glb",
+        0.85,
+        -0.55,
+        0.0,
+        58.0,
+        0.0,
+        1.10,
+    ),
 ];
 const CAIRN_CRATE: (&str, f32, f32, f32, f32) = ("props/crate_small.glb", 1.30, 0.82, 0.32, 18.0);
 
@@ -471,72 +510,69 @@ pub fn spawn_site_props(
         let before = ids.len();
         let ground = surface.column(site.at).ground();
         let one = (|| -> EngineResult<()> {
-        match site.kind {
-            SiteKind::TakenCairn => {
-                for (rel, dx, dz, dy, yaw, pitch, scale) in CAIRN_STAMP {
+            match site.kind {
+                SiteKind::TakenCairn => {
+                    for (rel, dx, dz, dy, yaw, pitch, scale) in CAIRN_STAMP {
+                        let mesh = if let Some(m) = statics.get(rel) {
+                            m.clone()
+                        } else {
+                            let m = load_static(rel)?;
+                            statics.insert(*rel, m.clone());
+                            m
+                        };
+                        let (wx, wz) = local_xz(*dx, *dz, site.yaw_deg);
+                        let at = GlobalPosition::at(
+                            site.at.x + wx,
+                            f64::from(ground + *dy),
+                            site.at.z + wz,
+                        );
+                        let place = GlobalPlace::at(at)
+                            .with_yaw_deg(site.yaw_deg + *yaw)
+                            .with_pitch_deg(*pitch)
+                            .with_scale(*scale);
+                        ids.push(world.spawn_anchored(mesh, place)?);
+                    }
+                    let (rel, dx, dz, dy, yaw) = CAIRN_CRATE;
                     let mesh = if let Some(m) = statics.get(rel) {
                         m.clone()
                     } else {
                         let m = load_static(rel)?;
-                        statics.insert(*rel, m.clone());
+                        statics.insert(rel, m.clone());
                         m
                     };
-                    let (wx, wz) = local_xz(*dx, *dz, site.yaw_deg);
-                    let at = GlobalPosition::at(
-                        site.at.x + wx,
-                        f64::from(ground + *dy),
-                        site.at.z + wz,
-                    );
-                    let place = GlobalPlace::at(at)
-                        .with_yaw_deg(site.yaw_deg + *yaw)
-                        .with_pitch_deg(*pitch)
-                        .with_scale(*scale);
+                    let (wx, wz) = local_xz(dx, dz, site.yaw_deg);
+                    let at =
+                        GlobalPosition::at(site.at.x + wx, f64::from(ground + dy), site.at.z + wz);
+                    let place = GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + yaw);
                     ids.push(world.spawn_anchored(mesh, place)?);
                 }
-                let (rel, dx, dz, dy, yaw) = CAIRN_CRATE;
-                let mesh = if let Some(m) = statics.get(rel) {
-                    m.clone()
-                } else {
-                    let m = load_static(rel)?;
-                    statics.insert(rel, m.clone());
-                    m
-                };
-                let (wx, wz) = local_xz(dx, dz, site.yaw_deg);
-                let at = GlobalPosition::at(
-                    site.at.x + wx,
-                    f64::from(ground + dy),
-                    site.at.z + wz,
-                );
-                let place = GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + yaw);
-                ids.push(world.spawn_anchored(mesh, place)?);
-            }
-            SiteKind::WoodsHut => {
-                let places = kit::assemble_woods_hut();
-                for item in places {
-                    let key = item.piece.to_string();
-                    let mesh = if let Some(m) = hut_pieces.get(&key) {
-                        m.clone()
-                    } else {
-                        let m = kit::load_piece_mesh(&item.piece).map_err(|err| {
-                            EngineError::Model(format!("woods hut piece {key}: {err}"))
-                        })?;
-                        hut_pieces.insert(key.clone(), m.clone());
-                        m
-                    };
-                    let p = item.place.position;
-                    let (dx, dz) = kit::yaw_xz(p.x, p.z, site.yaw_deg);
-                    let at = GlobalPosition::at(
-                        site.at.x + f64::from(dx),
-                        f64::from(ground + p.y),
-                        site.at.z + f64::from(dz),
-                    );
-                    let place =
-                        GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + item.place.yaw_degrees);
-                    ids.push(world.spawn_anchored(mesh, place)?);
+                SiteKind::WoodsHut => {
+                    let places = kit::assemble_woods_hut();
+                    for item in places {
+                        let key = item.piece.to_string();
+                        let mesh = if let Some(m) = hut_pieces.get(&key) {
+                            m.clone()
+                        } else {
+                            let m = kit::load_piece_mesh(&item.piece).map_err(|err| {
+                                EngineError::Model(format!("woods hut piece {key}: {err}"))
+                            })?;
+                            hut_pieces.insert(key.clone(), m.clone());
+                            m
+                        };
+                        let p = item.place.position;
+                        let (dx, dz) = kit::yaw_xz(p.x, p.z, site.yaw_deg);
+                        let at = GlobalPosition::at(
+                            site.at.x + f64::from(dx),
+                            f64::from(ground + p.y),
+                            site.at.z + f64::from(dz),
+                        );
+                        let place =
+                            GlobalPlace::at(at).with_yaw_deg(site.yaw_deg + item.place.yaw_degrees);
+                        ids.push(world.spawn_anchored(mesh, place)?);
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
         })();
         match one {
             Ok(()) => {}
@@ -681,8 +717,7 @@ mod tests {
             .iter()
             .filter(|p| p.tier <= 1)
             .min_by(|a, b| {
-                a.at
-                    .distance(GlobalXZ::at(0.0, 0.0))
+                a.at.distance(GlobalXZ::at(0.0, 0.0))
                     .partial_cmp(&b.at.distance(GlobalXZ::at(0.0, 0.0)))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })

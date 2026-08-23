@@ -712,10 +712,7 @@ fn drape_edges(left_ground: f32, centre_ground: f32, right_ground: f32) -> (f32,
     let mid = (left_ground + right_ground) * 0.5;
     let crown = (centre_ground - mid).max(0.0) * ROAD_CROWN_FRAC;
     let lip = ROAD_BED_LIFT_M + ROAD_RIM_LIFT_M + crown;
-    (
-        left_ground + lip,
-        right_ground + lip,
-    )
+    (left_ground + lip, right_ground + lip)
 }
 
 fn densify_xz(points: &[Vec3], step: f32) -> Vec<Vec3> {
@@ -746,11 +743,7 @@ struct RibbonSection {
     right_base: Vec3,
 }
 
-fn add_colored_quad(
-    mesh: &mut Mesh,
-    corners: [Vec3; 4],
-    color: Color,
-) -> EngineResult<()> {
+fn add_colored_quad(mesh: &mut Mesh, corners: [Vec3; 4], color: Color) -> EngineResult<()> {
     let a = mesh.add_point(corners[0])?;
     mesh.set_point_color(a, color)?;
     let b = mesh.add_point(corners[1])?;
@@ -1365,10 +1358,7 @@ mod tests {
         };
         assert!(hamlet.cut.len() >= 2);
         let run = cut_centreline(&hamlet.cut, 10.0);
-        assert!(
-            run.len() >= 2,
-            "cut ribbon needs a start and the well"
-        );
+        assert!(run.len() >= 2, "cut ribbon needs a start and the well");
         let well = run.last().expect("well");
         assert!(
             (well.x - plaza.x).abs() < 1e-4 && (well.z - plaza.y).abs() < 1e-4,

@@ -35,9 +35,9 @@ use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
-use orrun::save::{SaveError, SavedStand};
 use orrun::controls::{is_reserved, Action};
 use orrun::hud;
+use orrun::save::{SaveError, SavedStand};
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, plan_overland_sites, Ambience,
@@ -726,7 +726,11 @@ fn main() {
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
     eprintln!("generating atlas seed={seed} size={size}…");
-    type AtlasJob = JoinHandle<(Arc<ContinentAtlas>, Arc<ContinentalSurface>, ContinentProxySpec)>;
+    type AtlasJob = JoinHandle<(
+        Arc<ContinentAtlas>,
+        Arc<ContinentalSurface>,
+        ContinentProxySpec,
+    )>;
     let mut generating: Option<AtlasJob> = Some(
         std::thread::Builder::new()
             .name("atlas".into())
@@ -1380,11 +1384,7 @@ fn travel_to_nearest_dungeon(
     }
 }
 
-fn travel_to_nearest_cave(
-    viewer: &mut AtlasViewer,
-    session: &mut WorldSession,
-    world: &mut World,
-) {
+fn travel_to_nearest_cave(viewer: &mut AtlasViewer, session: &mut WorldSession, world: &mut World) {
     let from = session
         .player_position()
         .map(|p| GlobalXZ::at(p.x, p.z))
@@ -1411,10 +1411,7 @@ fn travel_to_nearest_cave(
     viewer.selection = Some(point);
     match session.begin_entry(world, WorldEntryRequest::at(point)) {
         Ok(()) => {
-            viewer.note = Some(format!(
-                "travelling to a {} cave mouth",
-                pin.tier_name()
-            ));
+            viewer.note = Some(format!("travelling to a {} cave mouth", pin.tier_name()));
             eprintln!("{}", viewer.note.as_deref().unwrap_or_default());
         }
         Err(err) => {
@@ -1677,10 +1674,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
         if let Some(k) = frame.input.last_key_down() {
             if !is_reserved(k) {
                 ui_state.prefs.keys.assign(action, k);
-                ui_state
-                    .prefs
-                    .write()
-                    .unwrap_or_else(|err| panic!("{err}"));
+                ui_state.prefs.write().unwrap_or_else(|err| panic!("{err}"));
                 ui_state.listening = None;
             }
         }
@@ -1916,11 +1910,8 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                         let bar_h = ui.spacing().interact_size.y;
                         let (hp_rect, _) =
                             ui.allocate_exact_size(egui::vec2(160.0, bar_h), Sense::hover());
-                        ui.painter().rect_filled(
-                            hp_rect,
-                            2.0,
-                            Color32::from_rgb(40, 40, 40),
-                        );
+                        ui.painter()
+                            .rect_filled(hp_rect, 2.0, Color32::from_rgb(40, 40, 40));
                         if let Some(ghost) = session.hp_ghost_frac() {
                             if ghost > hp_frac {
                                 let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
@@ -1974,11 +1965,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
         });
     hud::draw_target_frame(&ctx, session.combat());
     if let Some(pos) = session.player_position() {
-        let eye = glam::Vec3::new(
-            pos.x as f32,
-            pos.y as f32 + 1.7,
-            pos.z as f32,
-        );
+        let eye = glam::Vec3::new(pos.x as f32, pos.y as f32 + 1.7, pos.z as f32);
         let aspect = (frame.width.max(1) as f32) / (frame.height.max(1) as f32);
         let view_proj = world.camera.view_projection(aspect);
         hud::draw_nameplates(&ctx, session.combat(), eye, view_proj);

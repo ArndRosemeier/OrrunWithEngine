@@ -27,24 +27,24 @@ use crate::settings::KeyBinds;
 use glam::{Vec2, Vec3};
 use thiserror::Error;
 
+use super::cave::CaveError;
 use super::coords::{Heading, CHUNK_SPAN_M};
 use super::doors::DoorLayer;
-use super::cave::CaveError;
 use super::dungeon::{DungeonError, DungeonLayer};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 use super::fauna::{FaunaError, FaunaLayer};
 use super::footprint::BuildingIndex;
+use super::footprint::HousePlot;
 use super::look::install_daylight;
 use super::paths::PathLayer;
 use super::ponds::{PondField, PondWindow};
 use super::scatter::{ScatterCatalog, ScatterError, ScatterLayer};
 use super::settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
-use super::villagers::VillagerLayer;
-use super::footprint::HousePlot;
 use super::surface::ContinentalSurface;
 use super::travel::{
     travel_view, ContinentProxySpec, TravelPhase, TravelSource, TravelTimings, TravelView,
 };
+use super::villagers::VillagerLayer;
 use super::world_stream::{WorldStream, FAR_VIEW_M};
 
 /// Gap between the contact height and the soles, so rounding never buries them.
@@ -503,12 +503,7 @@ impl WorldSession {
         self.finish_loot_take(world, pos, pile);
     }
 
-    fn finish_loot_take(
-        &mut self,
-        world: &mut World,
-        pos: usize,
-        pile: crate::loot::GroundPile,
-    ) {
+    fn finish_loot_take(&mut self, world: &mut World, pos: usize, pile: crate::loot::GroundPile) {
         let idx = pile.hostile_idx;
         if pile.empty() {
             self.ground_loot.remove(pos);
@@ -539,7 +534,13 @@ impl WorldSession {
     }
 
     /// Dead-cone on the same left click. Not Tab. Sparkle must still be up.
-    pub fn try_dead_loot(&mut self, player_x: f64, player_z: f64, facing_x: f64, facing_z: f64) -> bool {
+    pub fn try_dead_loot(
+        &mut self,
+        player_x: f64,
+        player_z: f64,
+        facing_x: f64,
+        facing_z: f64,
+    ) -> bool {
         let sparkle_ids: Vec<i32> = self
             .ground_loot
             .iter()
@@ -579,7 +580,14 @@ impl WorldSession {
     }
 
     fn sync_ground_loot(&mut self, world: &mut World) -> Result<(), SessionError> {
-        let mut planned: Vec<(i32, engine::world::EntityId, f64, f64, f64, Option<crate::loot::GroundPile>)> = Vec::new();
+        let mut planned: Vec<(
+            i32,
+            engine::world::EntityId,
+            f64,
+            f64,
+            f64,
+            Option<crate::loot::GroundPile>,
+        )> = Vec::new();
         for h in &self.combat.hostiles {
             if h.alive {
                 continue;
@@ -605,7 +613,8 @@ impl WorldSession {
             planned.push((h.idx, entity, h.x, y, h.z, Some(pile)));
         }
         for (idx, entity, x, y, z, pile) in planned {
-            self.combat_layer.spawn_sparkle(world, idx, entity, x, y, z)?;
+            self.combat_layer
+                .spawn_sparkle(world, idx, entity, x, y, z)?;
             if let Some(pile) = pile {
                 self.ground_loot.push(pile);
             }
@@ -676,7 +685,10 @@ impl WorldSession {
     }
 
     pub fn slain_line(&self) -> Option<String> {
-        self.combat.slain_by.as_ref().map(|n| format!("slain by {n}"))
+        self.combat
+            .slain_by
+            .as_ref()
+            .map(|n| format!("slain by {n}"))
     }
 
     pub fn swings_stopped(&self) -> bool {
@@ -684,7 +696,11 @@ impl WorldSession {
     }
 
     pub fn is_shaken(&self) -> bool {
-        self.combat.player.shaken.as_ref().is_some_and(|s| s.remaining_s > 0.0)
+        self.combat
+            .player
+            .shaken
+            .as_ref()
+            .is_some_and(|s| s.remaining_s > 0.0)
     }
 
     pub fn combat_log(&self) -> Vec<String> {
@@ -717,9 +733,8 @@ impl WorldSession {
 
     fn resolve_death(&mut self, world: &mut World) {
         let place = self.last_shrine().or_else(|| {
-            self.spawn.map(|s| {
-                GlobalPlace::at(s.position()).with_yaw_deg(s.heading().degrees())
-            })
+            self.spawn
+                .map(|s| GlobalPlace::at(s.position()).with_yaw_deg(s.heading().degrees()))
         });
         if let Some(place) = place {
             if let Some(player) = self.player.as_mut() {
@@ -734,7 +749,8 @@ impl WorldSession {
     }
 
     pub fn last_shrine(&self) -> Option<GlobalPlace> {
-        self.last_shrine.or_else(|| self.dungeons.as_ref().and_then(|d| d.shrine()))
+        self.last_shrine
+            .or_else(|| self.dungeons.as_ref().and_then(|d| d.shrine()))
     }
 
     pub fn combat_walk_speed(&self) -> f32 {
@@ -1163,9 +1179,7 @@ impl WorldSession {
             panic!("SessionState::Travel without a travel record");
         }
         self.assert_proxy_resident(world);
-        if self.travel.as_ref().expect("travel").handed_off
-            && self.update_loading(world)?
-        {
+        if self.travel.as_ref().expect("travel").handed_off && self.update_loading(world)? {
             self.travel.as_mut().expect("travel").destination_ready = true;
         }
         self.place_travel_marker(world)?;
@@ -1442,7 +1456,10 @@ impl WorldSession {
                     self.stream.set_house_plots(world, (*plots).clone())?;
                 }
             }
-            if self.caves.follow(world, &self.surface, request.requested())? {
+            if self
+                .caves
+                .follow(world, &self.surface, request.requested())?
+            {
                 let plots = self.plot_index();
                 self.stream.set_house_plots(world, (*plots).clone())?;
             }
@@ -1452,9 +1469,8 @@ impl WorldSession {
             let pose = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
             self.spawn = Some(pose);
             if self.last_shrine.is_none() {
-                self.last_shrine = Some(
-                    GlobalPlace::at(pose.position()).with_yaw_deg(pose.heading().degrees()),
-                );
+                self.last_shrine =
+                    Some(GlobalPlace::at(pose.position()).with_yaw_deg(pose.heading().degrees()));
             }
             self.player = Some(Player {
                 position: pose.position(),
@@ -1618,7 +1634,12 @@ impl WorldSession {
         Ok(true)
     }
 
-    fn hostile_feet_y(&self, world: &World, player: &Player, h: &crate::combat::WorldHostile) -> f64 {
+    fn hostile_feet_y(
+        &self,
+        world: &World,
+        player: &Player,
+        h: &crate::combat::WorldHostile,
+    ) -> f64 {
         if h.mob_id == "orc_skull" || super::combat_layer::is_bone_id(&h.mob_id) {
             if let Some(y) = self
                 .dungeons
@@ -1722,8 +1743,7 @@ impl WorldSession {
             super::sites::clear_overland_sites(&mut self.combat);
             super::sites::seat_overland_sites(&mut self.combat, &sites);
             super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-            self.site_prop_ids =
-                super::sites::spawn_site_props(world, &self.surface, &sites)?;
+            self.site_prop_ids = super::sites::spawn_site_props(world, &self.surface, &sites)?;
             self.overland_sites = sites;
             self.roster_pins_seated = true;
             return Ok(true);
@@ -1848,9 +1868,7 @@ impl WorldSession {
                 }
             }
         }
-        if self.combat_layer.fixture_ready()
-            && !self.combat_layer.roster_pins_skipped()
-        {
+        if self.combat_layer.fixture_ready() && !self.combat_layer.roster_pins_skipped() {
             let restamped = self.ensure_overland_sites(world, player.position)?;
             if restamped {
                 self.respawn_hostile_meshes(world, &player)?;
@@ -1861,13 +1879,19 @@ impl WorldSession {
             let px = player.position.x;
             let pz = player.position.z;
             if input.tab {
-                self.combat.press_tab(px, pz, facing.x as f64, facing.z as f64);
-            } else if input.capture_look && world.pointer_lock() && !self.bag_open && !self.loot_open {
+                self.combat
+                    .press_tab(px, pz, facing.x as f64, facing.z as f64);
+            } else if input.capture_look
+                && world.pointer_lock()
+                && !self.bag_open
+                && !self.loot_open
+            {
                 // Dead-cone is not Tab. Same left click; sparkle still up.
                 if self.try_dead_loot(px, pz, facing.x as f64, facing.z as f64) {
                     world.set_pointer_lock(false);
                 } else {
-                    self.combat.click_lock(px, pz, facing.x as f64, facing.z as f64);
+                    self.combat
+                        .click_lock(px, pz, facing.x as f64, facing.z as f64);
                 }
             }
         }
@@ -1959,7 +1983,8 @@ impl WorldSession {
                     .map(|k| k.2)
                     .unwrap_or(py)
             };
-            self.combat_layer.present(world, &self.combat, ground_y, input.dt)?;
+            self.combat_layer
+                .present(world, &self.combat, ground_y, input.dt)?;
             self.sync_ground_loot(world)?;
             if self.combat.dead
                 && self.combat.player.resources.hp <= 0.0
@@ -2157,9 +2182,13 @@ impl WorldSession {
         }
         {
             let t = Instant::now();
+            self.caves.follow(
+                world,
+                &self.surface,
+                GlobalXZ::at(player.position.x, player.position.z),
+            )?;
             self.caves
-                .follow(world, &self.surface, GlobalXZ::at(player.position.x, player.position.z))?;
-            self.caves.frame(world, player.position, player.yaw_degrees)?;
+                .frame(world, player.position, player.yaw_degrees)?;
             world.hitch_span(
                 "cave_frame",
                 hitch_ms(t),
@@ -2352,8 +2381,7 @@ impl WorldSession {
     /// Nearest seated house door to `from`, if any.
     pub fn nearest_village_door(&self, from: GlobalXZ) -> Option<&HouseDoor> {
         self.village_doors().iter().min_by(|a, b| {
-            a.at
-                .horizontal()
+            a.at.horizontal()
                 .distance(from)
                 .partial_cmp(&b.at.horizontal().distance(from))
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -2595,15 +2623,14 @@ impl WorldSession {
         Some((eye, target))
     }
 
-
     pub fn village_human_count(&self) -> usize {
-        self.villagers.as_ref().map_or(0, VillagerLayer::human_count)
+        self.villagers
+            .as_ref()
+            .map_or(0, VillagerLayer::human_count)
     }
 
     pub fn village_human_mesh_count(&self, world: &World) -> usize {
-        self.villagers
-            .as_ref()
-            .map_or(0, |v| v.mesh_count(world))
+        self.villagers.as_ref().map_or(0, |v| v.mesh_count(world))
     }
 
     pub fn village_human_on_corridor(&self) -> bool {
@@ -2620,7 +2647,9 @@ impl WorldSession {
     }
 
     pub fn village_walker_speed_mps(&self) -> Option<f32> {
-        self.villagers.as_ref().and_then(VillagerLayer::walker_speed_mps)
+        self.villagers
+            .as_ref()
+            .and_then(VillagerLayer::walker_speed_mps)
     }
 
     pub fn ribbon_faces(&self) -> usize {
@@ -2669,7 +2698,10 @@ impl WorldSession {
         &self.overland_sites
     }
 
-    pub fn overland_site(&self, kind: super::sites::SiteKind) -> Option<super::sites::OverlandSite> {
+    pub fn overland_site(
+        &self,
+        kind: super::sites::SiteKind,
+    ) -> Option<super::sites::OverlandSite> {
         self.overland_sites.iter().copied().find(|s| s.kind == kind)
     }
 

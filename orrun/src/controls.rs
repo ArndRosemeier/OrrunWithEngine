@@ -178,7 +178,9 @@ impl PressedActions {
     }
 
     pub fn iter(self) -> impl Iterator<Item = Action> {
-        Action::ALL.into_iter().filter(move |action| self.bits & action.bit() != 0)
+        Action::ALL
+            .into_iter()
+            .filter(move |action| self.bits & action.bit() != 0)
     }
 }
 

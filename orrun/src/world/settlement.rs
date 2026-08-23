@@ -31,8 +31,8 @@ use super::world_stream::{WorldStream, NEAR};
 use crate::hamlet::castle_kit;
 use crate::hamlet::kit::{self, KitError};
 use crate::hamlet::{
-    castle_layout, generate_dwelling, plan_on, spec_for, DwellingBrief, HamletError, HamletLabConfig,
-    Plan2D, Plot, Shape, ShapeKind, DOOR_SINK_M, FOUNDATION_M,
+    castle_layout, generate_dwelling, plan_on, spec_for, DwellingBrief, HamletError,
+    HamletLabConfig, Plan2D, Plot, Shape, ShapeKind, DOOR_SINK_M, FOUNDATION_M,
 };
 
 /// How far from the player a pin still gets a layout. Sized with the walked ring.
@@ -158,13 +158,19 @@ impl HouseDoor {
     /// high leaf origin or jetty leaf cannot pull the stand onto the roof.
     pub fn outside_stand(&self) -> GlobalXZ {
         let (ox, oz) = kit::yaw_xz(0.0, -(self.half_z + 2.2), self.house_yaw_deg);
-        GlobalXZ::at(self.house_at.x + f64::from(ox), self.house_at.z + f64::from(oz))
+        GlobalXZ::at(
+            self.house_at.x + f64::from(ox),
+            self.house_at.z + f64::from(oz),
+        )
     }
 
     /// Just inside the threshold, used to walk through the open portal.
     pub fn enter_stand(&self) -> GlobalXZ {
         let (ix, iz) = kit::yaw_xz(0.0, -(self.half_z - 0.75), self.house_yaw_deg);
-        GlobalXZ::at(self.house_at.x + f64::from(ix), self.house_at.z + f64::from(iz))
+        GlobalXZ::at(
+            self.house_at.x + f64::from(ix),
+            self.house_at.z + f64::from(iz),
+        )
     }
 
     /// Mid-doorway look target (handle height), never the roof.
@@ -522,7 +528,6 @@ impl SettlementLayer {
         Ok(plots_changed)
     }
 
-
     fn pin_id_at(&self, hamlet_at: GlobalXZ) -> Option<i32> {
         self.seated.iter().find_map(|(id, city)| {
             let d = city.hamlet.at;
@@ -569,11 +574,7 @@ impl SettlementLayer {
         ))
     }
 
-    fn stand_camps(
-        &mut self,
-        world: &mut World,
-        surface: &ContinentalSurface,
-    ) -> EngineResult<()> {
+    fn stand_camps(&mut self, world: &mut World, surface: &ContinentalSurface) -> EngineResult<()> {
         let seated_ids: Vec<i32> = self.seated.keys().copied().collect();
         for id in seated_ids {
             if self.camps.contains_key(&id) {
@@ -1106,16 +1107,7 @@ fn seat_plan(
                 plots,
             ),
             ShapeKind::House => seat_house(
-                shape,
-                pin,
-                &plot,
-                &catalog,
-                piece_ids,
-                world_seed,
-                out,
-                houses,
-                plots,
-                doors,
+                shape, pin, &plot, &catalog, piece_ids, world_seed, out, houses, plots, doors,
             ),
         }
     }
@@ -1135,17 +1127,7 @@ fn seat_house(
 ) {
     if let Some(brief) = shape.dwelling {
         seat_dwelling(
-            shape,
-            brief,
-            pin,
-            plot,
-            catalog,
-            piece_ids,
-            world_seed,
-            out,
-            houses,
-            plots,
-            doors,
+            shape, brief, pin, plot, catalog, piece_ids, world_seed, out, houses, plots, doors,
         );
         return;
     }
@@ -1347,7 +1329,6 @@ fn layout_config(pin: SettlementPin) -> HamletLabConfig {
     config.place_castle = true;
     config
 }
-
 
 const TENT_HALF_X: f32 = 1.1;
 const TENT_HALF_Z: f32 = 0.8;
@@ -1666,7 +1647,11 @@ fn places_of(items: &[(GlobalPosition, f32, Color)], origin: RenderOrigin) -> Ve
             continue;
         };
         let p = render.vec3();
-        places.push(Place::new(p.x, p.y, p.z).with_yaw_deg(yaw_deg).with_tint(tint));
+        places.push(
+            Place::new(p.x, p.y, p.z)
+                .with_yaw_deg(yaw_deg)
+                .with_tint(tint),
+        );
     }
     places
 }
@@ -1882,9 +1867,21 @@ mod tests {
         let center = Vec2::new(0.0, 0.0);
         let half = Vec2::new(4.0, 3.0);
         let cut = [Vec2::new(-10.0, 0.0), Vec2::new(10.0, 0.0)];
-        assert!(obb_hits_stadium(center, half, 0.0, &cut, ROAD_CLEAR_M * 0.5));
+        assert!(obb_hits_stadium(
+            center,
+            half,
+            0.0,
+            &cut,
+            ROAD_CLEAR_M * 0.5
+        ));
         let far = [Vec2::new(-10.0, 20.0), Vec2::new(10.0, 20.0)];
-        assert!(!obb_hits_stadium(center, half, 0.0, &far, ROAD_CLEAR_M * 0.5));
+        assert!(!obb_hits_stadium(
+            center,
+            half,
+            0.0,
+            &far,
+            ROAD_CLEAR_M * 0.5
+        ));
     }
 
     #[test]
@@ -1945,7 +1942,10 @@ mod tests {
         let cut = [Vec2::new(-8.0, 0.0), Vec2::new(8.0, 0.0)];
         filter_houses_on_cut(&mut plan, pin, &cut);
         assert_eq!(
-            plan.shapes.iter().filter(|s| s.kind == ShapeKind::Castle).count(),
+            plan.shapes
+                .iter()
+                .filter(|s| s.kind == ShapeKind::Castle)
+                .count(),
             1
         );
         assert!(

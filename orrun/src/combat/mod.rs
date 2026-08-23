@@ -1,7 +1,8 @@
-﻿//! Orrun v1 combat: bible math, headless sim, live types.
+//! Orrun v1 combat: bible math, headless sim, live types.
 //!
 //! One formula set. The `combat_sim` bin is a thin CLI over this crate.
 
+pub mod catalog;
 pub mod consideration;
 pub mod lock;
 pub mod log;
@@ -10,8 +11,9 @@ pub mod sheets;
 pub mod sim;
 pub mod types;
 pub mod verbs;
-pub mod catalog;
 
+pub use consideration::{con_band, ConBand};
+pub use log::CombatLog;
 pub use math::{
     mitigation, skill_rider, Attrs, Discipline, Ranks, BOW_DRAW_S, HEAR_AGGRO_M, LEASH_M,
     MELEE_CONE_DEG, MELEE_REACH_M, MELEE_SWING_S, POTION_CD_S, POTION_HEAL, SIGHT_AGGRO_M,
@@ -21,16 +23,12 @@ pub use sheets::{
     bow_raw, ember_raw, formulas, melee_raw, mend_raw, player_stats, ward_raw, wolf_sheet,
     MobSheet, PlayerStats,
 };
-pub use sim::{
-    fixture_scenario_1, match_published_rows, run_all, run_scenario, simulate_fight,
-};
-pub use consideration::{con_band, ConBand};
+pub use sim::{fixture_scenario_1, match_published_rows, run_all, run_scenario, simulate_fight};
 pub use types::{
     melee_auto_legal, tab_candidates, Aggro, CombatResources, LivePlayer, Shaken, TargetLock,
     WorldCombat, WorldHostile,
 };
 pub use verbs::CombatVerb;
-pub use log::CombatLog;
 
 /// Published L1 Martial vs 1 wolf fixture used by playtester `combat`.
 pub fn fixture_l1_martial_wolf() -> Result<serde_json::Value, String> {

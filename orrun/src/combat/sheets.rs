@@ -23,7 +23,12 @@ pub struct PlayerStats {
 
 impl PlayerStats {
     pub fn melee_hit(&self, strike: bool) -> i32 {
-        melee_hit(self.attrs.might, self.weapon_skill, self.ranks.martial, strike)
+        melee_hit(
+            self.attrs.might,
+            self.weapon_skill,
+            self.ranks.martial,
+            strike,
+        )
     }
 
     pub fn bow_hit(&self, aimed: bool, distance: f64) -> i32 {
@@ -699,7 +704,6 @@ pub fn xp_curve() -> Value {
     })
 }
 
-
 fn grant_xp(
     need: &BTreeMap<i32, i32>,
     level: &mut i32,
@@ -745,53 +749,91 @@ pub fn leveling_path() -> Value {
     let mut minutes = 0.0f64;
     let mut events = Vec::new();
 
-
     let d1f = dungeon_xp(0, true);
-    grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+    grant_xp(
+        &need,
+        &mut level,
+        &mut xp_into,
+        &mut minutes,
+        &mut events,
         d1f["total"].as_i64().unwrap() as i32,
         "D1 first-clear (2 L1 wolves + heart + first)",
         d1f["minutes"].as_f64().unwrap(),
     );
     while level < 4 {
         let d1 = dungeon_xp(0, false);
-        grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+        grant_xp(
+            &need,
+            &mut level,
+            &mut xp_into,
+            &mut minutes,
+            &mut events,
             d1["total"].as_i64().unwrap() as i32,
             "D1 repeat (2 L1 wolves + heart)",
             d1["minutes"].as_f64().unwrap(),
         );
     }
     let d2f = dungeon_xp(1, true);
-    grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+    grant_xp(
+        &need,
+        &mut level,
+        &mut xp_into,
+        &mut minutes,
+        &mut events,
         d2f["total"].as_i64().unwrap() as i32,
         "D2 first-clear Pale Hall (4 L4 wolves + heart + first)",
         d2f["minutes"].as_f64().unwrap(),
     );
     while level < 8 {
         let d2 = dungeon_xp(1, false);
-        grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+        grant_xp(
+            &need,
+            &mut level,
+            &mut xp_into,
+            &mut minutes,
+            &mut events,
             d2["total"].as_i64().unwrap() as i32,
             "D2 repeat (4 L4 wolves + heart)",
             d2["minutes"].as_f64().unwrap(),
         );
     }
     let t2f = dungeon_xp(2, true);
-    grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+    grant_xp(
+        &need,
+        &mut level,
+        &mut xp_into,
+        &mut minutes,
+        &mut events,
         t2f["total"].as_i64().unwrap() as i32,
         "T2 first-clear (6 L6 wolves + Line-Mother + heart + first)",
         t2f["minutes"].as_f64().unwrap(),
     );
     while level < 10 {
         let t2 = dungeon_xp(2, false);
-        grant_xp(&need, &mut level, &mut xp_into, &mut minutes, &mut events,
+        grant_xp(
+            &need,
+            &mut level,
+            &mut xp_into,
+            &mut minutes,
+            &mut events,
             t2["total"].as_i64().unwrap() as i32,
             "T2 repeat (6 L6 wolves + Line-Mother + heart)",
             t2["minutes"].as_f64().unwrap(),
         );
     }
 
-    let d1_count = events.iter().filter(|e| e["label"].as_str().unwrap().starts_with("D1")).count();
-    let d2_count = events.iter().filter(|e| e["label"].as_str().unwrap().starts_with("D2")).count();
-    let t2_count = events.iter().filter(|e| e["label"].as_str().unwrap().starts_with("T2")).count();
+    let d1_count = events
+        .iter()
+        .filter(|e| e["label"].as_str().unwrap().starts_with("D1"))
+        .count();
+    let d2_count = events
+        .iter()
+        .filter(|e| e["label"].as_str().unwrap().starts_with("D2"))
+        .count();
+    let t2_count = events
+        .iter()
+        .filter(|e| e["label"].as_str().unwrap().starts_with("T2"))
+        .count();
 
     json!({
         "events": events,
@@ -811,92 +853,148 @@ pub fn leveling_path() -> Value {
 pub fn formulas() -> Value {
     let mut m = serde_json::Map::new();
     {
-    let mut put = |k: &str, v: Value| {
-        m.insert(k.to_string(), v);
-    };
-    put("tick_s", json!(TICK));
-    put("hard_cap_s", json!(HARD_CAP_S));
-    put("always_hit", json!(true));
-    put("no_crit_v1", json!(true));
-    put("seed_unused_v1", json!(true));
-    put("mitigation", json!("floor(incoming * 100 / (100 + Grit_or_Armor))"));
-    put("skill_rider", json!("1 + skill * 0.004"));
-    put("skill_xp", json!("+1 per connecting damaging hit; cost = 8 * current_skill; cap = level * 5"));
-    put("melee_hit", json!("floor((8 + Might*0.4) * skill_rider * strike_mult * martial_5_bonus)"));
-    put("melee_swing_s", json!(MELEE_SWING_S));
-    put("melee_reach_m", json!(MELEE_REACH_M));
-    put("melee_cone_deg", json!(MELEE_CONE_DEG));
-    put("bow_hit", json!("floor((7 + Swift*0.4) * skill_rider * aimed_mult * hunt_5_bonus * range_mult)"));
-    put("bow_draw_s", json!(BOW_DRAW_S));
-    put("bow_full_m", json!(BOW_FULL_M));
-    put("bow_falloff_end_m", json!(BOW_FALLOFF_END_M));
-    put("ember", json!("floor((14 + Will*0.5) * ember_rank * arcane_10_spell * skill_rider)"));
-    put("ember_rank", json!("1.30 if Arcane>=10 else 1.15 if Arcane>=1 else 1.00"));
-    put("arcane_10_spell", json!("1.15 if Arcane>=10 else 1.00"));
-    put("mend", json!("floor((25 + Will*0.4) * arcane_10_spell)"));
-    put("ward_absorb", json!("floor((20 + Will*0.3) * arcane_10_spell)"));
-    put("bind", json!("root 4.0s; damage after 1.0s breaks; 0 damage"));
-    put("ember_mana", json!(EMBER_MANA));
-    put("ember_cast_s", json!(EMBER_CAST_S));
-    put("ember_cd_s", json!(EMBER_CD_S));
-    put("ember_range_m", json!(EMBER_RANGE_M));
-    put("mend_mana", json!(MEND_MANA));
-    put("mend_cast_s", json!(MEND_CAST_S));
-    put("mend_cd_s", json!(MEND_CD_S));
-    put("bind_mana", json!(BIND_MANA));
-    put("bind_cast_s", json!(BIND_CAST_S));
-    put("bind_cd_s", json!(BIND_CD_S));
-    put("bind_range_m", json!(BIND_RANGE_M));
-    put("ward_mana", json!(WARD_MANA));
-    put("ward_gcd_s", json!(WARD_GCD_S));
-    put("ward_dur_s", json!(WARD_DUR_S));
-    put("ward_cd_s", json!(WARD_CD_S));
-    put("strike", json!("next swing * 1.5, 6.0s CD, 0 mana"));
-    put("bash", json!("0.4s anim, interrupt + 1.5s stun, 8.0s CD, 0 dmg"));
-    put("aimed_shot", json!("2.0s draw, *1.8, 10s CD"));
-    put("pin", json!("bow hit + 40% slow 4.0s, 12s CD"));
-    put("cleave", json!("second target within 2.2m at 40% (Martial>=7)"));
-    put("second_wind", json!("once/combat, 20% max HP (Martial>=10)"));
-    put("mark", json!("+15% damage 12s (Hunt>=10)"));
-    put("mana_regen_per_s", json!(MANA_REGEN_PER_S));
-    put("mana_regen_combat_per_s", json!(MANA_REGEN_COMBAT_PER_S));
-    put("mana_regen_ooc_per_s", json!(MANA_REGEN_OOC_PER_S));
-    put("mana_regen_note", json!("sim is in-combat only; OOC regen 2.0/s specified for the bible but unused in these fights"));
-    put("trash_speed_mps", json!(WOLF_SPEED));
-    put("threat_damage", json!("damage * 1.0"));
-    put("threat_heal", json!("heal * 0.5 applied to current lock"));
-    put("first_hit_establishes_threat", json!(true));
-    put("no_taunt_v1", json!(true));
-    put("gcd", json!("spell cast time is the wait; Ward instant + 1.0s GCD"));
-    put("auto_continues_while_casting", json!(true));
-    put("interrupt", json!("any HP damage on caster interrupts current cast; Bash interrupts"));
-    put("potion", json!(format!("Lesser Mend +{POTION_HEAL} HP, 60s CD, not a spell, no mana")));
-    put("potion_heal", json!(POTION_HEAL));
-    put("potion_at_create", json!(1));
-    put("arrows_at_create", json!(START_ARROWS));
-    put("hp_l1", json!(HP_L1));
-    put("hp_per_level", json!(HP_PER_LEVEL));
-    put("mana_l1", json!(MANA_L1));
-    put("mana_per_level", json!(MANA_PER_LEVEL));
-    put("attr_start", json!(ATTR_BASE));
-    put("attr_points_per_level", json!(ATTR_PER_LEVEL));
-    put("discipline_points_per_level", json!(DISC_PER_LEVEL));
-    put("walk_mps", json!(WALK_MPS));
-    put("sprint_mps", json!(SPRINT_MPS));
-    put("aggro_sight_m", json!(SIGHT_AGGRO_M));
-    put("aggro_hear_m", json!(HEAR_AGGRO_M));
-    put("leash_m", json!(LEASH_M));
-    put("social_m", json!(SOCIAL_M));
-    put("wolf_hp", json!("70 + 18*(lvl-1)"));
-    put("wolf_dmg", json!("10 + 2*(lvl-1)"));
-    put("wolf_xp", json!("35 + 12*(lvl-1)"));
-    put("dungeon_wolf_counts", json!({"0": 2, "1": 4, "2": 6}));
-    put("death", json!("last shrine + 5 min Shaken (-10% dmg); no corpse; no XP debt"));
-    let mut spend = serde_json::Map::new();
-    spend.insert("Martial".into(), json!("all attr -> Might; all discipline -> Martial"));
-    spend.insert("Hunt".into(), json!("all attr -> Swift; all discipline -> Hunt"));
-    spend.insert("Arcane".into(), json!("all attr -> Will; all discipline -> Arcane"));
-    put("specialist_spend", Value::Object(spend));
+        let mut put = |k: &str, v: Value| {
+            m.insert(k.to_string(), v);
+        };
+        put("tick_s", json!(TICK));
+        put("hard_cap_s", json!(HARD_CAP_S));
+        put("always_hit", json!(true));
+        put("no_crit_v1", json!(true));
+        put("seed_unused_v1", json!(true));
+        put(
+            "mitigation",
+            json!("floor(incoming * 100 / (100 + Grit_or_Armor))"),
+        );
+        put("skill_rider", json!("1 + skill * 0.004"));
+        put(
+            "skill_xp",
+            json!("+1 per connecting damaging hit; cost = 8 * current_skill; cap = level * 5"),
+        );
+        put(
+            "melee_hit",
+            json!("floor((8 + Might*0.4) * skill_rider * strike_mult * martial_5_bonus)"),
+        );
+        put("melee_swing_s", json!(MELEE_SWING_S));
+        put("melee_reach_m", json!(MELEE_REACH_M));
+        put("melee_cone_deg", json!(MELEE_CONE_DEG));
+        put(
+            "bow_hit",
+            json!("floor((7 + Swift*0.4) * skill_rider * aimed_mult * hunt_5_bonus * range_mult)"),
+        );
+        put("bow_draw_s", json!(BOW_DRAW_S));
+        put("bow_full_m", json!(BOW_FULL_M));
+        put("bow_falloff_end_m", json!(BOW_FALLOFF_END_M));
+        put(
+            "ember",
+            json!("floor((14 + Will*0.5) * ember_rank * arcane_10_spell * skill_rider)"),
+        );
+        put(
+            "ember_rank",
+            json!("1.30 if Arcane>=10 else 1.15 if Arcane>=1 else 1.00"),
+        );
+        put("arcane_10_spell", json!("1.15 if Arcane>=10 else 1.00"));
+        put("mend", json!("floor((25 + Will*0.4) * arcane_10_spell)"));
+        put(
+            "ward_absorb",
+            json!("floor((20 + Will*0.3) * arcane_10_spell)"),
+        );
+        put(
+            "bind",
+            json!("root 4.0s; damage after 1.0s breaks; 0 damage"),
+        );
+        put("ember_mana", json!(EMBER_MANA));
+        put("ember_cast_s", json!(EMBER_CAST_S));
+        put("ember_cd_s", json!(EMBER_CD_S));
+        put("ember_range_m", json!(EMBER_RANGE_M));
+        put("mend_mana", json!(MEND_MANA));
+        put("mend_cast_s", json!(MEND_CAST_S));
+        put("mend_cd_s", json!(MEND_CD_S));
+        put("bind_mana", json!(BIND_MANA));
+        put("bind_cast_s", json!(BIND_CAST_S));
+        put("bind_cd_s", json!(BIND_CD_S));
+        put("bind_range_m", json!(BIND_RANGE_M));
+        put("ward_mana", json!(WARD_MANA));
+        put("ward_gcd_s", json!(WARD_GCD_S));
+        put("ward_dur_s", json!(WARD_DUR_S));
+        put("ward_cd_s", json!(WARD_CD_S));
+        put("strike", json!("next swing * 1.5, 6.0s CD, 0 mana"));
+        put(
+            "bash",
+            json!("0.4s anim, interrupt + 1.5s stun, 8.0s CD, 0 dmg"),
+        );
+        put("aimed_shot", json!("2.0s draw, *1.8, 10s CD"));
+        put("pin", json!("bow hit + 40% slow 4.0s, 12s CD"));
+        put(
+            "cleave",
+            json!("second target within 2.2m at 40% (Martial>=7)"),
+        );
+        put(
+            "second_wind",
+            json!("once/combat, 20% max HP (Martial>=10)"),
+        );
+        put("mark", json!("+15% damage 12s (Hunt>=10)"));
+        put("mana_regen_per_s", json!(MANA_REGEN_PER_S));
+        put("mana_regen_combat_per_s", json!(MANA_REGEN_COMBAT_PER_S));
+        put("mana_regen_ooc_per_s", json!(MANA_REGEN_OOC_PER_S));
+        put("mana_regen_note", json!("sim is in-combat only; OOC regen 2.0/s specified for the bible but unused in these fights"));
+        put("trash_speed_mps", json!(WOLF_SPEED));
+        put("threat_damage", json!("damage * 1.0"));
+        put("threat_heal", json!("heal * 0.5 applied to current lock"));
+        put("first_hit_establishes_threat", json!(true));
+        put("no_taunt_v1", json!(true));
+        put(
+            "gcd",
+            json!("spell cast time is the wait; Ward instant + 1.0s GCD"),
+        );
+        put("auto_continues_while_casting", json!(true));
+        put(
+            "interrupt",
+            json!("any HP damage on caster interrupts current cast; Bash interrupts"),
+        );
+        put(
+            "potion",
+            json!(format!(
+                "Lesser Mend +{POTION_HEAL} HP, 60s CD, not a spell, no mana"
+            )),
+        );
+        put("potion_heal", json!(POTION_HEAL));
+        put("potion_at_create", json!(1));
+        put("arrows_at_create", json!(START_ARROWS));
+        put("hp_l1", json!(HP_L1));
+        put("hp_per_level", json!(HP_PER_LEVEL));
+        put("mana_l1", json!(MANA_L1));
+        put("mana_per_level", json!(MANA_PER_LEVEL));
+        put("attr_start", json!(ATTR_BASE));
+        put("attr_points_per_level", json!(ATTR_PER_LEVEL));
+        put("discipline_points_per_level", json!(DISC_PER_LEVEL));
+        put("walk_mps", json!(WALK_MPS));
+        put("sprint_mps", json!(SPRINT_MPS));
+        put("aggro_sight_m", json!(SIGHT_AGGRO_M));
+        put("aggro_hear_m", json!(HEAR_AGGRO_M));
+        put("leash_m", json!(LEASH_M));
+        put("social_m", json!(SOCIAL_M));
+        put("wolf_hp", json!("70 + 18*(lvl-1)"));
+        put("wolf_dmg", json!("10 + 2*(lvl-1)"));
+        put("wolf_xp", json!("35 + 12*(lvl-1)"));
+        put("dungeon_wolf_counts", json!({"0": 2, "1": 4, "2": 6}));
+        put(
+            "death",
+            json!("last shrine + 5 min Shaken (-10% dmg); no corpse; no XP debt"),
+        );
+        let mut spend = serde_json::Map::new();
+        spend.insert(
+            "Martial".into(),
+            json!("all attr -> Might; all discipline -> Martial"),
+        );
+        spend.insert(
+            "Hunt".into(),
+            json!("all attr -> Swift; all discipline -> Hunt"),
+        );
+        spend.insert(
+            "Arcane".into(),
+            json!("all attr -> Will; all discipline -> Arcane"),
+        );
+        put("specialist_spend", Value::Object(spend));
     }
     Value::Object(m)
 }
@@ -933,4 +1031,3 @@ pub fn player_specialists_json() -> Value {
     }
     Value::Object(map)
 }
-

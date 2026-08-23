@@ -93,9 +93,7 @@ impl WorldCombat {
             return None;
         };
         if melee {
-            if !super::types::melee_auto_legal(
-                player_x, player_z, facing_x, facing_z, h.x, h.z,
-            ) {
+            if !super::types::melee_auto_legal(player_x, player_z, facing_x, facing_z, h.x, h.z) {
                 self.note_fail("Out of range");
                 return None;
             }
@@ -158,7 +156,12 @@ impl WorldCombat {
                     return false;
                 }
                 let Some(lock) = self.lock_in_range(
-                    player_x, player_z, facing_x, facing_z, BOW_FALLOFF_END_M, false,
+                    player_x,
+                    player_z,
+                    facing_x,
+                    facing_z,
+                    BOW_FALLOFF_END_M,
+                    false,
                 ) else {
                     return false;
                 };
@@ -169,7 +172,12 @@ impl WorldCombat {
                     return false;
                 }
                 let Some(lock) = self.lock_in_range(
-                    player_x, player_z, facing_x, facing_z, BOW_FALLOFF_END_M, false,
+                    player_x,
+                    player_z,
+                    facing_x,
+                    facing_z,
+                    BOW_FALLOFF_END_M,
+                    false,
                 ) else {
                     return false;
                 };
@@ -180,7 +188,12 @@ impl WorldCombat {
                     return false;
                 }
                 let Some(lock) = self.lock_in_range(
-                    player_x, player_z, facing_x, facing_z, EMBER_RANGE_M, false,
+                    player_x,
+                    player_z,
+                    facing_x,
+                    facing_z,
+                    EMBER_RANGE_M,
+                    false,
                 ) else {
                     return false;
                 };
@@ -194,9 +207,9 @@ impl WorldCombat {
                 if self.player.resources.mana < f64::from(BIND_MANA) {
                     return false;
                 }
-                let Some(lock) = self.lock_in_range(
-                    player_x, player_z, facing_x, facing_z, BIND_RANGE_M, false,
-                ) else {
+                let Some(lock) =
+                    self.lock_in_range(player_x, player_z, facing_x, facing_z, BIND_RANGE_M, false)
+                else {
                     return false;
                 };
                 self.start_cast("bind", BIND_CAST_S, BIND_MANA, Some(lock))
@@ -230,8 +243,11 @@ impl WorldCombat {
                     return false;
                 }
                 let heal = SECOND_WIND_PCT * self.player.resources.hp_max;
-                self.player.resources.hp =
-                    self.player.resources.hp_max.min(self.player.resources.hp + heal);
+                self.player.resources.hp = self
+                    .player
+                    .resources
+                    .hp_max
+                    .min(self.player.resources.hp + heal);
                 self.second_wind_used = true;
                 true
             }
@@ -281,11 +297,9 @@ impl WorldCombat {
     }
 
     fn target_in_range(&self, player_x: f64, player_z: f64, idx: i32, range: f64) -> bool {
-        self.hostiles.iter().any(|h| {
-            h.idx == idx
-                && h.alive
-                && dist(player_x, player_z, h.x, h.z) <= range
-        })
+        self.hostiles
+            .iter()
+            .any(|h| h.idx == idx && h.alive && dist(player_x, player_z, h.x, h.z) <= range)
     }
 
     /// Tick CDs, casts, and CC. Same 0.1 s clock as auto.
@@ -305,7 +319,12 @@ impl WorldCombat {
         if let Some(shaken) = &mut self.player.shaken {
             shaken.remaining_s = (shaken.remaining_s - dt).max(0.0);
         }
-        if self.player.shaken.as_ref().is_some_and(|s| s.remaining_s <= 0.0) {
+        if self
+            .player
+            .shaken
+            .as_ref()
+            .is_some_and(|s| s.remaining_s <= 0.0)
+        {
             self.player.shaken = None;
         }
         for v in self.cds.values_mut() {
@@ -355,8 +374,11 @@ impl WorldCombat {
             }
             "mend" => {
                 let heal = f64::from(self.player.stats.mend());
-                self.player.resources.hp =
-                    self.player.resources.hp_max.min(self.player.resources.hp + heal);
+                self.player.resources.hp = self
+                    .player
+                    .resources
+                    .hp_max
+                    .min(self.player.resources.hp + heal);
             }
             "bind" => {
                 if let Some(idx) = target.or(self.lock) {
@@ -380,12 +402,7 @@ impl WorldCombat {
                     return;
                 }
                 self.player.arrows -= 1;
-                let d = dist(
-                    player_x,
-                    player_z,
-                    self.hostiles[hi].x,
-                    self.hostiles[hi].z,
-                );
+                let d = dist(player_x, player_z, self.hostiles[hi].x, self.hostiles[hi].z);
                 let raw = self.outgoing_raw(self.player.stats.bow_hit(kind == "aimed", d));
                 let dealt = mitigation(f64::from(raw), self.hostiles[hi].armor);
                 self.hostiles[hi].hp -= f64::from(dealt);
@@ -408,12 +425,7 @@ impl WorldCombat {
                 let Some(hi) = self.hostiles.iter().position(|h| h.idx == idx && h.alive) else {
                     return;
                 };
-                let d = dist(
-                    player_x,
-                    player_z,
-                    self.hostiles[hi].x,
-                    self.hostiles[hi].z,
-                );
+                let d = dist(player_x, player_z, self.hostiles[hi].x, self.hostiles[hi].z);
                 if d > EMBER_RANGE_M {
                     return;
                 }

@@ -9,13 +9,13 @@
 
 use crate::combat::catalog::mesh_spec;
 use crate::combat::math::{
-    mitigation, MAGE_BOLT_DMG, MAGE_BOLT_RANGE_M, MAGE_TELE_S, SKULL_BOLT_DMG,
-    SKULL_BOLT_RANGE_M, SKULL_TELE_S, TICK, WALK_MPS,
+    mitigation, MAGE_BOLT_DMG, MAGE_BOLT_RANGE_M, MAGE_TELE_S, SKULL_BOLT_DMG, SKULL_BOLT_RANGE_M,
+    SKULL_TELE_S, TICK, WALK_MPS,
 };
 use crate::combat::sheets::{
     blue_demon_sheet, demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet,
-    skeleton_minion_sheet, skeleton_warrior_sheet, tribal_veteran_sheet, wolf_sheet,
-    yeti_sheet, MobSheet,
+    skeleton_minion_sheet, skeleton_warrior_sheet, tribal_veteran_sheet, wolf_sheet, yeti_sheet,
+    MobSheet,
 };
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::combat::Discipline;
@@ -321,7 +321,6 @@ impl CombatLayer {
             .unwrap_or(false)
     }
 
-
     pub fn is_death_posed(&self, id: EntityId) -> bool {
         self.death_posed.contains(&id)
     }
@@ -331,9 +330,7 @@ impl CombatLayer {
     }
 
     pub fn sparkle_visible(&self, world: &World) -> bool {
-        self.sparkles
-            .values()
-            .any(|&id| world.entity(id).is_ok())
+        self.sparkles.values().any(|&id| world.entity(id).is_ok())
     }
 
     pub fn spawn_sparkle(
@@ -379,7 +376,6 @@ impl CombatLayer {
             world.despawn(id);
         }
     }
-
 
     pub fn take_combat_sfx(&mut self) -> Vec<CombatSfx> {
         std::mem::take(&mut self.pending_sfx)
@@ -445,9 +441,8 @@ impl CombatLayer {
     }
 
     fn model_for(&mut self, mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
-        let spec = mesh_spec(mob_id).ok_or_else(|| {
-            EngineError::Model(format!("no combat mesh for '{mob_id}'"))
-        })?;
+        let spec = mesh_spec(mob_id)
+            .ok_or_else(|| EngineError::Model(format!("no combat mesh for '{mob_id}'")))?;
         if let Some(model) = self.models.get(spec.id) {
             return Ok(model.clone());
         }
@@ -534,13 +529,11 @@ impl CombatLayer {
             return false;
         }
         // Animated wolf bodies live in World::animated, not World::entity.
-        let animated: Vec<engine::world::EntityId> = world
-            .animated_entities()
-            .map(|(id, _)| *id)
-            .collect();
-        self.mesh_ids.iter().all(|id| {
-            animated.iter().any(|a| a == id) || world.entity(*id).is_ok()
-        })
+        let animated: Vec<engine::world::EntityId> =
+            world.animated_entities().map(|(id, _)| *id).collect();
+        self.mesh_ids
+            .iter()
+            .all(|id| animated.iter().any(|a| a == id) || world.entity(*id).is_ok())
     }
 
     pub fn walk_mps(&self) -> f32 {
@@ -934,7 +927,6 @@ impl CombatLayer {
         self.hp_chunk_s = 0.0;
     }
 
-
     /// One published tribal_veteran 1.5 m in front of the player. First Punch after swing_s.
     /// Pin/slow tells are HOLD (no clip). Melee clip is Punch. Empty hands.
     pub fn install_tribal_veteran_fixture(
@@ -1218,14 +1210,7 @@ impl CombatLayer {
                 .map(|h| (h.idx, h.hp))
                 .collect();
             combat.tick_verbs(player_x, player_z, TICK);
-            log_finished_cast(
-                combat,
-                pending_cast,
-                lock_id,
-                lock_hp,
-                player_hp,
-                ward,
-            );
+            log_finished_cast(combat, pending_cast, lock_id, lock_hp, player_hp, ward);
             let strike = combat.strike_armed;
             if let Some(dealt) =
                 combat.tick_melee_auto(player_x, player_z, facing_x, facing_z, TICK)
@@ -1462,7 +1447,10 @@ impl CombatLayer {
             panic!("{}", EngineError::Model("replay_melee: no lock".into()));
         };
         let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
-            panic!("{}", EngineError::Model("replay_melee: lock not in hostiles".into()));
+            panic!(
+                "{}",
+                EngineError::Model("replay_melee: lock not in hostiles".into())
+            );
         };
         let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
             panic!(
@@ -1499,7 +1487,10 @@ impl CombatLayer {
             panic!("{}", EngineError::Model("replay_weapon: no lock".into()));
         };
         let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
-            panic!("{}", EngineError::Model("replay_weapon: lock not in hostiles".into()));
+            panic!(
+                "{}",
+                EngineError::Model("replay_weapon: lock not in hostiles".into())
+            );
         };
         let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
             panic!(
@@ -1558,9 +1549,9 @@ impl CombatLayer {
         dt: f32,
     ) -> EngineResult<()> {
         if let Some((Some(id), clip)) = self.pending_melee.take() {
-            world.play_animation(id, clip).map_err(|err| {
-                EngineError::Model(format!("melee clip '{clip}' failed: {err}"))
-            })?;
+            world
+                .play_animation(id, clip)
+                .map_err(|err| EngineError::Model(format!("melee clip '{clip}' failed: {err}")))?;
         }
         self.play_death_poses(world, combat)?;
         self.sync_lock_ring(world, combat, &mut ground_y)?;
@@ -1594,12 +1585,12 @@ impl CombatLayer {
             if !self.death_posed.insert(id) {
                 continue;
             }
-            world.play_animation_once(id, clip).map_err(|err| {
-                EngineError::Model(format!("death clip '{clip}' failed: {err}"))
-            })?;
-            world.set_animation_speed(id, 1.0).map_err(|err| {
-                EngineError::Model(format!("death clip speed failed: {err}"))
-            })?;
+            world
+                .play_animation_once(id, clip)
+                .map_err(|err| EngineError::Model(format!("death clip '{clip}' failed: {err}")))?;
+            world
+                .set_animation_speed(id, 1.0)
+                .map_err(|err| EngineError::Model(format!("death clip speed failed: {err}")))?;
         }
         Ok(())
     }
@@ -1641,7 +1632,6 @@ impl CombatLayer {
         self.ring_on = Some(lock);
         Ok(())
     }
-
 
     fn spawn_flash(
         &mut self,
@@ -1826,7 +1816,6 @@ fn lock_ring_mesh() -> EngineResult<Mesh> {
     Ok(mesh)
 }
 
-
 fn log_finished_cast(
     combat: &mut WorldCombat,
     kind: Option<&str>,
@@ -1893,7 +1882,8 @@ fn log_finished_cast(
 }
 
 fn keep_player(combat: &WorldCombat) -> WorldCombat {
-    let mut out = WorldCombat::specialist(combat.player.stats.level, combat.player.stats.discipline);
+    let mut out =
+        WorldCombat::specialist(combat.player.stats.level, combat.player.stats.discipline);
     out.player = combat.player.clone();
     out.hostiles = combat.hostiles.clone();
     out.lock = combat.lock;
@@ -1923,7 +1913,6 @@ fn keep_player(combat: &WorldCombat) -> WorldCombat {
     out.fail_tell_s = combat.fail_tell_s;
     out
 }
-
 
 fn is_wolf_mesh(mob_id: &str) -> bool {
     matches!(mob_id, "crawler_spider_wolf" | "wolf" | "wolf-spider")
@@ -2000,14 +1989,16 @@ fn assets_dir() -> EngineResult<PathBuf> {
     }
     Err(EngineError::Model(format!(
         "no assets under {}",
-        tried.first().map(|p| p.display().to_string()).unwrap_or_default()
+        tried
+            .first()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     )))
 }
 
 fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
-    let spec = mesh_spec(mob_id).ok_or_else(|| {
-        EngineError::Model(format!("no combat mesh for '{mob_id}'"))
-    })?;
+    let spec = mesh_spec(mob_id)
+        .ok_or_else(|| EngineError::Model(format!("no combat mesh for '{mob_id}'")))?;
     let assets = assets_dir()?;
     let path = assets.join(spec.source);
     if !path.is_file() {
@@ -2032,7 +2023,6 @@ fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
     }
     Ok(Arc::new(model))
 }
-
 
 fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) -> WorldHostile {
     WorldHostile {
@@ -2076,11 +2066,7 @@ pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
     }
 }
 
-pub fn seat_dungeon_bones(
-    combat: &mut WorldCombat,
-    spots: &[GlobalXZ],
-    heart: Option<GlobalXZ>,
-) {
+pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: Option<GlobalXZ>) {
     let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     let warrior = skeleton_warrior_sheet();
     let minion = skeleton_minion_sheet();
@@ -2213,7 +2199,6 @@ mod tests {
         assert!(layer.fixture_ready());
         assert!(!layer.wants_demon());
     }
-
 
     #[test]
     fn tribal_veteran_sheet_fixture_is_one_tribal_veteran_with_swing_cd_armed() {
@@ -2388,7 +2373,9 @@ mod tests {
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
         let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
         assert!(
-            lines.iter().any(|l| l.starts_with("You hit wolf-spider for ")),
+            lines
+                .iter()
+                .any(|l| l.starts_with("You hit wolf-spider for ")),
             "{lines:?}"
         );
         combat.player.resources.hp = 5.0;
@@ -2402,7 +2389,10 @@ mod tests {
             "{lines:?}"
         );
         layer.log_potion(&mut combat);
-        assert!(combat.log.lines().any(|l| l.starts_with("You drink a potion for ")));
+        assert!(combat
+            .log
+            .lines()
+            .any(|l| l.starts_with("You drink a potion for ")));
     }
 
     #[test]
@@ -2415,7 +2405,9 @@ mod tests {
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.5);
         let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
         assert!(
-            lines.iter().any(|l| l.starts_with("You Ember wolf-spider for ")),
+            lines
+                .iter()
+                .any(|l| l.starts_with("You Ember wolf-spider for ")),
             "{lines:?}"
         );
     }
@@ -2452,10 +2444,7 @@ mod tests {
     fn seat_dungeon_bones_is_warrior_two_minions_and_one_non_heart_mage() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         combat.hostiles.clear();
-        let spots = [
-            GlobalXZ::at(0.0, 0.0),
-            GlobalXZ::at(10.0, 0.0),
-        ];
+        let spots = [GlobalXZ::at(0.0, 0.0), GlobalXZ::at(10.0, 0.0)];
         let heart = Some(GlobalXZ::at(10.0, 0.0));
         seat_dungeon_bones(&mut combat, &spots, heart);
         let warriors: Vec<_> = combat

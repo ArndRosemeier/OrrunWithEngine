@@ -607,12 +607,7 @@ mod tests {
         world.live_in(space).expect("live indoors");
 
         let body = ActorBody::player();
-        let to = world.move_actor(
-            &body,
-            GlobalPosition::at(0.0, 0.0, -1.0),
-            0.0,
-            3.0,
-        );
+        let to = world.move_actor(&body, GlobalPosition::at(0.0, 0.0, -1.0), 0.0, 3.0);
         assert!(
             to.z > 1.0,
             "door jamb colliders closed the opening, z={}",
@@ -628,19 +623,26 @@ mod tests {
             .pieces
             .iter()
             .filter(|p| {
-                matches!(p.piece.as_str(), "wall" | "wall_b" | "partition" | "door" | "corner")
-                    && p.place.position.y < 0.5
+                matches!(
+                    p.piece.as_str(),
+                    "wall" | "wall_b" | "partition" | "door" | "corner"
+                ) && p.place.position.y < 0.5
             })
             .count();
         let upper = layout
             .pieces
             .iter()
             .filter(|p| {
-                matches!(p.piece.as_str(), "wall" | "wall_b" | "partition" | "door" | "corner")
-                    && (p.place.position.y - STOREY_M).abs() < 0.1
+                matches!(
+                    p.piece.as_str(),
+                    "wall" | "wall_b" | "partition" | "door" | "corner"
+                ) && (p.place.position.y - STOREY_M).abs() < 0.1
             })
             .count();
-        assert_eq!(ground, upper, "each ring cell should have one wall per storey");
+        assert_eq!(
+            ground, upper,
+            "each ring cell should have one wall per storey"
+        );
         assert!(
             layout
                 .pieces
@@ -665,13 +667,10 @@ mod tests {
         door.brief = crate::hamlet::DwellingBrief::new(4, 3, 2, crate::hamlet::HouseTheme::Any);
         let layout = interior::assemble(door.brief, door.seed);
         assert!(
-            layout
-                .pieces
-                .iter()
-                .any(|p| {
-                    matches!(p.piece.as_str(), "wall" | "wall_b" | "partition")
-                        && (p.place.position.y - STOREY_M).abs() < 0.1
-                }),
+            layout.pieces.iter().any(|p| {
+                matches!(p.piece.as_str(), "wall" | "wall_b" | "partition")
+                    && (p.place.position.y - STOREY_M).abs() < 0.1
+            }),
             "expected an upper-storey wall ring"
         );
         let mut world = World::new();
@@ -680,12 +679,7 @@ mod tests {
         world.live_in(space).expect("live indoors");
 
         let body = ActorBody::player();
-        let to = world.move_actor(
-            &body,
-            GlobalPosition::at(0.0, 0.0, 2.0),
-            0.0,
-            -3.0,
-        );
+        let to = world.move_actor(&body, GlobalPosition::at(0.0, 0.0, 2.0), 0.0, -3.0);
         assert!(
             to.z < 0.5,
             "upper-storey wall colliders blocked the doorway at ground level, z={}",

@@ -21,9 +21,9 @@ use orrun::controls::{self, Action, PressedActions};
 use orrun::hud;
 use orrun::settings::Settings;
 use orrun::world::{
-    install_daylight, install_materials, resolve_spawn, DungeonPin, Heading, HousePlot, Locomotion,
-    Ambience, MapPoint, SessionState, WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
-    OverlandSite, SiteKind, plan_overland_sites,
+    install_daylight, install_materials, plan_overland_sites, resolve_spawn, Ambience, DungeonPin,
+    Heading, HousePlot, Locomotion, MapPoint, OverlandSite, SessionState, SiteKind, WalkInput,
+    WorldEntryRequest, WorldSession, LIVE_OPEN_M,
 };
 use serde_json::{json, Value};
 
@@ -282,7 +282,10 @@ fn screenshot_dir() -> PathBuf {
     }
 }
 
-fn standing_request(_atlas: &ContinentAtlas, session: &WorldSession) -> (WorldEntryRequest, String) {
+fn standing_request(
+    _atlas: &ContinentAtlas,
+    session: &WorldSession,
+) -> (WorldEntryRequest, String) {
     if let Some(request) = dry_settlement_entry(session) {
         return (request, "best_settlement_entry".into());
     }
@@ -327,7 +330,8 @@ fn dry_land_entry(session: &WorldSession) -> Option<WorldEntryRequest> {
         while z < metres {
             let at = GlobalXZ::at(x, z);
             if let Ok(request) = WorldEntryRequest::at_global(bounds, at) {
-                if let Ok(spawn) = resolve_spawn(session.surface(), session.ponds().as_ref(), request)
+                if let Ok(spawn) =
+                    resolve_spawn(session.surface(), session.ponds().as_ref(), request)
                 {
                     let stand = spawn.ground();
                     if !pose_too_wet(session, stand) {
@@ -463,7 +467,6 @@ struct Driver {
     door_stand: Option<GlobalXZ>,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ControlsStage {
     Tab,
@@ -560,7 +563,25 @@ impl Driver {
                 if name == "hud" {
                     let _ = fs::copy(&path, self.shots.join("hurt.png"));
                 }
-                if name == "overworld_cairn" || name == "overworld_hut" || name == "yeti" || name == "demon" || name == "death" || name == "loot_sparkle" || name == "loot_modal" || name == "bag" || name == "cd_sweep" || name == "cast_bar" || name == "incoming" || name == "camp" || name == "village" || name == "door" || name == "pip" || name == "con" || name == "con_hard" || name == "nameplate" {
+                if name == "overworld_cairn"
+                    || name == "overworld_hut"
+                    || name == "yeti"
+                    || name == "demon"
+                    || name == "death"
+                    || name == "loot_sparkle"
+                    || name == "loot_modal"
+                    || name == "bag"
+                    || name == "cd_sweep"
+                    || name == "cast_bar"
+                    || name == "incoming"
+                    || name == "camp"
+                    || name == "village"
+                    || name == "door"
+                    || name == "pip"
+                    || name == "con"
+                    || name == "con_hard"
+                    || name == "nameplate"
+                {
                     let dest = PathBuf::from(r"C:\Users\windo").join(format!("{name}.png"));
                     let _ = fs::copy(&path, dest);
                 }
@@ -648,8 +669,14 @@ impl Driver {
                     }
                 }
             }
-            Phase::CombatDeathLive | Phase::LootSparkleLive | Phase::LootModalLive | Phase::BagLive => {
-                if !self.combat_death_killed && self.combat_tab_sent && self.session.lock_id().is_none() {
+            Phase::CombatDeathLive
+            | Phase::LootSparkleLive
+            | Phase::LootModalLive
+            | Phase::BagLive => {
+                if !self.combat_death_killed
+                    && self.combat_tab_sent
+                    && self.session.lock_id().is_none()
+                {
                     input.tab = true;
                 } else if self.combat_death_killed {
                     if let (Some(pos), Some(stand)) = (
@@ -750,10 +777,9 @@ impl Driver {
                     if self.combat_demon_stand.is_none() {
                         self.combat_demon_stand = demon_view_stand(&self.session);
                     }
-                    if let (Some(pos), Some(stand)) = (
-                        self.session.player_position(),
-                        self.combat_demon_stand,
-                    ) {
+                    if let (Some(pos), Some(stand)) =
+                        (self.session.player_position(), self.combat_demon_stand)
+                    {
                         if pos.horizontal().distance(stand) > 0.45 {
                             input = walk_toward(pos.horizontal(), stand, dt);
                             input.yaw_delta_degrees = self.pending_yaw_delta;
@@ -798,10 +824,9 @@ impl Driver {
                         self.combat_mage_stand = mage_view_stand(&self.session);
                         self.combat_mage_look = mage_mesh_chest(&self.session);
                     }
-                    if let (Some(pos), Some(stand)) = (
-                        self.session.player_position(),
-                        self.combat_mage_stand,
-                    ) {
+                    if let (Some(pos), Some(stand)) =
+                        (self.session.player_position(), self.combat_mage_stand)
+                    {
                         if pos.horizontal().distance(stand) > 0.45 {
                             input = walk_toward(pos.horizontal(), stand, dt);
                             input.yaw_delta_degrees = self.pending_yaw_delta;
@@ -810,36 +835,34 @@ impl Driver {
                     }
                 }
             }
-            Phase::ControlsLive => {
-                match self.controls_stage {
-                    ControlsStage::Tab => input.tab = true,
-                    ControlsStage::Strike => {
-                        input.actions = PressedActions::from_actions(&controls::resolve(
-                            self.session.key_binds(),
-                            [engine::Key::Digit1],
-                        ));
-                    }
-                    ControlsStage::WaitHit => {}
-                    ControlsStage::Bash => {
-                        input.actions = PressedActions::from_actions(&controls::resolve(
-                            self.session.key_binds(),
-                            [engine::Key::Digit2],
-                        ));
-                    }
-                    ControlsStage::Ember => {
-                        input.actions = PressedActions::from_actions(&controls::resolve(
-                            self.session.key_binds(),
-                            [engine::Key::Digit5],
-                        ));
-                    }
-                    ControlsStage::Potion => {
-                        input.actions = PressedActions::from_actions(&controls::resolve(
-                            self.session.key_binds(),
-                            [engine::Key::R],
-                        ));
-                    }
+            Phase::ControlsLive => match self.controls_stage {
+                ControlsStage::Tab => input.tab = true,
+                ControlsStage::Strike => {
+                    input.actions = PressedActions::from_actions(&controls::resolve(
+                        self.session.key_binds(),
+                        [engine::Key::Digit1],
+                    ));
                 }
-            }
+                ControlsStage::WaitHit => {}
+                ControlsStage::Bash => {
+                    input.actions = PressedActions::from_actions(&controls::resolve(
+                        self.session.key_binds(),
+                        [engine::Key::Digit2],
+                    ));
+                }
+                ControlsStage::Ember => {
+                    input.actions = PressedActions::from_actions(&controls::resolve(
+                        self.session.key_binds(),
+                        [engine::Key::Digit5],
+                    ));
+                }
+                ControlsStage::Potion => {
+                    input.actions = PressedActions::from_actions(&controls::resolve(
+                        self.session.key_binds(),
+                        [engine::Key::R],
+                    ));
+                }
+            },
             Phase::BindForceWalk => {
                 if self.session.locomotion() == Some(Locomotion::Fly) {
                     input.toggle_fly = true;
@@ -866,7 +889,11 @@ impl Driver {
                     input.step_m = FLY_SPEED * dt;
                 }
             }
-            Phase::VillageTravel | Phase::CampTravel | Phase::DoorTravel | Phase::CairnTravel | Phase::HutTravel => {
+            Phase::VillageTravel
+            | Phase::CampTravel
+            | Phase::DoorTravel
+            | Phase::CairnTravel
+            | Phase::HutTravel => {
                 input.skip_travel = true;
             }
             Phase::CairnLive | Phase::HutLive => {
@@ -939,7 +966,8 @@ impl Driver {
                 if self.session.locomotion() == Some(Locomotion::Fly) {
                     input.toggle_fly = true;
                 }
-                if let (Some(stand), Some(pos)) = (self.door_stand, self.session.player_position()) {
+                if let (Some(stand), Some(pos)) = (self.door_stand, self.session.player_position())
+                {
                     input = walk_toward(pos.horizontal(), stand, dt);
                     input.yaw_delta_degrees = self.pending_yaw_delta;
                     input.pitch_delta_degrees = self.pending_pitch_delta;
@@ -1043,7 +1071,8 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" | "pip" | "con" | "nameplate" => self.start_combat(world, frame),
+            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" | "pip" | "con"
+            | "nameplate" => self.start_combat(world, frame),
             "con_hard" => self.start_combat_yeti(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
             "combat_death" => self.start_combat_death(world, frame),
@@ -1341,11 +1370,7 @@ impl Driver {
         let Some(pos) = self.session.player_position() else {
             return;
         };
-        let hatch_y = self
-            .session
-            .contact_height(pin.at)
-            .unwrap_or(pos.y as f32)
-            + 0.25;
+        let hatch_y = self.session.contact_height(pin.at).unwrap_or(pos.y as f32) + 0.25;
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
         let target = Vec3::new(pin.at.x as f32, hatch_y, pin.at.z as f32);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
@@ -1362,11 +1387,7 @@ impl Driver {
         let Some(pos) = self.session.player_position() else {
             return;
         };
-        let hatch_y = self
-            .session
-            .contact_height(pin.at)
-            .unwrap_or(pos.y as f32)
-            + 0.25;
+        let hatch_y = self.session.contact_height(pin.at).unwrap_or(pos.y as f32) + 0.25;
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
         let target = Vec3::new(pin.at.x as f32, hatch_y, pin.at.z as f32);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
@@ -1686,7 +1707,8 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         }
-        if self.fly_after_exit != Some(false) || self.session.locomotion() == Some(Locomotion::Fly) {
+        if self.fly_after_exit != Some(false) || self.session.locomotion() == Some(Locomotion::Fly)
+        {
             self.fail_current("bind: fly is not false after BindExit");
             self.advance_after_fail(world, frame);
             return;
@@ -1761,7 +1783,6 @@ impl Driver {
         .expect("report.json");
     }
 
-
     fn start_combat_body(&mut self, world: &mut World, frame: &Frame) {
         self.session.rearm_combat_fixtures(world);
         self.combat_tab_sent = false;
@@ -1801,7 +1822,9 @@ impl Driver {
             }
             return;
         }
-        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+        let Some((lock_name, lock_hp)) =
+            self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h))
+        else {
             if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current("combat_body: lock name/hp unset after Tab");
                 self.advance_after_fail(world, frame);
@@ -1865,7 +1888,6 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
-
     fn start_combat_bones(&mut self, world: &mut World, frame: &Frame) {
         self.session.rearm_bones_fixture(world);
         self.combat_tab_sent = false;
@@ -1905,7 +1927,9 @@ impl Driver {
             }
             return;
         }
-        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+        let Some((lock_name, lock_hp)) =
+            self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h))
+        else {
             if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current("combat_bones: lock name/hp unset after Tab");
                 self.advance_after_fail(world, frame);
@@ -2009,7 +2033,9 @@ impl Driver {
             }
             return;
         }
-        let Some((lock_name, lock_hp)) = self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h)) else {
+        let Some((lock_name, lock_hp)) =
+            self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h))
+        else {
             if frame.time - self.phase_t0 > 8.0 {
                 self.fail_current("combat_mage: lock name/hp unset after Tab");
                 self.advance_after_fail(world, frame);
@@ -2358,7 +2384,6 @@ impl Driver {
         self.phase_t0 = frame.time;
     }
 
-
     fn start_combat_death(&mut self, world: &mut World, frame: &Frame) {
         self.session.rearm_orc_fixture(world);
         self.combat_tab_sent = false;
@@ -2599,9 +2624,7 @@ impl Driver {
             };
             let name = name.to_string();
             if name != "orc" || hp <= 0.0 {
-                self.fail_current(&format!(
-                    "{hook}: want live orc lock, got {name} hp={hp}"
-                ));
+                self.fail_current(&format!("{hook}: want live orc lock, got {name} hp={hp}"));
                 self.advance_after_fail(world, frame);
                 return false;
             }
@@ -3090,7 +3113,9 @@ impl Driver {
         };
         let name = name.to_string();
         if name != "blue_demon" {
-            self.fail_current(&format!("combat_bluedemon: want blue_demon lock, got {name}"));
+            self.fail_current(&format!(
+                "combat_bluedemon: want blue_demon lock, got {name}"
+            ));
             self.advance_after_fail(world, frame);
             return;
         }
@@ -3201,7 +3226,9 @@ impl Driver {
         };
         let name = name.to_string();
         if name != "tribal_veteran" {
-            self.fail_current(&format!("combat_tribal_veteran: want tribal_veteran lock, got {name}"));
+            self.fail_current(&format!(
+                "combat_tribal_veteran: want tribal_veteran lock, got {name}"
+            ));
             self.advance_after_fail(world, frame);
             return;
         }
@@ -3282,7 +3309,11 @@ impl Driver {
         };
         let combat = self.session.combat();
         let player_level = combat.player.stats.level;
-        let Some(h) = combat.hostiles.iter().find(|h| Some(h.idx) == combat.lock && h.alive) else {
+        let Some(h) = combat
+            .hostiles
+            .iter()
+            .find(|h| Some(h.idx) == combat.lock && h.alive)
+        else {
             self.fail_current("con: locked hostile missing");
             self.advance_after_fail(world, frame);
             return;
@@ -3536,9 +3567,7 @@ impl Driver {
                     );
                     let tell = self.session.fail_tell();
                     let log = self.session.combat_log();
-                    if tell != Some("Out of range")
-                        && !log.iter().any(|l| l == "Out of range")
-                    {
+                    if tell != Some("Out of range") && !log.iter().any(|l| l == "Out of range") {
                         if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                             self.fail_current("combat: Strike out of range never told");
                             self.advance_after_fail(world, frame);
@@ -3607,9 +3636,7 @@ impl Driver {
                     || self.session.lock_name_hp().is_some()
                     || self.session.lock_ring_visible(world)
                     || self.session.fixture_mesh_visible(world);
-                if still_fighting
-                    || !self.session.is_shaken()
-                    || !pitch_near(pitch, HORIZON_PITCH)
+                if still_fighting || !self.session.is_shaken() || !pitch_near(pitch, HORIZON_PITCH)
                 {
                     if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                         self.fail_current("combat: death shot still locked or missing shaken");
@@ -3785,7 +3812,9 @@ impl Driver {
             return;
         }
         if !self.combat_hurt_sent {
-            if !self.session.incoming_hit() || self.session.player_hp() >= self.session.player_hp_max() {
+            if !self.session.incoming_hit()
+                || self.session.player_hp() >= self.session.player_hp_max()
+            {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                     self.fail_current("combat: incoming never chipped player HP");
                     self.advance_after_fail(world, frame);
@@ -3960,9 +3989,7 @@ impl Driver {
             return;
         }
         loaded.keys = orrun::settings::KeyBinds::default();
-        loaded
-            .write()
-            .unwrap_or_else(|err| panic!("{err}"));
+        loaded.write().unwrap_or_else(|err| panic!("{err}"));
         let loaded = Settings::load().unwrap_or_else(|err| panic!("{err}"));
         let path = orrun::settings::settings_path().expect("settings path");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -4014,7 +4041,8 @@ impl Driver {
             return;
         }
         if controls::resolve(&binds, [engine::Key::G]) != vec![Action::SecondWind]
-            || binds.inspect_map().get("second_wind") != Some(&serde_json::Value::String("G".into()))
+            || binds.inspect_map().get("second_wind")
+                != Some(&serde_json::Value::String("G".into()))
         {
             self.fail_current("controls: SecondWind must be bound to G");
             self.advance_after_fail(world, frame);
@@ -4068,23 +4096,23 @@ impl Driver {
                 }
                 self.controls_stage = ControlsStage::WaitHit;
             }
-            ControlsStage::WaitHit => {
-                match self.session.first_auto_hit() {
-                    Some(16) => {
-                        self.controls_stage = ControlsStage::Bash;
-                    }
-                    Some(got) => {
-                        self.fail_current(&format!(
-                            "controls: Strike next swing want mitigated 16, got {got}"
-                        ));
-                        self.advance_after_fail(world, frame);
-                    }
-                    None => {}
+            ControlsStage::WaitHit => match self.session.first_auto_hit() {
+                Some(16) => {
+                    self.controls_stage = ControlsStage::Bash;
                 }
-            }
+                Some(got) => {
+                    self.fail_current(&format!(
+                        "controls: Strike next swing want mitigated 16, got {got}"
+                    ));
+                    self.advance_after_fail(world, frame);
+                }
+                None => {}
+            },
             ControlsStage::Bash => {
                 let gate = self.session.combat().last_rank_gate;
-                let blocked = gate.map(|g| g.blocked && g.action == Action::Bash).unwrap_or(false);
+                let blocked = gate
+                    .map(|g| g.blocked && g.action == Action::Bash)
+                    .unwrap_or(false);
                 if !blocked {
                     self.fail_current(
                         "controls: key 2 on L1 Martial must rank-gate Bash (Martial < 3)",
@@ -4099,7 +4127,8 @@ impl Driver {
                 }
                 // Ember is known at create. Do not pad ranks.arcane.
                 assert_eq!(
-                    self.session.combat().player.stats.ranks.arcane, 0,
+                    self.session.combat().player.stats.ranks.arcane,
+                    0,
                     "L1 Martial must keep arcane 0; Ember uses ember_rank 1.00"
                 );
                 self.controls_stage = ControlsStage::Ember;
@@ -4135,12 +4164,19 @@ impl Driver {
                 if binds.get("mark") != Some(&serde_json::Value::String("T".into()))
                     || binds.get("second_wind") != Some(&serde_json::Value::String("G".into()))
                 {
-                    self.fail_current("controls: inspect binds must include mark=T and second_wind=G");
+                    self.fail_current(
+                        "controls: inspect binds must include mark=T and second_wind=G",
+                    );
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                let gate = self.session.combat().last_rank_gate.expect("bash rank gate");
-                if !gate.blocked || gate.action != Action::Bash || gate.have != 1 || gate.need != 3 {
+                let gate = self
+                    .session
+                    .combat()
+                    .last_rank_gate
+                    .expect("bash rank gate");
+                if !gate.blocked || gate.action != Action::Bash || gate.have != 1 || gate.need != 3
+                {
                     self.fail_current(&format!(
                         "controls: rank_gate want bash blocked have=1 need=3, got blocked={} action={:?} have={} need={}",
                         gate.blocked, gate.action, gate.have, gate.need
@@ -4351,9 +4387,8 @@ impl Driver {
         let high_enough = (pos.y - cam.y).abs() < 1.6;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
-        let looking = village_look(&self.session).is_some_and(|(eye, target)| {
-            view_angle_degrees(eye, yaw, pitch, target) < 16.0
-        });
+        let looking = village_look(&self.session)
+            .is_some_and(|(eye, target)| view_angle_degrees(eye, yaw, pitch, target) < 16.0);
         if horiz > 5.5 || !high_enough || !looking || pitch > 2.0 {
             self.village_speed_sample = None;
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -4519,9 +4554,10 @@ impl Driver {
         let high_enough = (pos.y - cam.y).abs() < 1.6;
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
-        let looking = self.session.village_camp_look().is_some_and(|(eye, target)| {
-            view_angle_degrees(eye, yaw, pitch, target) < 16.0
-        });
+        let looking = self
+            .session
+            .village_camp_look()
+            .is_some_and(|(eye, target)| view_angle_degrees(eye, yaw, pitch, target) < 16.0);
         if horiz > 2.8 || !high_enough || !looking {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
@@ -4638,22 +4674,27 @@ impl Driver {
             }
             return;
         }
-        let Some(door) = self.session.nearest_village_door(pos.horizontal()).filter(|d| {
-            // Prefer a ground-floor leaf; loft doors put the stand in thatch.
-            let ground = self
-                .session
-                .contact_height(d.outside_stand())
-                .unwrap_or(d.floor_y);
-            (d.floor_y - ground).abs() < 1.5
-        }).or_else(|| {
-            self.session.village_doors().iter().find(|d| {
+        let Some(door) = self
+            .session
+            .nearest_village_door(pos.horizontal())
+            .filter(|d| {
+                // Prefer a ground-floor leaf; loft doors put the stand in thatch.
                 let ground = self
                     .session
                     .contact_height(d.outside_stand())
                     .unwrap_or(d.floor_y);
                 (d.floor_y - ground).abs() < 1.5
             })
-        }) else {
+            .or_else(|| {
+                self.session.village_doors().iter().find(|d| {
+                    let ground = self
+                        .session
+                        .contact_height(d.outside_stand())
+                        .unwrap_or(d.floor_y);
+                    (d.floor_y - ground).abs() < 1.5
+                })
+            })
+        else {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("door: no ground-floor house door on this hamlet");
                 self.advance_after_fail(world, frame);
@@ -4668,7 +4709,9 @@ impl Driver {
         let horiz = pos.horizontal().distance(stand);
         if horiz > 0.55 {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current(&format!("door: never reached outside stand (horiz={horiz:.1})"));
+                self.fail_current(&format!(
+                    "door: never reached outside stand (horiz={horiz:.1})"
+                ));
                 self.advance_after_fail(world, frame);
             }
             return;
@@ -4770,7 +4813,9 @@ impl Driver {
         let horiz = pos.horizontal().distance(stand);
         if horiz > 0.7 {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
-                self.fail_current(&format!("door: never sat on street stand (horiz={horiz:.1})"));
+                self.fail_current(&format!(
+                    "door: never sat on street stand (horiz={horiz:.1})"
+                ));
                 self.advance_after_fail(world, frame);
             }
             return;
@@ -4878,7 +4923,9 @@ impl Driver {
                 .find(|s| s.kind == kind)
         });
         let Some(site) = site else {
-            self.fail_current(&format!("{name}: no site on this atlas (seed world must stamp both)"));
+            self.fail_current(&format!(
+                "{name}: no site on this atlas (seed world must stamp both)"
+            ));
             self.advance_after_fail(world, frame);
             return;
         };
@@ -5040,9 +5087,8 @@ impl Driver {
         let horiz = pos.horizontal().distance(stand.horizontal());
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
-        let looking = site_look(&self.session, site).is_some_and(|(eye, target)| {
-            view_angle_degrees(eye, yaw, pitch, target) < 16.0
-        });
+        let looking = site_look(&self.session, site)
+            .is_some_and(|(eye, target)| view_angle_degrees(eye, yaw, pitch, target) < 16.0);
         if horiz > 3.5 || !looking {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current(&format!(
@@ -5058,7 +5104,11 @@ impl Driver {
                 .combat()
                 .hostiles
                 .iter()
-                .find(|h| h.mob_id == "bandit" && h.alive && (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0)
+                .find(|h| {
+                    h.mob_id == "bandit"
+                        && h.alive
+                        && (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0
+                })
                 .map(|h| h.idx)
             {
                 self.session.combat_mut().lock = Some(idx);
@@ -5286,8 +5336,6 @@ fn locomotion_name(mode: Option<Locomotion>) -> &'static str {
     }
 }
 
-
-
 fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     const STAND_M: f64 = 5.0;
     const SIDE_M: f64 = 2.2;
@@ -5488,7 +5536,6 @@ fn demon_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     Some((eye, target))
 }
 
-
 fn death_hold_ready(world: &World, session: &WorldSession) -> bool {
     let Some(id) = session.combat().hostiles.iter().find_map(|h| h.entity) else {
         return false;
@@ -5553,13 +5600,11 @@ fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     Some((eye, target))
 }
 
-
 fn yaw_xz(x: f32, z: f32, yaw_deg: f32) -> (f32, f32) {
     let rad = yaw_deg.to_radians();
     let (sin, cos) = (rad.sin(), rad.cos());
     (x * cos + z * sin, -x * sin + z * cos)
 }
-
 
 fn wolf_near(session: &WorldSession, p: &GlobalXZ) -> f64 {
     session
@@ -5624,11 +5669,7 @@ fn site_look(session: &WorldSession, site: OverlandSite) -> Option<(Vec3, Vec3)>
         ),
         SiteKind::WoodsHut => {
             let (dx, dz) = yaw_xz(0.15, -0.7, site.yaw_deg);
-            (
-                site.at.x as f32 + dx,
-                ground + 2.25,
-                site.at.z as f32 + dz,
-            )
+            (site.at.x as f32 + dx, ground + 2.25, site.at.z as f32 + dz)
         }
     };
     Some((eye, Vec3::new(tx, ty, tz)))
@@ -5660,10 +5701,12 @@ fn village_camera_stand(session: &WorldSession) -> Option<GlobalPosition> {
         (3.6, 0.0)
     };
     let stand = GlobalXZ::at(at.x + dx, at.z + dz);
-    let contact = session
-        .contact_height(stand)
-        .unwrap_or(person.y as f32);
-    Some(GlobalPosition::at(stand.x, f64::from(contact + 1.7), stand.z))
+    let contact = session.contact_height(stand).unwrap_or(person.y as f32);
+    Some(GlobalPosition::at(
+        stand.x,
+        f64::from(contact + 1.7),
+        stand.z,
+    ))
 }
 
 fn village_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
@@ -5734,11 +5777,8 @@ fn draw_combat_hud(session: &WorldSession, world: &World, frame: &Frame) {
                     ui.horizontal(|ui| {
                         let (hp_rect, _) =
                             ui.allocate_exact_size(egui::vec2(360.0, 22.0), Sense::hover());
-                        ui.painter().rect_filled(
-                            hp_rect,
-                            2.0,
-                            Color32::from_rgb(40, 40, 40),
-                        );
+                        ui.painter()
+                            .rect_filled(hp_rect, 2.0, Color32::from_rgb(40, 40, 40));
                         if let Some(ghost) = session.hp_ghost_frac() {
                             if ghost > hp_frac {
                                 let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);

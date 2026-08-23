@@ -130,10 +130,7 @@ mod tests {
 
     #[test]
     fn drop_table_uses_loot_v1_names() {
-        assert_eq!(
-            family_drop("wolf", None, 0),
-            Some(ItemKind::HideWrap)
-        );
+        assert_eq!(family_drop("wolf", None, 0), Some(ItemKind::HideWrap));
         assert_eq!(
             family_drop("bandit", Some(LootSite::Cairn), 1),
             Some(ItemKind::CairnBlade)

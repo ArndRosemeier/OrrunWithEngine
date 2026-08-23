@@ -1342,7 +1342,15 @@ impl ScatterLayer {
             }
         }
 
-        if self.follow_near(stream, surface, ponds, focus, house_plots, hamlets, resident)? {
+        if self.follow_near(
+            stream,
+            surface,
+            ponds,
+            focus,
+            house_plots,
+            hamlets,
+            resident,
+        )? {
             changed = true;
         }
         self.reprioritize_uploads(focus);
@@ -3098,9 +3106,7 @@ mod tests {
         };
         let sprigs = [Sprig {
             variant: 0,
-            at: GlobalXZ::at(10.0, 20.0)
-                .with_height(5.0)
-                .expect("height"),
+            at: GlobalXZ::at(10.0, 20.0).with_height(5.0).expect("height"),
             yaw_deg: 15.0,
             scale: 1.2,
             tint,

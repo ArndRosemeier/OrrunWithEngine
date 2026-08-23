@@ -22,7 +22,7 @@ use glam::Vec3;
 use thiserror::Error;
 
 use super::footprint::{BuildingPlot, CavePlot};
-use super::surface::{ContinentalSurface, CaveMouthPin};
+use super::surface::{CaveMouthPin, ContinentalSurface};
 
 /// Keep generated chambers until the player walks this far away.
 const CACHE_M: f64 = 1_000.0;
@@ -58,7 +58,10 @@ enum BuildMsg {
         exit: cave_gen::ExitSocket,
         gen_ms: f32,
     },
-    Failed { id: i32, why: String },
+    Failed {
+        id: i32,
+        why: String,
+    },
 }
 
 struct Pending {
@@ -139,8 +142,12 @@ impl CaveLayer {
         } else {
             format!("  {elapsed}s")
         };
-        let mut cutting: Vec<&CaveMouthPin> =
-            self.seated.values().filter(|s| s.built.is_none()).map(|s| &s.pin).collect();
+        let mut cutting: Vec<&CaveMouthPin> = self
+            .seated
+            .values()
+            .filter(|s| s.built.is_none())
+            .map(|s| &s.pin)
+            .collect();
         cutting.sort_by_key(|pin| pin.id);
         let line = match cutting.as_slice() {
             [] => "growing cave chambers…".into(),
@@ -209,8 +216,7 @@ impl CaveLayer {
             .copied()
             .filter(|pin| pin.at.distance(focus) <= CACHE_M)
             .collect();
-        let nearby_ids: std::collections::HashSet<i32> =
-            nearby.iter().map(|p| p.id).collect();
+        let nearby_ids: std::collections::HashSet<i32> = nearby.iter().map(|p| p.id).collect();
         let mut plots_changed = false;
 
         if let Some(pending) = self.pending.take() {
@@ -244,10 +250,7 @@ impl CaveLayer {
                     }
                     Err(TryRecvError::Disconnected) => {
                         if !self.queued.is_empty() {
-                            panic!(
-                                "cave worker exited while still growing {:?}",
-                                self.queued
-                            );
+                            panic!("cave worker exited while still growing {:?}", self.queued);
                         }
                         self.started = None;
                         break;
@@ -393,7 +396,11 @@ impl CaveLayer {
         let hatch_y = plot.floor_y + 1.9;
         let hatch_out = world.spawn_anchored(
             Mesh::opening(PORTAL_HALF_M * 2.0, PORTAL_HALF_M * 2.0).expect("cave hatch"),
-            GlobalPlace::at(GlobalPosition::at(portal_xz.0, f64::from(hatch_y), portal_xz.1)),
+            GlobalPlace::at(GlobalPosition::at(
+                portal_xz.0,
+                f64::from(hatch_y),
+                portal_xz.1,
+            )),
         )?;
         world.in_space(space)?;
         // The interior portal quad sits just inside the carved throat mouth:
@@ -468,11 +475,8 @@ impl CaveLayer {
         if entered == live.space {
             let look = live.landing_yaw.to_radians();
             let back = 1.4_f64;
-            let landing = GlobalPosition::at(
-                live.mouth_at.x,
-                f64::from(live.landing_y),
-                live.mouth_at.z,
-            );
+            let landing =
+                GlobalPosition::at(live.mouth_at.x, f64::from(live.landing_y), live.mouth_at.z);
             *feet = world
                 .move_actor_3d(
                     body,
@@ -677,7 +681,10 @@ fn chamber_wall_colliders(live: &LiveCave) -> Vec<StaticCollider> {
                     half_z: 3.0,
                 },
             )
-            .with_y_span(f64::from(live.landing_y - 4.0), f64::from(live.landing_y + 40.0))
+            .with_y_span(
+                f64::from(live.landing_y - 4.0),
+                f64::from(live.landing_y + 40.0),
+            )
             .in_space(live.space),
         );
     }

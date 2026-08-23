@@ -284,22 +284,12 @@ pub fn melee_hit(might: i32, skill: i32, martial_rank: i32, strike: bool) -> i32
     trunc((MELEE_BASE + f64::from(might) * MELEE_MIGHT) * rider * strike_m * m5)
 }
 
-pub fn bow_hit(
-    swift: i32,
-    skill: i32,
-    hunt_rank: i32,
-    aimed: bool,
-    distance: f64,
-) -> i32 {
+pub fn bow_hit(swift: i32, skill: i32, hunt_rank: i32, aimed: bool, distance: f64) -> i32 {
     let rider = skill_rider(skill);
     let aimed_m = if aimed { AIMED_MULT } else { 1.0 };
     let h5 = if hunt_rank >= 5 { RANK5_WEAPON } else { 1.0 };
     trunc(
-        (BOW_BASE + f64::from(swift) * BOW_SWIFT)
-            * rider
-            * aimed_m
-            * h5
-            * bow_range_mult(distance),
+        (BOW_BASE + f64::from(swift) * BOW_SWIFT) * rider * aimed_m * h5 * bow_range_mult(distance),
     )
 }
 
@@ -379,6 +369,3 @@ pub struct Ranks {
     pub hunt: i32,
     pub arcane: i32,
 }
-
-
-

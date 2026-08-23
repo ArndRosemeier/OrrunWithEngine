@@ -67,7 +67,11 @@ pub fn cone_candidates(
             Some((d, h.id))
         })
         .collect();
-    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    rows.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     rows.into_iter().map(|(_, id)| id).collect()
 }
 

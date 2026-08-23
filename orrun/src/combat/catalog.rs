@@ -2,10 +2,10 @@
 
 pub struct CombatMesh {
     pub id: &'static str,
-    pub source: &'static str,      // relative to orrun/assets
-    pub anim_idle: &'static str,   // "Idle"
-    pub anim_melee: &'static str,  // "Punch"
-    pub anim_death: Option<&'static str>, // Some("Death") / Some("Death_A"); None bandit
+    pub source: &'static str,              // relative to orrun/assets
+    pub anim_idle: &'static str,           // "Idle"
+    pub anim_melee: &'static str,          // "Punch"
+    pub anim_death: Option<&'static str>,  // Some("Death") / Some("Death_A"); None bandit
     pub anim_weapon: Option<&'static str>, // Some("Weapon") orc+skull, None tribal
     pub weapon_node: Option<&'static str>, // Some("Orc_Weapon") orc only
 }
@@ -159,12 +159,9 @@ mod tests {
             .join("assets")
             .join(spec.source);
         let root = path.parent().unwrap();
-        let model = engine::anim::AnimatedModel::load_with(
-            &path,
-            root,
-            &engine::EngineLimits::default(),
-        )
-        .unwrap_or_else(|err| panic!("bandit glb load: {err}"));
+        let model =
+            engine::anim::AnimatedModel::load_with(&path, root, &engine::EngineLimits::default())
+                .unwrap_or_else(|err| panic!("bandit glb load: {err}"));
         assert!(
             model.find_clip(spec.anim_idle).is_some(),
             "Idle missing on bandit"
@@ -188,12 +185,9 @@ mod tests {
             .join("assets")
             .join(spec.source);
         let root = path.parent().unwrap();
-        let model = engine::anim::AnimatedModel::load_with(
-            &path,
-            root,
-            &engine::EngineLimits::default(),
-        )
-        .unwrap_or_else(|err| panic!("demon glb load: {err}"));
+        let model =
+            engine::anim::AnimatedModel::load_with(&path, root, &engine::EngineLimits::default())
+                .unwrap_or_else(|err| panic!("demon glb load: {err}"));
         assert!(
             model.find_clip(spec.anim_idle).is_some(),
             "Idle missing on demon"
@@ -227,12 +221,9 @@ mod tests {
             .join("assets")
             .join(spec.source);
         let root = path.parent().unwrap();
-        let model = engine::anim::AnimatedModel::load_with(
-            &path,
-            root,
-            &engine::EngineLimits::default(),
-        )
-        .unwrap_or_else(|err| panic!("blue_demon glb load: {err}"));
+        let model =
+            engine::anim::AnimatedModel::load_with(&path, root, &engine::EngineLimits::default())
+                .unwrap_or_else(|err| panic!("blue_demon glb load: {err}"));
         assert!(
             model.find_clip(spec.anim_idle).is_some(),
             "Idle missing on blue_demon"
@@ -270,12 +261,9 @@ mod tests {
             .join("assets")
             .join(spec.source);
         let root = path.parent().unwrap();
-        let model = engine::anim::AnimatedModel::load_with(
-            &path,
-            root,
-            &engine::EngineLimits::default(),
-        )
-        .unwrap_or_else(|err| panic!("tribal_veteran glb load: {err}"));
+        let model =
+            engine::anim::AnimatedModel::load_with(&path, root, &engine::EngineLimits::default())
+                .unwrap_or_else(|err| panic!("tribal_veteran glb load: {err}"));
         assert!(
             model.find_clip(spec.anim_idle).is_some(),
             "Idle missing on tribal_veteran"
@@ -312,12 +300,9 @@ mod tests {
             .join("assets")
             .join(spec.source);
         let root = path.parent().unwrap();
-        let model = engine::anim::AnimatedModel::load_with(
-            &path,
-            root,
-            &engine::EngineLimits::default(),
-        )
-        .unwrap_or_else(|err| panic!("yeti glb load: {err}"));
+        let model =
+            engine::anim::AnimatedModel::load_with(&path, root, &engine::EngineLimits::default())
+                .unwrap_or_else(|err| panic!("yeti glb load: {err}"));
         assert!(
             model.find_clip(spec.anim_idle).is_some(),
             "Idle missing on yeti"

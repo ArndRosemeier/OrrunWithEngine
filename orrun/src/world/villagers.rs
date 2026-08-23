@@ -12,7 +12,7 @@ use engine::world::{EntityId, World};
 use glam::Vec2;
 
 use super::footprint::{BuildingPlot, HousePlot};
-use super::settlement::{HouseDoor, HamletStand};
+use super::settlement::{HamletStand, HouseDoor};
 use super::surface::ContinentalSurface;
 use super::world_stream::WorldStream;
 
@@ -378,7 +378,14 @@ impl VillagerLayer {
         let place = place_of(world, pos, yaw)?;
         let entity = world.spawn_animated_shared(model, place)?;
         world.play_animation(entity, &clip)?;
-        world.set_animation_speed(entity, if walking { WALK_ANIM_RATE } else { IDLE_ANIM_RATE })?;
+        world.set_animation_speed(
+            entity,
+            if walking {
+                WALK_ANIM_RATE
+            } else {
+                IDLE_ANIM_RATE
+            },
+        )?;
         self.people.push(Person {
             entity,
             hamlet,
@@ -457,7 +464,8 @@ impl VillagerLayer {
         } else {
             self.set_clip(world, i, true)?;
         }
-        if let Some((pos, yaw)) = point_on_cut(cut, self.people[i].along, self.people[i].dir, stream)
+        if let Some((pos, yaw)) =
+            point_on_cut(cut, self.people[i].along, self.people[i].dir, stream)
         {
             self.people[i].pos = pos;
             self.people[i].yaw = yaw;
@@ -645,7 +653,6 @@ fn is_hamlet_pin(surface: &ContinentalSurface, at: GlobalXZ) -> bool {
         pin.tier <= 1 && (pin.at.x - at.x).abs() < 0.75 && (pin.at.z - at.z).abs() < 0.75
     })
 }
-
 
 fn dry_cut_ts(cut: &[Vec2], stream: &WorldStream, hamlet: &HamletStand, want: usize) -> Vec<f32> {
     if cut.len() < 2 || want == 0 {

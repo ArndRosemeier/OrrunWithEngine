@@ -19,9 +19,9 @@ use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
 use engine::model::Model;
 use engine::place::GlobalPlace;
+use engine::portal::{PortalId, PortalSettings};
 use engine::space::{GlobalPosition, GlobalXZ};
 use engine::world::{EntityId, World};
-use engine::portal::{PortalId, PortalSettings};
 use engine::SpaceId;
 use glam::Vec3;
 use modular::prelude::{Cell, CellVolume, PieceId, PlacedMesh};
@@ -271,7 +271,6 @@ impl DungeonLayer {
             seated.plot.at.z,
         )))
     }
-
 
     /// False until the player has stood off the hatch, so a spawn on the pit
     /// does not immediately teleport into the shaft.
@@ -585,7 +584,10 @@ impl DungeonLayer {
         entities.push(hatch_in);
         world.in_space(SpaceId::DEFAULT)?;
         let portal = world.create_portal(hatch_out, hatch_in, PortalSettings::TELEPORTING)?;
-        self.last_shrine = Some(GlobalPlace::at(GlobalPosition::at(plot.at.x, f64::from(hatch_y), plot.at.z)).with_yaw_deg(mouth.place.yaw_degrees));
+        self.last_shrine = Some(
+            GlobalPlace::at(GlobalPosition::at(plot.at.x, f64::from(hatch_y), plot.at.z))
+                .with_yaw_deg(mouth.place.yaw_degrees),
+        );
         let ground = GroundPlan::from_places(&layout.placed);
         let colliders: Vec<StaticCollider> = colliders_for(&layout.placed, &ground)
             .into_iter()
@@ -814,12 +816,8 @@ fn pick_heart(clusters: &[(Vec3, u32)], mouth: Option<Vec3>) -> Option<Vec3> {
     clusters
         .iter()
         .max_by(|(a, an), (b, bn)| {
-            let da = mouth
-                .map(|m| (a.x - m.x).hypot(a.z - m.z))
-                .unwrap_or(0.0);
-            let db = mouth
-                .map(|m| (b.x - m.x).hypot(b.z - m.z))
-                .unwrap_or(0.0);
+            let da = mouth.map(|m| (a.x - m.x).hypot(a.z - m.z)).unwrap_or(0.0);
+            let db = mouth.map(|m| (b.x - m.x).hypot(b.z - m.z)).unwrap_or(0.0);
             da.partial_cmp(&db)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(an.cmp(bn))
