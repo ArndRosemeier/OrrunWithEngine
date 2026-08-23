@@ -318,6 +318,7 @@ impl TerrainChunkBuilder {
             uvs,
             indices,
             opaque_index_count,
+            surface: engine::SurfaceMaterial::DEFAULT,
         }
     }
 
@@ -438,6 +439,7 @@ impl TerrainChunkBuilder {
             indices,
             // Fully translucent layer.
             opaque_index_count: 0,
+            surface: engine::SurfaceMaterial::DEFAULT,
         })
     }
 

@@ -73,6 +73,15 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
     let grass_moor = world
         .create_terrain_albedo(TerrainAlbedo::GrassMoor, ALBEDO_SIZE, tex_seed ^ 0x3EA7)
         .expect("moor albedo");
+    let mud = world
+        .create_terrain_albedo(TerrainAlbedo::Mud, ALBEDO_SIZE, tex_seed ^ 0xBADC0)
+        .expect("mud albedo");
+    let tundra = world
+        .create_terrain_albedo(TerrainAlbedo::Tundra, ALBEDO_SIZE, tex_seed ^ 0x7A2D2)
+        .expect("tundra albedo");
+    let scree = world
+        .create_terrain_albedo(TerrainAlbedo::Scree, ALBEDO_SIZE, tex_seed ^ 0x5C0EE)
+        .expect("scree albedo");
     let sand = world
         .create_terrain_albedo(TerrainAlbedo::Sand, ALBEDO_SIZE, tex_seed ^ 0x51)
         .expect("sand albedo");
@@ -84,6 +93,9 @@ pub fn install_materials(world: &mut World, seed: i32, sea_surface_z: f32) {
             grass,
             grass_dry,
             grass_moor,
+            mud,
+            tundra,
+            scree,
             sand,
             rock,
             metres_per_tile: 7.0,
