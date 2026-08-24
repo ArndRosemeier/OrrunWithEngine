@@ -762,6 +762,12 @@ fn main() {
     let last_stand = Arc::new(Mutex::new(remembered));
     let stand_in_loop = Arc::clone(&last_stand);
 
+    // Performance inspection default: allow the renderer to run uncapped.
+    // Set ENGINE_PRESENT_MODE=fifo to restore VSync explicitly.
+    if std::env::var_os("ENGINE_PRESENT_MODE").is_none() {
+        std::env::set_var("ENGINE_PRESENT_MODE", "immediate");
+    }
+
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);

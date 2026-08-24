@@ -28,10 +28,11 @@ use engine::collision::{ColliderId, ColliderLayer, ColliderShape, StaticCollider
 use engine::color::Color;
 use engine::contact::ContactSnapshot;
 use engine::error::EngineResult;
-use engine::mesh::Mesh;
+
 use engine::model::Model;
 use engine::place::Place;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
+use engine::tree::{TreeAsset, TreeKind, TreeLod, TreeSettings};
 use engine::world::{EntityId, World};
 use thiserror::Error;
 
@@ -61,6 +62,8 @@ const TREE_SPACING_M: f64 = 10.0;
 const TREE_RADIUS_M: f64 = NEAR.covers_m();
 /// Inner disk that keeps the authored 10 m lattice.
 const TREE_DENSE_RADIUS_M: f64 = 400.0;
+/// Outer walked trees use the middle procedural prototype.
+const TREE_MID_RADIUS_M: f64 = 220.0;
 /// Effective spacing at the edge of the walked ring.
 const TREE_OUTER_SPACING_M: f64 = 25.0;
 /// Bank dressing: a narrow subject, so a short window and close spacing.
@@ -267,6 +270,9 @@ pub enum ScatterError {
         "rock {0} has no baked albedo; generate it in the Asset Lab and re-run tools/sync_props.py"
     )]
     UntexturedRock(PathBuf),
+
+    #[error("tree asset {0} has no explicit TreeKind mapping")]
+    UnknownTreeKind(PathBuf),
 }
 
 /// What a scattered prop is, which decides how it is placed.
@@ -335,7 +341,7 @@ impl PropClass {
             // Measured: sapling 4.8 m, alpine 9.4 m, ponderosa 14.9 m, spruce
             // 16.8 m. Floor at 1.575 keeps even saplings above knee height at
             // spawn; 4.0 lets spruce reach ~67 m — cathedral timber, not shrubbery.
-            Self::Tree => (1.575, 4.0),
+            Self::Tree => (0.0, 1.0),
             // The clumps are authored just under two metres, which is a reed.
             Self::Reed => (0.7, 1.15),
             // The tall shrub is authored ~2 m; the low ones half that. A wide
@@ -944,7 +950,9 @@ pub(super) fn props_dir() -> Result<PathBuf, ScatterError> {
 struct LiveProp {
     class: PropClass,
     taste: PropTaste,
+    tree_kind: Option<TreeKind>,
     prototype: EntityId,
+    mid_prototype: Option<EntityId>,
     bins: HashMap<(i32, i32), EntityId>,
     /// Empty entities retained so a sliding window does not change the GPU
     /// batch layout every time a cell leaves on one edge and enters on another.
@@ -977,7 +985,7 @@ struct Sprig {
 struct Sowing {
     seed: u64,
     /// Indexed like [`ScatterLayer::props`], so a sprig can name its variant.
-    variants: Vec<(PropClass, PropTaste)>,
+    variants: Vec<(PropClass, PropTaste, Option<TreeKind>)>,
     surface: Arc<ContinentalSurface>,
     ponds: Arc<PondField>,
     ground: ContactSnapshot,
@@ -1146,21 +1154,26 @@ impl ScatterLayer {
         catalog: &ScatterCatalog,
         seed: i32,
     ) -> Result<Self, ScatterError> {
-        let mut props = Vec::with_capacity(catalog.assets.len());
+        let mut props = Vec::with_capacity(catalog.assets.len() + 6);
         for asset in &catalog.assets {
-            let mesh = Model::load(&asset.path).map_err(|source| ScatterError::BadProp {
-                path: asset.path.clone(),
-                source,
-            })?;
-            if asset.class == PropClass::Rock && mesh.albedo().is_none() {
-                return Err(ScatterError::UntexturedRock(asset.path.clone()));
+            if asset.class == PropClass::Tree {
+                continue;
             }
             let stem = asset
                 .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
-            let prototype = world.spawn_instanced(mesh);
+            let prototype = {
+                let mesh = Model::load(&asset.path).map_err(|source| ScatterError::BadProp {
+                    path: asset.path.clone(),
+                    source,
+                })?;
+                if asset.class == PropClass::Rock && mesh.albedo().is_none() {
+                    return Err(ScatterError::UntexturedRock(asset.path.clone()));
+                }
+                world.spawn_instanced(mesh)
+            };
             if asset.class != PropClass::Tree {
                 world
                     .set_casts_shadow(prototype, false)
@@ -1169,12 +1182,45 @@ impl ScatterLayer {
             props.push(LiveProp {
                 class: asset.class,
                 taste: PropTaste::of(&stem),
+                tree_kind: None,
                 prototype,
+                mid_prototype: None,
                 bins: HashMap::new(),
                 spare_bins: Vec::new(),
             });
         }
-        let far_mesh = pine_proxy().expect("far-band pine proxy");
+        for kind in [
+            TreeKind::Oak,
+            TreeKind::Beech,
+            TreeKind::Birch,
+            TreeKind::Pine,
+            TreeKind::Spruce,
+            TreeKind::Willow,
+        ] {
+            let settings = TreeSettings::new(kind, tree_kind_seed(kind));
+            let prototype = world.spawn_instanced(
+                TreeAsset::generate_lod(Vec3::ZERO, settings, TreeLod::Hero).mesh()?,
+            );
+            let mid_prototype = world.spawn_instanced(
+                TreeAsset::generate_lod(Vec3::ZERO, settings, TreeLod::Mid).mesh()?,
+            );
+            props.push(LiveProp {
+                class: PropClass::Tree,
+                taste: tree_taste(kind),
+                tree_kind: Some(kind),
+                prototype,
+                mid_prototype: Some(mid_prototype),
+                bins: HashMap::new(),
+                spare_bins: Vec::new(),
+            });
+        }
+
+        let far_mesh = TreeAsset::generate_lod(
+            Vec3::ZERO,
+            TreeSettings::new(TreeKind::Pine, tree_kind_seed(TreeKind::Pine)),
+            TreeLod::Far,
+        )
+        .mesh()?;
         let far_entity = world.spawn_instanced(far_mesh);
         world
             .set_casts_shadow(far_entity, false)
@@ -1397,7 +1443,7 @@ impl ScatterLayer {
             variants: self
                 .props
                 .iter()
-                .map(|prop| (prop.class, prop.taste))
+                .map(|prop| (prop.class, prop.taste, prop.tree_kind))
                 .collect(),
             surface: Arc::clone(surface),
             ponds: Arc::clone(ponds),
@@ -1613,9 +1659,17 @@ impl ScatterLayer {
             let id = match prop.bins.get(&(job.bx, job.bz)) {
                 Some(id) => *id,
                 None => {
+                    let prototype = if prop.class == PropClass::Tree
+                        && self.centre.is_some_and(|focus| {
+                            (bin_dist_key(job.bx, job.bz, focus) as f64).sqrt() > TREE_MID_RADIUS_M
+                        }) {
+                        prop.mid_prototype.unwrap_or(prop.prototype)
+                    } else {
+                        prop.prototype
+                    };
                     let id = match prop.spare_bins.pop() {
                         Some(id) => id,
-                        None => world.spawn_instanced_like(prop.prototype)?,
+                        None => world.spawn_instanced_like(prototype)?,
                     };
                     prop.bins.insert((job.bx, job.bz), id);
                     id
@@ -1956,7 +2010,7 @@ impl Sowing {
                 .variants
                 .iter()
                 .enumerate()
-                .filter(|(_, (c, _))| *c == class)
+                .filter(|(_, (c, _, _))| *c == class)
                 .map(|(i, _)| i)
                 .collect();
             if variants.is_empty() {
@@ -2068,9 +2122,13 @@ impl Sowing {
                     }
                 }
 
-                let scale = rng.range(scale_lo, scale_hi);
-                let yaw = 360.0 * rng.unit();
                 let variant = self.pick_variant(variants, &cover, rng.unit());
+                let kind = self.variants[variant].2;
+                let scale = match kind {
+                    Some(kind) => tree_scale(kind, &mut rng),
+                    None => rng.range(scale_lo, scale_hi),
+                };
+                let yaw = 360.0 * rng.unit();
                 // Tint after placement draws so palette rolls never steal yaw/scale.
                 let tint = prop_tint(class, &mut rng);
                 let y = (ground - class.bed_in() * scale) as f64;
@@ -2156,7 +2214,6 @@ fn sow_far_forest(
     let inner_sq = inner_m * inner_m;
     let outer_sq = outer_m * outer_m;
     let dry_beyond = -BANK_REACH_M;
-    let (scale_lo, scale_hi) = PropClass::Tree.scale_range();
     let mut out = Vec::new();
 
     let cx0 = ((focus.x - outer_m) / spacing_m).floor() as i64;
@@ -2202,7 +2259,7 @@ fn sow_far_forest(
                 continue;
             }
 
-            let scale = rng.range(scale_lo, scale_hi);
+            let scale = tree_scale(TreeKind::Pine, &mut rng);
             let yaw = 360.0 * rng.unit();
             let tint = prop_tint(PropClass::Tree, &mut rng);
             let y = (ground - MEDIUM.sink_m - PropClass::Tree.bed_in() * scale) as f64;
@@ -2230,17 +2287,51 @@ fn far_fall(surface: &ContinentalSurface, p: GlobalXZ) -> Fall {
     Fall::of(Vec3::new(-gx, 1.0, -gz).normalize_or_zero())
 }
 
-/// A pine the GPU can instance by the tens of thousands: trunk plus two crowns.
-fn pine_proxy() -> EngineResult<Mesh> {
-    let mut mesh = Mesh::new();
-    let bark = Color::rgb(78, 54, 38);
-    let needle = Color::rgb(46, 74, 42);
-    mesh.add_box(Vec3::new(0.0, 3.2, 0.0), Vec3::new(0.7, 6.4, 0.7), bark)?;
-    mesh.add_box(Vec3::new(0.0, 8.4, 0.0), Vec3::new(5.0, 4.2, 5.0), needle)?;
-    mesh.add_box(Vec3::new(0.0, 11.4, 0.0), Vec3::new(3.2, 3.2, 3.2), needle)?;
-    Ok(mesh)
+fn tree_scale(kind: TreeKind, rng: &mut CellRng) -> f32 {
+    let (min_height, max_height) = kind.height_range();
+    let target_height = min_height + (max_height - min_height) * ((rng.unit() + rng.unit()) * 0.5);
+    target_height / kind.profile().height
 }
 
+fn tree_taste(kind: TreeKind) -> PropTaste {
+    match kind {
+        TreeKind::Oak | TreeKind::Beech | TreeKind::Willow => PropTaste {
+            dry: 0.25,
+            alpine: 0.20,
+            open: 0.45,
+            conifer: 0.0,
+        },
+        TreeKind::Birch => PropTaste {
+            dry: 0.45,
+            alpine: 0.45,
+            open: 0.55,
+            conifer: 0.0,
+        },
+        TreeKind::Pine => PropTaste {
+            dry: 0.65,
+            alpine: 0.65,
+            open: 0.25,
+            conifer: 1.0,
+        },
+        TreeKind::Spruce => PropTaste {
+            dry: 0.35,
+            alpine: 0.85,
+            open: 0.20,
+            conifer: 1.0,
+        },
+    }
+}
+
+fn tree_kind_seed(kind: TreeKind) -> u32 {
+    match kind {
+        TreeKind::Oak => 0x0A01,
+        TreeKind::Beech => 0x0B02,
+        TreeKind::Birch => 0x0C03,
+        TreeKind::Pine => 0x0D04,
+        TreeKind::Spruce => 0x0E05,
+        TreeKind::Willow => 0x0F06,
+    }
+}
 /// Run `job`, reporting how long it took in milliseconds.
 fn far_draw_bin(cell: (i32, i32)) -> (i32, i32) {
     (
@@ -2788,9 +2879,14 @@ mod tests {
     }
 
     #[test]
-    fn the_far_pine_is_a_handful_of_boxes() {
-        let mesh = pine_proxy().expect("proxy").build();
-        assert_eq!(mesh.triangle_count(), 36);
+    fn generated_far_tree_is_procedural_and_nonempty() {
+        let mesh = TreeAsset::generate(
+            Vec3::ZERO,
+            TreeSettings::new(TreeKind::Pine, tree_kind_seed(TreeKind::Pine)),
+        )
+        .mesh()
+        .expect("generated tree mesh");
+        assert!(mesh.face_count() > 36);
     }
 
     #[test]

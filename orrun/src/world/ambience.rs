@@ -46,10 +46,11 @@ const RIVER_CLIP: &str = "river.wav";
 const OCEAN_CLIP: &str = "ocean.wav";
 const COMBAT_HIT_CLIP: &str = "combat/hit.wav";
 const COMBAT_SWING_CLIP: &str = "combat/swing.wav";
-const COMBAT_HURT_CLIP: &str = "combat/hurt.wav";
+
 const COMBAT_PEAK: f32 = 0.45;
 /// Incoming mob strikes: softer swish, not a full outgoing hit.
-const COMBAT_INCOMING_PEAK: f32 = 0.30;
+
+/// Prevent overlapping mob strikes from becoming a continuous wall of sound.
 
 #[derive(Debug, Error)]
 pub enum AmbienceError {
@@ -83,7 +84,6 @@ pub struct Ambience {
     last_forest: Option<usize>,
     combat_hit: ClipId,
     combat_swing: ClipId,
-    combat_hurt: ClipId,
 }
 
 impl Ambience {
@@ -111,7 +111,6 @@ impl Ambience {
         ];
         let combat_hit = load_clip(&mut audio, COMBAT_HIT_CLIP)?;
         let combat_swing = load_clip(&mut audio, COMBAT_SWING_CLIP)?;
-        let combat_hurt = load_clip(&mut audio, COMBAT_HURT_CLIP)?;
         Ok(Self {
             audio,
             village,
@@ -124,7 +123,6 @@ impl Ambience {
             last_forest: None,
             combat_hit,
             combat_swing,
-            combat_hurt,
         })
     }
 
@@ -160,13 +158,8 @@ impl Ambience {
     }
 
     pub fn play_hurt(&mut self) -> Result<(), AmbienceError> {
-        self.audio.play(
-            self.combat_hurt,
-            Play {
-                looped: false,
-                volume: COMBAT_INCOMING_PEAK,
-            },
-        )?;
+        // The vendored hurt.wav is a sustained synthetic tone, not a melee
+        // transient. Keep it silent until a verified replacement is added.
         Ok(())
     }
 

@@ -319,6 +319,7 @@ impl TerrainChunkBuilder {
             indices,
             opaque_index_count,
             surface: engine::SurfaceMaterial::DEFAULT,
+            surface_overrides: Vec::new(),
         }
     }
 
@@ -440,6 +441,7 @@ impl TerrainChunkBuilder {
             // Fully translucent layer.
             opaque_index_count: 0,
             surface: engine::SurfaceMaterial::DEFAULT,
+            surface_overrides: Vec::new(),
         })
     }
 

@@ -1,6 +1,6 @@
 # Ambience clips
 
-Generated in SoundStudio with Stability AI Small-Music / Small-SFX
+Generated in SoundStudio with Stability AI Stable Audio Open Small
 (Stability AI Community License).
 
 | File | Role |
