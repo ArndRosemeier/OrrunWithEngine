@@ -2456,11 +2456,8 @@ impl Driver {
             }
             let lock = self.session.lock_id();
             let combat = self.session.combat_mut();
-            for h in combat.hostiles_mut() {
-                if Some(h.idx) == lock {
-                    h.hp = 0.0;
-                    h.alive = false;
-                }
+            if let Some(idx) = lock {
+                combat.defeat_hostile(idx);
             }
             combat.set_lock(None);
             self.combat_death_killed = true;
@@ -2495,8 +2492,8 @@ impl Driver {
             .combat()
             .hostiles()
             .iter()
-            .find(|h| !h.alive)
-            .map(|h| (h.name.clone(), h.alive, h.hp));
+            .find(|h| !h.is_alive())
+            .map(|h| (h.name.clone(), h.is_alive(), h.hp()));
         let Some((name, alive, hp)) = corpse else {
             self.fail_current("combat_death: no dead hostile after kill");
             self.advance_after_fail(world, frame);
@@ -2522,7 +2519,11 @@ impl Driver {
     }
 
     fn loot_corpse_ready(&self, world: &World) -> bool {
-        self.session.combat().hostiles().iter().any(|h| !h.alive)
+        self.session
+            .combat()
+            .hostiles()
+            .iter()
+            .any(|h| !h.is_alive())
             && self.session.sparkle_visible(world)
     }
 
@@ -2631,11 +2632,8 @@ impl Driver {
             let lock = self.session.lock_id();
             {
                 let combat = self.session.combat_mut();
-                for h in combat.hostiles_mut() {
-                    if Some(h.idx) == lock {
-                        h.hp = 0.0;
-                        h.alive = false;
-                    }
+                if let Some(idx) = lock {
+                    combat.defeat_hostile(idx);
                 }
                 combat.set_lock(None);
             }
@@ -3316,7 +3314,7 @@ impl Driver {
         let Some(h) = combat
             .hostiles()
             .iter()
-            .find(|h| Some(h.idx) == combat.lock_id() && h.alive)
+            .find(|h| Some(h.idx) == combat.lock_id() && h.is_alive())
         else {
             self.fail_current("con: locked hostile missing");
             self.advance_after_fail(world, frame);
@@ -3797,7 +3795,7 @@ impl Driver {
             .hostiles()
             .iter()
             .find(|h| Some(h.idx) == self.session.lock_id())
-            .map(|h| h.max_hp)
+            .map(|h| h.max_hp())
             .unwrap_or(hp);
         if name != "wolf-spider" {
             self.fail_current(&format!(
@@ -4150,11 +4148,15 @@ impl Driver {
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                self.session.combat_mut().player_mut().resources.hp = 50.0;
+                self.session
+                    .combat_mut()
+                    .player_mut()
+                    .resources
+                    .set_hp(50.0);
                 self.controls_stage = ControlsStage::Potion;
             }
             ControlsStage::Potion => {
-                let hp = self.session.combat().player().resources.hp;
+                let hp = self.session.combat().player().resources.hp();
                 let potions = self.session.combat().player().potions;
                 let heal = self.session.combat().last_potion_heal();
                 if (hp - 90.0).abs() > 1e-6 || potions != 0 || heal != 40 {
@@ -5028,7 +5030,7 @@ impl Driver {
             let hostiles = self.session.combat().hostiles();
             let at_site: Vec<_> = hostiles
                 .iter()
-                .filter(|h| h.mob_id == "bandit" && h.alive)
+                .filter(|h| h.mob_id == "bandit" && h.is_alive())
                 .filter(|h| (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0)
                 .collect();
             let n = at_site.len();
@@ -5110,7 +5112,7 @@ impl Driver {
                 .iter()
                 .find(|h| {
                     h.mob_id == "bandit"
-                        && h.alive
+                        && h.is_alive()
                         && (h.x - site.at.x).hypot(h.z - site.at.z) < 12.0
                 })
                 .map(|h| h.idx)
@@ -5549,13 +5551,13 @@ fn death_hold_ready(world: &World, session: &WorldSession) -> bool {
             continue;
         }
         let a = ent.animator();
-        if a.clip_name() != "Death" || a.looping {
+        if a.clip_name() != "Death" || a.is_looping() {
             return false;
         }
-        let Some(clip) = a.model.clips.get(a.clip_index) else {
+        let Some(duration) = a.clip_duration() else {
             return false;
         };
-        return clip.duration > 0.0 && a.time + 1e-3 >= clip.duration;
+        return duration > 0.0 && a.time() + 1e-3 >= duration;
     }
     false
 }
@@ -5615,7 +5617,7 @@ fn wolf_near(session: &WorldSession, p: &GlobalXZ) -> f64 {
         .combat()
         .hostiles()
         .iter()
-        .filter(|h| h.alive && h.mob_id != "bandit")
+        .filter(|h| h.is_alive() && h.mob_id != "bandit")
         .map(|h| (h.x - p.x).hypot(h.z - p.z))
         .fold(f64::MAX, f64::min)
 }

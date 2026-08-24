@@ -137,11 +137,15 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     let Some(id) = combat.lock_id() else {
         return;
     };
-    let Some(h) = combat.hostiles().iter().find(|h| h.idx == id && h.alive) else {
+    let Some(h) = combat
+        .hostiles()
+        .iter()
+        .find(|h| h.idx == id && h.is_alive())
+    else {
         return;
     };
-    let max = h.max_hp.max(1.0);
-    let frac = (h.hp / max).clamp(0.0, 1.0) as f32;
+    let max = h.max_hp().max(1.0);
+    let frac = (h.hp() / max).clamp(0.0, 1.0) as f32;
     let fill = if frac <= 0.20 {
         Color32::from_rgb(200, 32, 32)
     } else if frac <= 0.50 {
@@ -200,7 +204,7 @@ pub fn nameplate_report(
 ) -> Vec<NameplateInfo> {
     let mut out = Vec::new();
     for h in combat.hostiles() {
-        if !h.alive {
+        if !h.is_alive() {
             continue;
         }
         let dx = h.x - f64::from(eye.x);

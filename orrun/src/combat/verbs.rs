@@ -88,7 +88,11 @@ impl WorldCombat {
             self.note_fail("No target");
             return None;
         };
-        let Some(h) = self.hostiles().iter().find(|h| h.idx == lock && h.alive) else {
+        let Some(h) = self
+            .hostiles()
+            .iter()
+            .find(|h| h.idx == lock && h.is_alive())
+        else {
             self.note_fail("No target");
             return None;
         };
@@ -184,7 +188,7 @@ impl WorldCombat {
                 self.start_cast("pin", BOW_DRAW_S, 0, Some(lock))
             }
             CombatVerb::Ember => {
-                if self.player().resources.mana < f64::from(EMBER_MANA) {
+                if self.player().resources.mana() < f64::from(EMBER_MANA) {
                     return false;
                 }
                 let Some(lock) = self.lock_in_range(
@@ -204,7 +208,7 @@ impl WorldCombat {
                 started
             }
             CombatVerb::Bind => {
-                if self.player().resources.mana < f64::from(BIND_MANA) {
+                if self.player().resources.mana() < f64::from(BIND_MANA) {
                     return false;
                 }
                 let Some(lock) =
@@ -215,13 +219,13 @@ impl WorldCombat {
                 self.start_cast("bind", BIND_CAST_S, BIND_MANA, Some(lock))
             }
             CombatVerb::Mend => {
-                if self.player().resources.mana < f64::from(MEND_MANA) {
+                if self.player().resources.mana() < f64::from(MEND_MANA) {
                     return false;
                 }
                 self.start_cast("mend", MEND_CAST_S, MEND_MANA, None)
             }
             CombatVerb::Ward => {
-                if self.player().resources.mana < f64::from(WARD_MANA) {
+                if self.player().resources.mana() < f64::from(WARD_MANA) {
                     return false;
                 }
                 if !self.spend_mana(WARD_MANA) {
@@ -242,12 +246,10 @@ impl WorldCombat {
                 if self.second_wind_used() {
                     return false;
                 }
-                let heal = SECOND_WIND_PCT * self.player().resources.hp_max;
-                self.player_mut().resources.hp = self
-                    .player()
-                    .resources
-                    .hp_max
-                    .min(self.player().resources.hp + heal);
+                let heal = SECOND_WIND_PCT * self.player().resources.hp_max();
+                let hp_max = self.player().resources.hp_max();
+                let hp = self.player().resources.hp();
+                self.player_mut().resources.set_hp(hp_max.min(hp + heal));
                 self.set_second_wind_used(true);
                 true
             }
@@ -255,11 +257,11 @@ impl WorldCombat {
                 if self.player().potions <= 0 {
                     return false;
                 }
-                let before = self.player().resources.hp;
+                let before = self.player().resources.hp();
                 if !self.player_mut().drink_potion() {
                     return false;
                 }
-                self.set_last_potion_heal(trunc(self.player().resources.hp - before));
+                self.set_last_potion_heal(trunc(self.player().resources.hp() - before));
                 self.set_cd("potion", POTION_CD_S);
                 true
             }
@@ -289,17 +291,18 @@ impl WorldCombat {
 
     fn spend_mana(&mut self, amount: i32) -> bool {
         let need = f64::from(amount);
-        if self.player().resources.mana < need {
+        if self.player().resources.mana() < need {
             return false;
         }
-        self.player_mut().resources.mana -= need;
+        let remaining = self.player().resources.mana() - need;
+        self.player_mut().resources.set_mana(remaining);
         true
     }
 
     fn target_in_range(&self, player_x: f64, player_z: f64, idx: i32, range: f64) -> bool {
         self.hostiles()
             .iter()
-            .any(|h| h.idx == idx && h.alive && dist(player_x, player_z, h.x, h.z) <= range)
+            .any(|h| h.idx == idx && h.is_alive() && dist(player_x, player_z, h.x, h.z) <= range)
     }
 
     /// Tick CDs, casts, and CC. Same 0.1 s clock as auto.
@@ -370,7 +373,7 @@ impl WorldCombat {
                     if let Some(h) = self
                         .hostiles_mut()
                         .iter_mut()
-                        .find(|h| h.idx == idx && h.alive)
+                        .find(|h| h.idx == idx && h.is_alive())
                     {
                         h.stun_s = h.stun_s.max(BASH_STUN_S);
                     }
@@ -378,11 +381,9 @@ impl WorldCombat {
             }
             "mend" => {
                 let heal = f64::from(self.player().stats.mend());
-                self.player_mut().resources.hp = self
-                    .player()
-                    .resources
-                    .hp_max
-                    .min(self.player().resources.hp + heal);
+                let hp_max = self.player().resources.hp_max();
+                let hp = self.player().resources.hp();
+                self.player_mut().resources.set_hp(hp_max.min(hp + heal));
             }
             "bind" => {
                 if let Some(idx) = target.or(self.lock_id()) {
@@ -390,7 +391,7 @@ impl WorldCombat {
                         if let Some(h) = self
                             .hostiles_mut()
                             .iter_mut()
-                            .find(|h| h.idx == idx && h.alive)
+                            .find(|h| h.idx == idx && h.is_alive())
                         {
                             h.root_s = BIND_ROOT_S;
                             self.player_mut().used_pin_or_bind = true;
@@ -402,7 +403,11 @@ impl WorldCombat {
                 let Some(idx) = target.or(self.lock_id()) else {
                     return;
                 };
-                let Some(hi) = self.hostiles().iter().position(|h| h.idx == idx && h.alive) else {
+                let Some(hi) = self
+                    .hostiles()
+                    .iter()
+                    .position(|h| h.idx == idx && h.is_alive())
+                else {
                     return;
                 };
                 if self.player().arrows <= 0 {
@@ -417,24 +422,26 @@ impl WorldCombat {
                 );
                 let raw = self.outgoing_raw(self.player().stats.bow_hit(kind == "aimed", d));
                 let dealt = mitigation(f64::from(raw), self.hostiles_mut()[hi].armor);
-                self.hostiles_mut()[hi].hp -= f64::from(dealt);
+                self.apply_damage_to_hostile(idx, dealt);
                 if kind == "pin" {
                     self.hostiles_mut()[hi].slow_s = PIN_DUR_S;
                     self.player_mut().used_pin_or_bind = true;
                 }
-                if self.hostiles_mut()[hi].hp <= 0.0 {
-                    self.hostiles_mut()[hi].hp = 0.0;
-                    self.hostiles_mut()[hi].alive = false;
-                    if self.lock_id() == Some(idx) {
-                        self.set_lock(None);
-                    }
+                if self.lock_id() == Some(idx)
+                    && !self.hostiles().iter().any(|h| h.idx == idx && h.is_alive())
+                {
+                    self.set_lock(None);
                 }
             }
             "ember" => {
                 let Some(idx) = target.or(self.lock_id()) else {
                     return;
                 };
-                let Some(hi) = self.hostiles().iter().position(|h| h.idx == idx && h.alive) else {
+                let Some(hi) = self
+                    .hostiles()
+                    .iter()
+                    .position(|h| h.idx == idx && h.is_alive())
+                else {
                     return;
                 };
                 let d = dist(
@@ -448,13 +455,11 @@ impl WorldCombat {
                 }
                 let raw = self.outgoing_raw(self.player().stats.ember());
                 let dealt = mitigation(f64::from(raw), self.hostiles_mut()[hi].armor);
-                self.hostiles_mut()[hi].hp -= f64::from(dealt);
-                if self.hostiles_mut()[hi].hp <= 0.0 {
-                    self.hostiles_mut()[hi].hp = 0.0;
-                    self.hostiles_mut()[hi].alive = false;
-                    if self.lock_id() == Some(idx) {
-                        self.set_lock(None);
-                    }
+                self.apply_damage_to_hostile(idx, dealt);
+                if self.lock_id() == Some(idx)
+                    && !self.hostiles().iter().any(|h| h.idx == idx && h.is_alive())
+                {
+                    self.set_lock(None);
                 }
             }
             _ => {}

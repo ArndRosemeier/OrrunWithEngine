@@ -6,10 +6,10 @@ use super::sheets::{player_stats, PlayerStats};
 
 #[derive(Clone, Debug)]
 pub struct CombatResources {
-    pub hp: f64,
-    pub hp_max: f64,
-    pub mana: f64,
-    pub mana_max: f64,
+    hp: f64,
+    hp_max: f64,
+    mana: f64,
+    mana_max: f64,
 }
 
 impl CombatResources {
@@ -30,6 +30,24 @@ impl CombatResources {
         self.mana = self.max_mana_cap(self.mana + MANA_REGEN_OOC_PER_S * dt);
     }
 
+    pub fn hp(&self) -> f64 {
+        self.hp
+    }
+    pub fn hp_max(&self) -> f64 {
+        self.hp_max
+    }
+    pub fn mana(&self) -> f64 {
+        self.mana
+    }
+    pub fn mana_max(&self) -> f64 {
+        self.mana_max
+    }
+    pub fn set_hp(&mut self, hp: f64) {
+        self.hp = hp;
+    }
+    pub fn set_mana(&mut self, mana: f64) {
+        self.mana = mana;
+    }
     fn max_mana_cap(&self, mana: f64) -> f64 {
         self.mana_max.min(mana)
     }
@@ -218,10 +236,10 @@ pub struct WorldHostile {
     pub idx: i32,
     pub x: f64,
     pub z: f64,
-    pub hp: f64,
-    pub max_hp: f64,
+    hp: f64,
+    max_hp: f64,
     pub armor: i32,
-    pub alive: bool,
+    alive: bool,
     pub stun_s: f64,
     pub slow_s: f64,
     pub root_s: f64,
@@ -303,6 +321,60 @@ pub struct WorldCombat {
     special_tele: std::collections::BTreeMap<i32, f64>,
     /// Fixed-step accumulator owned by the simulation, never by presentation.
     fixed_accum_s: f64,
+}
+
+impl WorldHostile {
+    pub(crate) fn from_sheet(
+        idx: i32,
+        x: f64,
+        z: f64,
+        sheet: &crate::combat::sheets::MobSheet,
+        mob_id: impl Into<String>,
+        home_x: f64,
+        home_z: f64,
+    ) -> Self {
+        Self {
+            idx,
+            x,
+            z,
+            hp: f64::from(sheet.hp),
+            max_hp: f64::from(sheet.hp),
+            armor: sheet.armor,
+            alive: true,
+            stun_s: 0.0,
+            slow_s: 0.0,
+            root_s: 0.0,
+            name: sheet.name.clone(),
+            level: sheet.level,
+            mob_id: mob_id.into(),
+            entity: None,
+            damage: sheet.damage,
+            swing_s: sheet.swing_s,
+            swing_cd: sheet.swing_s,
+            reach_m: sheet.reach_m,
+            home_x,
+            home_z,
+            aggro: Aggro {
+                sight_m: sheet.sight_m,
+                hear_m: sheet.hear_m,
+                leash_m: sheet.leash_m,
+                social_m: sheet.social_m,
+            },
+            state: HostileState::Idle,
+        }
+    }
+
+    pub fn hp(&self) -> f64 {
+        self.hp
+    }
+
+    pub fn max_hp(&self) -> f64 {
+        self.max_hp
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
 }
 
 impl WorldCombat {
@@ -981,30 +1053,12 @@ mod tests {
     use super::*;
 
     fn dummy_wolf(dmg: i32) -> WorldHostile {
-        WorldHostile {
-            idx: 0,
-            x: 1.0,
-            z: 0.0,
-            hp: 70.0,
-            max_hp: 70.0,
-            armor: 8,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: "wolf-spider".into(),
-            level: 1,
-            mob_id: "crawler_spider_wolf".into(),
-            entity: None,
-            damage: dmg,
-            swing_s: 2.0,
-            swing_cd: 0.0,
-            reach_m: 1.8,
-            home_x: 1.0,
-            home_z: 0.0,
-            aggro: Aggro::default(),
-            state: HostileState::Idle,
-        }
+        let mut sheet = crate::combat::sheets::wolf_sheet(1);
+        sheet.damage = dmg;
+        let mut wolf =
+            WorldHostile::from_sheet(0, 1.0, 0.0, &sheet, "crawler_spider_wolf", 1.0, 0.0);
+        wolf.swing_cd = 0.0;
+        wolf
     }
 
     #[test]

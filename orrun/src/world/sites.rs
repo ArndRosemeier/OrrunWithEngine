@@ -343,30 +343,7 @@ pub fn is_bandit_id(mob_id: &str) -> bool {
 
 fn hostile_from_sheet(idx: i32, x: f64, z: f64) -> WorldHostile {
     let sheet = bandit_sheet();
-    WorldHostile {
-        idx,
-        x,
-        z,
-        hp: f64::from(sheet.hp),
-        max_hp: f64::from(sheet.hp),
-        armor: sheet.armor,
-        alive: true,
-        stun_s: 0.0,
-        slow_s: 0.0,
-        root_s: 0.0,
-        name: sheet.name.clone(),
-        level: sheet.level,
-        mob_id: sheet.id.clone(),
-        entity: None,
-        damage: sheet.damage,
-        swing_s: sheet.swing_s,
-        swing_cd: sheet.swing_s,
-        reach_m: sheet.reach_m,
-        home_x: x,
-        home_z: z,
-        aggro: crate::combat::Aggro::default(),
-        state: crate::combat::types::HostileState::Idle,
-    }
+    WorldHostile::from_sheet(idx, x, z, &sheet, sheet.id.clone(), x, z)
 }
 
 pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {

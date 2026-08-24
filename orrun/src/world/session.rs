@@ -438,7 +438,7 @@ impl WorldSession {
         if h.name.is_empty() {
             return None;
         }
-        Some((h.name.as_str(), h.hp))
+        Some((h.name.as_str(), h.hp()))
     }
 
     pub fn inventory(&self) -> &crate::inventory::Inventory {
@@ -551,7 +551,7 @@ impl WorldSession {
             .combat
             .hostiles()
             .iter()
-            .filter(|h| !h.alive && sparkle_ids.contains(&h.idx))
+            .filter(|h| !h.is_alive() && sparkle_ids.contains(&h.idx))
             .map(|h| (h.idx, h.x, h.z))
             .collect();
         let ids = crate::combat::tab_candidates(player_x, player_z, facing_x, facing_z, &pairs);
@@ -589,7 +589,7 @@ impl WorldSession {
             Option<crate::loot::GroundPile>,
         )> = Vec::new();
         for h in self.combat.hostiles() {
-            if h.alive {
+            if h.is_alive() {
                 continue;
             }
             let Some(entity) = h.entity else {
@@ -635,19 +635,19 @@ impl WorldSession {
     }
 
     pub fn player_hp(&self) -> f64 {
-        self.combat.player().resources.hp
+        self.combat.player().resources.hp()
     }
 
     pub fn player_hp_max(&self) -> f64 {
-        self.combat.player().resources.hp_max
+        self.combat.player().resources.hp_max()
     }
 
     pub fn player_mana(&self) -> f64 {
-        self.combat.player().resources.mana
+        self.combat.player().resources.mana()
     }
 
     pub fn player_mana_max(&self) -> f64 {
-        self.combat.player().resources.mana_max
+        self.combat.player().resources.mana_max()
     }
 
     /// Player HP/mana bars are always drawn in world_hud.
@@ -859,8 +859,8 @@ impl WorldSession {
     pub fn apply_save(&mut self, stand: &crate::save::SavedStand) {
         self.combat.player_mut().stats.level = stand.level;
         self.combat.player_mut().xp = stand.xp;
-        self.combat.player_mut().resources.hp = stand.hp;
-        self.combat.player_mut().resources.mana = stand.mana;
+        self.combat.player_mut().resources.set_hp(stand.hp);
+        self.combat.player_mut().resources.set_mana(stand.mana);
         self.combat.player_mut().stats.attrs = stand.attrs;
         self.combat.player_mut().stats.ranks = stand.ranks;
         if stand.shaken_until > 0.0 {
@@ -880,8 +880,8 @@ impl WorldSession {
         let mut stand = crate::save::SavedStand::new(seed, size, at, heading);
         stand.level = p.stats.level;
         stand.xp = p.xp;
-        stand.hp = p.resources.hp;
-        stand.mana = p.resources.mana;
+        stand.hp = p.resources.hp();
+        stand.mana = p.resources.mana();
         stand.attrs = p.stats.attrs;
         stand.ranks = p.stats.ranks;
         stand.shaken_until = p.shaken.as_ref().map(|s| s.remaining_s).unwrap_or(0.0);
@@ -1994,7 +1994,7 @@ impl WorldSession {
                 .present(world, &self.combat, ground_y, input.dt)?;
             self.sync_ground_loot(world)?;
             if self.combat.is_dead()
-                && self.combat.player().resources.hp <= 0.0
+                && self.combat.player().resources.hp() <= 0.0
                 && self.combat.slain_hold_s() <= 0.0
             {
                 self.resolve_death(world);

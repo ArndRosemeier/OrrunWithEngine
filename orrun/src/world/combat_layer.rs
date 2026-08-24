@@ -16,7 +16,7 @@ use crate::combat::sheets::{
 };
 use crate::combat::types::{SpecialAttackCue, SpecialAttackEvent, WorldCombat, WorldHostile};
 use crate::combat::Discipline;
-use engine::anim::AnimatedModel;
+use engine::anim::{AnimatedModel, AnimationAction, AnimationProfile, Locomotion};
 use engine::color::Color;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
@@ -493,11 +493,33 @@ impl CombatLayer {
                     .yaw_deg(yaw)?
                     .scale(1.0)?;
                 let id = world.spawn_animated_shared(model.clone(), place)?;
-                if model.find_clip(spec.anim_idle).is_some() {
-                    world.play_animation(id, spec.anim_idle)?;
-                    if is_wolf_mesh(&h.mob_id) {
-                        world.set_animation_speed(id, 0.65)?;
-                    }
+                let mut profile = AnimationProfile::new()
+                    .idle(spec.anim_idle)
+                    .attack(spec.anim_melee);
+                if let Some(clip) = spec
+                    .anim_walk
+                    .filter(|clip| model.find_clip(clip).is_some())
+                {
+                    profile = profile.walk(clip);
+                }
+                if let Some(clip) = spec.anim_run.filter(|clip| model.find_clip(clip).is_some()) {
+                    profile = profile.run(clip);
+                }
+                if let Some(clip) = spec
+                    .anim_weapon
+                    .filter(|clip| model.find_clip(clip).is_some())
+                {
+                    profile = profile.cast(clip);
+                }
+                if let Some(clip) = spec
+                    .anim_death
+                    .filter(|clip| model.find_clip(clip).is_some())
+                {
+                    profile = profile.death(clip);
+                }
+                world.configure_animation(id, profile)?;
+                if is_wolf_mesh(&h.mob_id) {
+                    world.set_animation_speed(id, 0.65)?;
                 }
                 h.entity = Some(id);
                 self.mesh_ids.push(id);
@@ -564,30 +586,15 @@ impl CombatLayer {
                 2 => STRAFE_M,
                 _ => 0.0,
             };
-            combat.add_hostile(WorldHostile {
-                idx: i,
-                x: player_x + fx * dist + sx * strafe,
-                z: player_z + fz * dist + sz * strafe,
-                hp: f64::from(sheet.hp),
-                max_hp: f64::from(sheet.hp),
-                armor: sheet.armor,
-                alive: true,
-                stun_s: 0.0,
-                slow_s: 0.0,
-                root_s: 0.0,
-                name: sheet.name.clone(),
-                level: sheet.level,
-                mob_id: sheet.id.clone(),
-                entity: None,
-                damage: sheet.damage,
-                swing_s: sheet.swing_s,
-                swing_cd: sheet.swing_s,
-                reach_m: sheet.reach_m,
-                home_x: player_x + fx * 1.5,
-                home_z: player_z + fz * 1.5,
-                aggro: crate::combat::Aggro::default(),
-                state: crate::combat::types::HostileState::Idle,
-            });
+            combat.add_hostile(WorldHostile::from_sheet(
+                i,
+                player_x + fx * dist + sx * strafe,
+                player_z + fz * dist + sz * strafe,
+                &sheet,
+                sheet.id.clone(),
+                player_x + fx * 1.5,
+                player_z + fz * 1.5,
+            ));
         }
         *combat = keep_player(combat);
         combat.reset_encounter_state();
@@ -622,30 +629,15 @@ impl CombatLayer {
         let sheet = orc_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile {
-            idx: 0,
-            x: player_x + fx * 1.5,
-            z: player_z + fz * 1.5,
-            hp: f64::from(sheet.hp),
-            max_hp: f64::from(sheet.hp),
-            armor: sheet.armor,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: sheet.name.clone(),
-            level: sheet.level,
-            mob_id: "orc".into(),
-            entity: None,
-            damage: sheet.damage,
-            swing_s: sheet.swing_s,
-            swing_cd: sheet.swing_s,
-            reach_m: sheet.reach_m,
-            home_x: player_x + fx * 1.5,
-            home_z: player_z + fz * 1.5,
-            aggro: crate::combat::Aggro::default(),
-            state: crate::combat::types::HostileState::Idle,
-        });
+        combat.add_hostile(WorldHostile::from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "orc",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+        ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Orc;
@@ -687,30 +679,15 @@ impl CombatLayer {
         let sheet = yeti_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile {
-            idx: 0,
-            x: player_x + fx * 1.5,
-            z: player_z + fz * 1.5,
-            hp: f64::from(sheet.hp),
-            max_hp: f64::from(sheet.hp),
-            armor: sheet.armor,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: sheet.name.clone(),
-            level: sheet.level,
-            mob_id: "yeti".into(),
-            entity: None,
-            damage: sheet.damage,
-            swing_s: sheet.swing_s,
-            swing_cd: sheet.swing_s,
-            reach_m: sheet.reach_m,
-            home_x: player_x + fx * 1.5,
-            home_z: player_z + fz * 1.5,
-            aggro: crate::combat::Aggro::default(),
-            state: crate::combat::types::HostileState::Idle,
-        });
+        combat.add_hostile(WorldHostile::from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "yeti",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+        ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Yeti;
@@ -752,30 +729,15 @@ impl CombatLayer {
         let sheet = demon_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile {
-            idx: 0,
-            x: player_x + fx * 1.5,
-            z: player_z + fz * 1.5,
-            hp: f64::from(sheet.hp),
-            max_hp: f64::from(sheet.hp),
-            armor: sheet.armor,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: sheet.name.clone(),
-            level: sheet.level,
-            mob_id: "demon".into(),
-            entity: None,
-            damage: sheet.damage,
-            swing_s: sheet.swing_s,
-            swing_cd: sheet.swing_s,
-            reach_m: sheet.reach_m,
-            home_x: player_x + fx * 1.5,
-            home_z: player_z + fz * 1.5,
-            aggro: crate::combat::Aggro::default(),
-            state: crate::combat::types::HostileState::Idle,
-        });
+        combat.add_hostile(WorldHostile::from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "demon",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+        ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Demon;
@@ -817,30 +779,15 @@ impl CombatLayer {
         let sheet = blue_demon_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile {
-            idx: 0,
-            x: player_x + fx * 1.5,
-            z: player_z + fz * 1.5,
-            hp: f64::from(sheet.hp),
-            max_hp: f64::from(sheet.hp),
-            armor: sheet.armor,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: sheet.name.clone(),
-            level: sheet.level,
-            mob_id: "blue_demon".into(),
-            entity: None,
-            damage: sheet.damage,
-            swing_s: sheet.swing_s,
-            swing_cd: sheet.swing_s,
-            reach_m: sheet.reach_m,
-            home_x: player_x + fx * 1.5,
-            home_z: player_z + fz * 1.5,
-            aggro: crate::combat::Aggro::default(),
-            state: crate::combat::types::HostileState::Idle,
-        });
+        combat.add_hostile(WorldHostile::from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "blue_demon",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+        ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::BlueDemon;
@@ -882,30 +829,15 @@ impl CombatLayer {
         let sheet = tribal_veteran_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile {
-            idx: 0,
-            x: player_x + fx * 1.5,
-            z: player_z + fz * 1.5,
-            hp: f64::from(sheet.hp),
-            max_hp: f64::from(sheet.hp),
-            armor: sheet.armor,
-            alive: true,
-            stun_s: 0.0,
-            slow_s: 0.0,
-            root_s: 0.0,
-            name: sheet.name.clone(),
-            level: sheet.level,
-            mob_id: "tribal_veteran".into(),
-            entity: None,
-            damage: sheet.damage,
-            swing_s: sheet.swing_s,
-            swing_cd: sheet.swing_s,
-            reach_m: sheet.reach_m,
-            home_x: player_x + fx * 1.5,
-            home_z: player_z + fz * 1.5,
-            aggro: crate::combat::Aggro::default(),
-            state: crate::combat::types::HostileState::Idle,
-        });
+        combat.add_hostile(WorldHostile::from_sheet(
+            0,
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+            &sheet,
+            "tribal_veteran",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
+        ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::TribalVeteran;
@@ -1084,9 +1016,9 @@ impl CombatLayer {
                     .hostiles()
                     .iter()
                     .find(|h| h.idx == id)
-                    .map(|h| (h.name.clone(), h.hp, h.root_s, h.slow_s))
+                    .map(|h| (h.name.clone(), h.hp(), h.root_s, h.slow_s))
             });
-            let player_hp = combat.player().resources.hp;
+            let player_hp = combat.player().resources.hp();
             let ward = combat.ward_value();
             let step = combat.step_fixed(player_x, player_z, facing_x, facing_z);
             log_finished_cast(combat, pending_cast, lock_id, lock_hp, player_hp, ward);
@@ -1113,7 +1045,7 @@ impl CombatLayer {
                 ));
             }
             if let Some((prev_hp, hit)) = step.incoming {
-                self.latch_incoming_chunk(prev_hp, combat.player().resources.hp_max);
+                self.latch_incoming_chunk(prev_hp, combat.player().resources.hp_max());
                 self.pending_sfx.push(CombatSfx::Hurt);
                 combat
                     .log_mut()
@@ -1169,7 +1101,7 @@ impl CombatLayer {
             }
             tele.remove(&event.attacker_idx);
             let hit = event.hit.expect("special hit present after is_none check");
-            self.latch_incoming_chunk(event.previous_player_hp, combat.player().resources.hp_max);
+            self.latch_incoming_chunk(event.previous_player_hp, combat.player().resources.hp_max());
             self.pending_sfx.push(CombatSfx::Hurt);
             combat
                 .log_mut()
@@ -1191,7 +1123,7 @@ impl CombatLayer {
                 EngineError::Model("replay_melee: lock not in hostiles".into())
             );
         };
-        let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
+        let _spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
             panic!(
                 "{}",
                 EngineError::Model(format!("replay_melee: no mesh spec for '{}'", h.mob_id))
@@ -1206,10 +1138,10 @@ impl CombatLayer {
                     EngineError::Model("replay_melee: locked mesh has no entity".into())
                 )
             });
-        if let Err(err) = world.play_animation(id, spec.anim_melee) {
+        if let Err(err) = world.play_animation_action(id, AnimationAction::Attack) {
             panic!(
                 "{}",
-                EngineError::Model(format!("melee clip '{}' failed: {err}", spec.anim_melee))
+                EngineError::Model(format!("melee action failed for '{}': {err}", h.mob_id))
             );
         }
         if let Err(err) = world.set_animation_speed(id, 1.0) {
@@ -1237,7 +1169,7 @@ impl CombatLayer {
                 EngineError::Model(format!("replay_weapon: no mesh spec for '{}'", h.mob_id))
             )
         });
-        let clip = spec.anim_weapon.unwrap_or_else(|| {
+        let _clip = spec.anim_weapon.unwrap_or_else(|| {
             panic!(
                 "{}",
                 EngineError::Model(format!("replay_weapon: '{}' has no anim_weapon", h.mob_id))
@@ -1252,10 +1184,10 @@ impl CombatLayer {
                     EngineError::Model("replay_weapon: locked mesh has no entity".into())
                 )
             });
-        if let Err(err) = world.play_animation(id, clip) {
+        if let Err(err) = world.play_animation_action(id, AnimationAction::Cast) {
             panic!(
                 "{}",
-                EngineError::Model(format!("weapon clip '{clip}' failed: {err}"))
+                EngineError::Model(format!("weapon action failed for '{}': {err}", h.mob_id))
             );
         }
         if let Err(err) = world.set_animation_speed(id, 1.0) {
@@ -1319,6 +1251,16 @@ impl CombatLayer {
             };
             let render = world.to_render(GlobalPosition::at(h.x, anchor.pos.y, h.z))?;
             let place = Place::at(render.x, render.y, render.z)?.yaw_deg(anchor.yaw)?;
+            let locomotion = match h.state {
+                crate::combat::types::HostileState::Pursuing => Locomotion::Moving {
+                    speed_mps: WALK_MPS as f32,
+                },
+                crate::combat::types::HostileState::Leashing => Locomotion::Moving {
+                    speed_mps: WALK_MPS as f32,
+                },
+                _ => Locomotion::Idle,
+            };
+            world.set_locomotion(id, locomotion)?;
             world.set_place(id, place).map_err(|err| {
                 EngineError::Model(format!(
                     "hostile transform sync failed for {}: {err}",
@@ -1330,7 +1272,7 @@ impl CombatLayer {
     }
     fn play_death_poses(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
         for h in combat.hostiles() {
-            if h.alive {
+            if h.is_alive() {
                 continue;
             }
             let Some(id) = h
@@ -1348,12 +1290,14 @@ impl CombatLayer {
                     h.mob_id
                 )));
             };
-            let Some(clip) = spec.anim_death else {
+            let Some(_clip) = spec.anim_death else {
                 continue;
             };
             world
-                .play_animation_once(id, clip)
-                .map_err(|err| EngineError::Model(format!("death clip '{clip}' failed: {err}")))?;
+                .play_animation_action(id, AnimationAction::Death)
+                .map_err(|err| {
+                    EngineError::Model(format!("death action failed for '{}': {err}", h.mob_id))
+                })?;
             world
                 .set_animation_speed(id, 1.0)
                 .map_err(|err| EngineError::Model(format!("death clip speed failed: {err}")))?;
@@ -1380,7 +1324,11 @@ impl CombatLayer {
         let Some(lock) = want else {
             return Ok(());
         };
-        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock && h.alive) else {
+        let Some(h) = combat
+            .hostiles()
+            .iter()
+            .find(|h| h.idx == lock && h.is_alive())
+        else {
             return Ok(());
         };
         let (x, z) = self
@@ -1612,7 +1560,7 @@ fn log_finished_cast(
                 if let Some(h) =
                     lock_id.and_then(|id| combat.hostiles().iter().find(|h| h.idx == id))
                 {
-                    let dealt = (hp0 - h.hp).round() as i32;
+                    let dealt = (hp0 - h.hp()).round() as i32;
                     if dealt > 0 {
                         let verb = match kind {
                             "aimed" => "Aimed Shot",
@@ -1639,7 +1587,7 @@ fn log_finished_cast(
             }
         }
         "mend" => {
-            let heal = (combat.player().resources.hp - player_hp).round() as i32;
+            let heal = (combat.player().resources.hp() - player_hp).round() as i32;
             if heal > 0 {
                 combat.log_mut().push(format!("You Mend for {heal}"));
             }
@@ -1754,30 +1702,7 @@ fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
 }
 
 fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) -> WorldHostile {
-    WorldHostile {
-        idx,
-        x,
-        z,
-        hp: f64::from(sheet.hp),
-        max_hp: f64::from(sheet.hp),
-        armor: sheet.armor,
-        alive: true,
-        stun_s: 0.0,
-        slow_s: 0.0,
-        root_s: 0.0,
-        name: sheet.name.clone(),
-        level: sheet.level,
-        mob_id: mob_id.into(),
-        entity: None,
-        damage: sheet.damage,
-        swing_s: sheet.swing_s,
-        swing_cd: sheet.swing_s,
-        reach_m: sheet.reach_m,
-        home_x: x,
-        home_z: z,
-        aggro: crate::combat::Aggro::default(),
-        state: crate::combat::types::HostileState::Idle,
-    }
+    WorldHostile::from_sheet(idx, x, z, sheet, mob_id, x, z)
 }
 
 pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
@@ -1892,7 +1817,7 @@ mod tests {
         assert!((h.x - 1.5).abs() < 1e-9);
         assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
         assert!((h.reach_m - 2.0).abs() < 1e-9);
-        assert_eq!(h.max_hp, 130.0);
+        assert_eq!(h.max_hp(), 130.0);
         assert!(layer.wants_orc());
         assert!(layer.fixture_ready());
     }
@@ -1909,7 +1834,7 @@ mod tests {
         assert!((h.x - 1.5).abs() < 1e-9);
         assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
         assert!((h.reach_m - 2.2).abs() < 1e-9);
-        assert_eq!(h.max_hp, 220.0);
+        assert_eq!(h.max_hp(), 220.0);
         assert_eq!(h.damage, 16);
         assert!(layer.wants_demon());
         assert!(layer.fixture_ready());
@@ -1927,7 +1852,7 @@ mod tests {
         assert!((h.x - 1.5).abs() < 1e-9);
         assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
         assert!((h.reach_m - 2.0).abs() < 1e-9);
-        assert_eq!(h.max_hp, 155.0);
+        assert_eq!(h.max_hp(), 155.0);
         assert_eq!(h.damage, 12);
         assert!(layer.wants_bluedemon());
         assert!(layer.fixture_ready());
@@ -1946,7 +1871,7 @@ mod tests {
         assert!((h.x - 1.5).abs() < 1e-9);
         assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
         assert!((h.reach_m - 1.6).abs() < 1e-9);
-        assert_eq!(h.max_hp, 210.0);
+        assert_eq!(h.max_hp(), 210.0);
         assert_eq!(h.damage, 22);
         assert!(layer.wants_tribal_veteran());
         assert!(layer.fixture_ready());
@@ -1965,7 +1890,7 @@ mod tests {
         assert!((h.x - 1.5).abs() < 1e-9);
         assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
         assert!((h.reach_m - 2.2).abs() < 1e-9);
-        assert_eq!(h.max_hp, 240.0);
+        assert_eq!(h.max_hp(), 240.0);
         assert!(layer.wants_yeti());
         assert!(layer.fixture_ready());
     }
@@ -2037,11 +1962,11 @@ mod tests {
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
         combat.set_lock(Some(0));
         assert_eq!(combat.player().stats.ranks.arcane, 0);
-        let mana_before = combat.player().resources.mana;
+        let mana_before = combat.player().resources.mana();
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
         assert!(combat.ember_is_started());
         assert_eq!(combat.player().stats.ranks.arcane, 0);
-        assert!(combat.player().resources.mana < mana_before);
+        assert!(combat.player().resources.mana() < mana_before);
     }
 
     #[test]
@@ -2062,7 +1987,7 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         combat.set_player_hp(50.0);
         assert!(combat.press_verb(crate::combat::CombatVerb::Potion, 0.0, 0.0, 1.0, 0.0));
-        assert_eq!(combat.player().resources.hp, 90.0);
+        assert_eq!(combat.player().resources.hp(), 90.0);
         assert_eq!(combat.player().potions, 0);
         assert_eq!(combat.last_potion_heal(), 40);
     }
@@ -2156,7 +2081,7 @@ mod tests {
         combat
             .hostiles_mut()
             .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "skeleton_mage"));
-        let hp0 = combat.player().resources.hp;
+        let hp0 = combat.player().resources.hp();
         let mut layer = CombatLayer::install();
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
         assert!(
@@ -2168,12 +2093,12 @@ mod tests {
             Some("Spellcast_Shoot"),
             "Spellcast_Shoot queued"
         );
-        assert_eq!(combat.player().resources.hp, hp0);
+        assert_eq!(combat.player().resources.hp(), hp0);
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
         let want = mitigation(f64::from(MAGE_BOLT_DMG), combat.player().stats.attrs.grit);
         let skull = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
         assert_ne!(want, skull, "mage bolt 15 is not skull bolt 14");
-        assert_eq!(combat.player().resources.hp, hp0 - f64::from(want));
+        assert_eq!(combat.player().resources.hp(), hp0 - f64::from(want));
     }
 
     #[test]
@@ -2217,7 +2142,7 @@ mod tests {
         combat
             .hostiles_mut()
             .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "orc_skull"));
-        let hp0 = combat.player().resources.hp;
+        let hp0 = combat.player().resources.hp();
         let mut layer = CombatLayer::install();
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
         assert!(
@@ -2229,10 +2154,10 @@ mod tests {
             Some("Weapon"),
             "Weapon queued"
         );
-        assert_eq!(combat.player().resources.hp, hp0);
+        assert_eq!(combat.player().resources.hp(), hp0);
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
         let want = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
-        assert_eq!(combat.player().resources.hp, hp0 - f64::from(want));
+        assert_eq!(combat.player().resources.hp(), hp0 - f64::from(want));
         let lines: Vec<_> = combat.log_lines();
         assert!(
             lines.iter().any(|l| l.contains(" hits you for ")),

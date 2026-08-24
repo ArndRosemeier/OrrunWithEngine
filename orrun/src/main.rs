@@ -1887,13 +1887,13 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     // Player HP / mana + attack pip stay in this same world_hud popup.
                     let combat = session.combat();
                     let res = &combat.player().resources;
-                    let hp_frac = if res.hp_max > 0.0 {
-                        (res.hp / res.hp_max).clamp(0.0, 1.0) as f32
+                    let hp_frac = if res.hp_max() > 0.0 {
+                        (res.hp() / res.hp_max()).clamp(0.0, 1.0) as f32
                     } else {
                         0.0
                     };
-                    let mana_frac = if res.mana_max > 0.0 {
-                        (res.mana / res.mana_max).clamp(0.0, 1.0) as f32
+                    let mana_frac = if res.mana_max() > 0.0 {
+                        (res.mana() / res.mana_max()).clamp(0.0, 1.0) as f32
                     } else {
                         0.0
                     };
