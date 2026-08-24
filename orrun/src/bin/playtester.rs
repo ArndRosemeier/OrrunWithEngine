@@ -2149,10 +2149,10 @@ impl Driver {
         let Some(h) = self
             .session
             .combat()
-            .hostiles
+            .hostiles()
             .iter()
             .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
-            .or_else(|| self.session.combat().hostiles.first())
+            .or_else(|| self.session.combat().hostiles().first())
         else {
             return;
         };
@@ -2185,10 +2185,10 @@ impl Driver {
         let Some(h) = self
             .session
             .combat()
-            .hostiles
+            .hostiles()
             .iter()
             .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
-            .or_else(|| self.session.combat().hostiles.first())
+            .or_else(|| self.session.combat().hostiles().first())
         else {
             return false;
         };
@@ -2219,10 +2219,10 @@ impl Driver {
         let Some(h) = self
             .session
             .combat()
-            .hostiles
+            .hostiles()
             .iter()
             .find(|h| lock.map(|id| h.idx == id).unwrap_or(false))
-            .or_else(|| self.session.combat().hostiles.first())
+            .or_else(|| self.session.combat().hostiles().first())
         else {
             return;
         };
@@ -2252,7 +2252,7 @@ impl Driver {
         let Some(pos) = self.session.player_position() else {
             return false;
         };
-        let Some(h) = self.session.combat().hostiles.first() else {
+        let Some(h) = self.session.combat().hostiles().first() else {
             return false;
         };
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
@@ -2456,13 +2456,13 @@ impl Driver {
             }
             let lock = self.session.lock_id();
             let combat = self.session.combat_mut();
-            for h in &mut combat.hostiles {
+            for h in combat.hostiles_mut() {
                 if Some(h.idx) == lock {
                     h.hp = 0.0;
                     h.alive = false;
                 }
             }
-            combat.lock = None;
+            combat.set_lock(None);
             self.combat_death_killed = true;
             return;
         }
@@ -2493,7 +2493,7 @@ impl Driver {
         let corpse = self
             .session
             .combat()
-            .hostiles
+            .hostiles()
             .iter()
             .find(|h| !h.alive)
             .map(|h| (h.name.clone(), h.alive, h.hp));
@@ -2522,7 +2522,7 @@ impl Driver {
     }
 
     fn loot_corpse_ready(&self, world: &World) -> bool {
-        self.session.combat().hostiles.iter().any(|h| !h.alive)
+        self.session.combat().hostiles().iter().any(|h| !h.alive)
             && self.session.sparkle_visible(world)
     }
 
@@ -2631,13 +2631,13 @@ impl Driver {
             let lock = self.session.lock_id();
             {
                 let combat = self.session.combat_mut();
-                for h in &mut combat.hostiles {
+                for h in combat.hostiles_mut() {
                     if Some(h.idx) == lock {
                         h.hp = 0.0;
                         h.alive = false;
                     }
                 }
-                combat.lock = None;
+                combat.set_lock(None);
             }
             if let Some(idx) = lock {
                 self.session.force_visible_loot(idx);
@@ -2858,8 +2858,12 @@ impl Driver {
         }
         if self.current_hook() == Some("con_hard") {
             let combat = self.session.combat();
-            let player_level = combat.player.stats.level;
-            let Some(h) = combat.hostiles.iter().find(|h| Some(h.idx) == combat.lock) else {
+            let player_level = combat.player().stats.level;
+            let Some(h) = combat
+                .hostiles()
+                .iter()
+                .find(|h| Some(h.idx) == combat.lock_id())
+            else {
                 self.fail_current("con_hard: locked yeti missing");
                 self.advance_after_fail(world, frame);
                 return;
@@ -3308,11 +3312,11 @@ impl Driver {
             return;
         };
         let combat = self.session.combat();
-        let player_level = combat.player.stats.level;
+        let player_level = combat.player().stats.level;
         let Some(h) = combat
-            .hostiles
+            .hostiles()
             .iter()
-            .find(|h| Some(h.idx) == combat.lock && h.alive)
+            .find(|h| Some(h.idx) == combat.lock_id() && h.alive)
         else {
             self.fail_current("con: locked hostile missing");
             self.advance_after_fail(world, frame);
@@ -3420,8 +3424,8 @@ impl Driver {
                 facing.x as f64,
                 facing.z as f64,
             );
-            let t = self.session.combat().cast_t;
-            let kind = self.session.combat().cast_kind;
+            let t = self.session.combat().cast_time();
+            let kind = self.session.combat().cast_kind();
             if !started || kind != Some("ember") || t <= 0.0 {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                     self.fail_current(&format!(
@@ -3437,8 +3441,8 @@ impl Driver {
         if self.combat_cast_bar_sent {
             return;
         }
-        let t = self.session.combat().cast_t;
-        let kind = self.session.combat().cast_kind;
+        let t = self.session.combat().cast_time();
+        let kind = self.session.combat().cast_kind();
         if kind != Some("ember") || t <= 0.0 {
             self.fail_current(&format!(
                 "cast_bar: Ember finished before mid-cast shot (kind={kind:?} t={t})"
@@ -3576,7 +3580,7 @@ impl Driver {
                     }
                     // Hold the toast through the next paint+capture. Do not
                     // queue this frame: HUD already painted without the tell.
-                    self.session.combat_mut().fail_tell_s = 1.2;
+                    self.session.combat_mut().set_fail_tell_timer(1.2);
                     self.combat_fail_armed = true;
                     return;
                 }
@@ -3593,7 +3597,7 @@ impl Driver {
                         "hud_shot": "hud.png",
                     }),
                 );
-                self.session.combat_mut().fail_tell_s = 1.2;
+                self.session.combat_mut().set_fail_tell_timer(1.2);
                 self.combat_fail_sent = true;
                 world.mark_ready();
                 self.queue_shot(world, frame, "hud");
@@ -3790,7 +3794,7 @@ impl Driver {
         let hp_max = self
             .session
             .combat()
-            .hostiles
+            .hostiles()
             .iter()
             .find(|h| Some(h.idx) == self.session.lock_id())
             .map(|h| h.max_hp)
@@ -4077,7 +4081,7 @@ impl Driver {
                 self.controls_stage,
                 self.session.lock_id(),
                 self.session.first_auto_hit(),
-                self.session.combat().strike_armed
+                self.session.combat().strike_is_armed()
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -4089,7 +4093,7 @@ impl Driver {
                 }
             }
             ControlsStage::Strike => {
-                if !self.session.combat().strike_armed {
+                if !self.session.combat().strike_is_armed() {
                     self.fail_current("controls: key 1 on L1 Martial did not arm Strike");
                     self.advance_after_fail(world, frame);
                     return;
@@ -4109,7 +4113,7 @@ impl Driver {
                 None => {}
             },
             ControlsStage::Bash => {
-                let gate = self.session.combat().last_rank_gate;
+                let gate = self.session.combat().last_rank_gate();
                 let blocked = gate
                     .map(|g| g.blocked && g.action == Action::Bash)
                     .unwrap_or(false);
@@ -4120,39 +4124,39 @@ impl Driver {
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                if self.session.combat().cast_kind == Some("bash") {
+                if self.session.combat().cast_kind() == Some("bash") {
                     self.fail_current("controls: Digit2 on L1 Martial must not fire Bash");
                     self.advance_after_fail(world, frame);
                     return;
                 }
                 // Ember is known at create. Do not pad ranks.arcane.
                 assert_eq!(
-                    self.session.combat().player.stats.ranks.arcane,
+                    self.session.combat().player().stats.ranks.arcane,
                     0,
                     "L1 Martial must keep arcane 0; Ember uses ember_rank 1.00"
                 );
                 self.controls_stage = ControlsStage::Ember;
             }
             ControlsStage::Ember => {
-                if !self.session.combat().ember_started {
+                if !self.session.combat().ember_is_started() {
                     self.fail_current(
                         "controls: L1 Martial key 5 must start Ember without padding Arcane",
                     );
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                if self.session.combat().player.stats.ranks.arcane != 0 {
+                if self.session.combat().player().stats.ranks.arcane != 0 {
                     self.fail_current("controls: Ember hook must not cheat ranks.arcane = 1");
                     self.advance_after_fail(world, frame);
                     return;
                 }
-                self.session.combat_mut().player.resources.hp = 50.0;
+                self.session.combat_mut().player_mut().resources.hp = 50.0;
                 self.controls_stage = ControlsStage::Potion;
             }
             ControlsStage::Potion => {
-                let hp = self.session.combat().player.resources.hp;
-                let potions = self.session.combat().player.potions;
-                let heal = self.session.combat().last_potion_heal;
+                let hp = self.session.combat().player().resources.hp;
+                let potions = self.session.combat().player().potions;
+                let heal = self.session.combat().last_potion_heal();
                 if (hp - 90.0).abs() > 1e-6 || potions != 0 || heal != 40 {
                     self.fail_current(&format!(
                         "controls: potion want hp 90 potions 0 heal 40, got hp {hp} potions {potions} heal {heal}"
@@ -4173,7 +4177,7 @@ impl Driver {
                 let gate = self
                     .session
                     .combat()
-                    .last_rank_gate
+                    .last_rank_gate()
                     .expect("bash rank gate");
                 if !gate.blocked || gate.action != Action::Bash || gate.have != 1 || gate.need != 3
                 {
@@ -4203,10 +4207,10 @@ impl Driver {
                             "have": gate.have,
                             "need": gate.need,
                         },
-                        "used_pin_or_bind": self.session.combat().player.used_pin_or_bind,
+                        "used_pin_or_bind": self.session.combat().player().used_pin_or_bind,
                         "strike_first_auto": 16,
                         "ember_started": true,
-                        "ember_arcane_rank": self.session.combat().player.stats.ranks.arcane,
+                        "ember_arcane_rank": self.session.combat().player().stats.ranks.arcane,
                         "potion_hp": hp,
                         "potion_heal": heal,
                         "potion_key": "R",
@@ -5021,7 +5025,7 @@ impl Driver {
             return;
         };
         let (bandit_n, gap) = {
-            let hostiles = &self.session.combat().hostiles;
+            let hostiles = self.session.combat().hostiles();
             let at_site: Vec<_> = hostiles
                 .iter()
                 .filter(|h| h.mob_id == "bandit" && h.alive)
@@ -5102,7 +5106,7 @@ impl Driver {
             if let Some(idx) = self
                 .session
                 .combat()
-                .hostiles
+                .hostiles()
                 .iter()
                 .find(|h| {
                     h.mob_id == "bandit"
@@ -5111,7 +5115,7 @@ impl Driver {
                 })
                 .map(|h| h.idx)
             {
-                self.session.combat_mut().lock = Some(idx);
+                self.session.combat_mut().set_lock(Some(idx));
             }
         }
         if self.session.lock_id().is_none() {
@@ -5339,7 +5343,7 @@ fn locomotion_name(mode: Option<Locomotion>) -> &'static str {
 fn bone_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     const STAND_M: f64 = 5.0;
     const SIDE_M: f64 = 2.2;
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.len() < 3 {
         return None;
     }
@@ -5366,7 +5370,7 @@ fn mage_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     const STAND_M: f64 = -1.2;
     const SIDE_M: f64 = 1.8;
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
@@ -5389,7 +5393,7 @@ fn mage_mesh_chest(session: &WorldSession) -> Option<Vec3> {
     const BEHIND_M: f64 = 1.6;
     const CHEST_M: f32 = 1.15;
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
@@ -5409,7 +5413,7 @@ fn wolf_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     // Stable vs player motion: back along L1 facing, then a sidestep for 3/4 body.
     const STAND_M: f64 = 7.5;
     const SIDE_M: f64 = 2.6;
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.len() < 3 {
         return None;
     }
@@ -5429,7 +5433,7 @@ fn wolf_body_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.len() < 3 {
         return None;
     }
@@ -5452,7 +5456,7 @@ fn combat_side_vantage(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn combat_oor_stand(session: &WorldSession) -> Option<GlobalXZ> {
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.len() < 3 {
         return None;
     }
@@ -5470,7 +5474,7 @@ fn combat_oor_stand(session: &WorldSession) -> Option<GlobalXZ> {
 }
 
 fn combat_melee_stand(session: &WorldSession) -> Option<GlobalXZ> {
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.len() < 3 {
         return None;
     }
@@ -5494,7 +5498,7 @@ fn demon_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     const STAND_M: f64 = 3.5;
     const SIDE_M: f64 = 4.6;
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
@@ -5515,7 +5519,7 @@ fn demon_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     const BEHIND_M: f64 = 1.6;
     const CHEST_M: f32 = 1.25;
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
@@ -5537,7 +5541,7 @@ fn demon_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
 }
 
 fn death_hold_ready(world: &World, session: &WorldSession) -> bool {
-    let Some(id) = session.combat().hostiles.iter().find_map(|h| h.entity) else {
+    let Some(id) = session.combat().hostiles().iter().find_map(|h| h.entity) else {
         return false;
     };
     for (eid, ent) in world.animated_entities() {
@@ -5559,7 +5563,7 @@ fn death_hold_ready(world: &World, session: &WorldSession) -> bool {
 fn orc_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
     const STAND_M: f64 = 5.5;
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let dx = pos.x - h.x;
     let dz = pos.z - h.z;
     let len = (dx * dx + dz * dz).sqrt();
@@ -5573,7 +5577,7 @@ fn orc_view_stand(session: &WorldSession) -> Option<GlobalXZ> {
 
 fn orc_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     let pos = session.player_position()?;
-    let h = session.combat().hostiles.first()?;
+    let h = session.combat().hostiles().first()?;
     let ground = session
         .contact_height(GlobalXZ::at(h.x, h.z))
         .unwrap_or(pos.y as f32);
@@ -5585,7 +5589,7 @@ fn orc_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
 
 fn wolf_line_look(session: &WorldSession) -> Option<(Vec3, Vec3)> {
     let pos = session.player_position()?;
-    let hs = &session.combat().hostiles;
+    let hs = session.combat().hostiles();
     if hs.is_empty() {
         return None;
     }
@@ -5609,7 +5613,7 @@ fn yaw_xz(x: f32, z: f32, yaw_deg: f32) -> (f32, f32) {
 fn wolf_near(session: &WorldSession, p: &GlobalXZ) -> f64 {
     session
         .combat()
-        .hostiles
+        .hostiles()
         .iter()
         .filter(|h| h.alive && h.mob_id != "bandit")
         .map(|h| (h.x - p.x).hypot(h.z - p.z))

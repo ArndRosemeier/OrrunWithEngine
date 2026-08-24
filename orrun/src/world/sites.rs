@@ -362,24 +362,28 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64) -> WorldHostile {
         swing_s: sheet.swing_s,
         swing_cd: sheet.swing_s,
         reach_m: sheet.reach_m,
+        home_x: x,
+        home_z: z,
+        aggro: crate::combat::Aggro::default(),
+        state: crate::combat::types::HostileState::Idle,
     }
 }
 
 pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {
-    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    let mut idx = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     for site in sites {
         for (x, z) in site.bandit_xz() {
-            combat.hostiles.push(hostile_from_sheet(idx, x, z));
+            combat.hostiles_mut().push(hostile_from_sheet(idx, x, z));
             idx += 1;
         }
     }
 }
 
 pub fn clear_overland_sites(combat: &mut WorldCombat) {
-    combat.hostiles.retain(|h| !is_bandit_id(&h.mob_id));
-    if let Some(lock) = combat.lock {
-        if !combat.hostiles.iter().any(|h| h.idx == lock) {
-            combat.lock = None;
+    combat.hostiles_mut().retain(|h| !is_bandit_id(&h.mob_id));
+    if let Some(lock) = combat.lock_id() {
+        if !combat.hostiles().iter().any(|h| h.idx == lock) {
+            combat.set_lock(None);
         }
     }
 }

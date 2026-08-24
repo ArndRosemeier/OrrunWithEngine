@@ -1,0 +1,25 @@
+---
+description: Enforce private state, dedicated accessors, and centralized functionality
+alwaysApply: true
+---
+
+# Encapsulation and Centralized Functionality
+
+- Keep struct fields and mutable state private by default. Do not expose fields publicly or use broad visibility as a convenience.
+- Expose state through one intentional accessor per value: an immutable getter for reads and, only when required, a clearly named setter or narrowly scoped mutable accessor for writes.
+- Keep invariants, state transitions, and domain operations in one authoritative owner. Callers must use that owner’s API instead of duplicating logic or mutating internals.
+- Centralize cross-cutting functionality such as combat damage, healing, death, progression, AI decisions, and lifecycle transitions; do not implement behavior separately per entity or presentation layer.
+- Prefer typed commands/events and data-driven behavior rosters when multiple behaviors are needed. Entity-specific differences belong in data/configuration, not duplicated control flow.
+- Make invalid state transitions loud and test the centralized paths directly. Do not add silent fallbacks that hide ownership or synchronization bugs.
+
+```rust
+// Good: state is private and mutation is controlled.
+struct CombatState {
+    hp: f32,
+}
+
+impl CombatState {
+    pub fn hp(&self) -> f32 { self.hp }
+    pub fn apply_damage(&mut self, amount: f32) { self.hp = (self.hp - amount).max(0.0); }
+}
+```

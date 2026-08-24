@@ -428,13 +428,13 @@ impl WorldSession {
 
     /// Soft lock id. Tab cycles; does not steal Esc or E.
     pub fn lock_id(&self) -> Option<i32> {
-        self.combat.lock
+        self.combat.lock_id()
     }
 
     /// Lock tell inspect: name + current HP. None if unlocked or name/hp unset.
     pub fn lock_name_hp(&self) -> Option<(&str, f64)> {
-        let id = self.combat.lock?;
-        let h = self.combat.hostiles.iter().find(|h| h.idx == id)?;
+        let id = self.combat.lock_id()?;
+        let h = self.combat.hostiles().iter().find(|h| h.idx == id)?;
         if h.name.is_empty() {
             return None;
         }
@@ -525,7 +525,7 @@ impl WorldSession {
     }
 
     pub fn force_visible_loot(&mut self, idx: i32) {
-        if let Some(h) = self.combat.hostiles.iter().find(|h| h.idx == idx) {
+        if let Some(h) = self.combat.hostiles().iter().find(|h| h.idx == idx) {
             let site = self.loot_site_for(h.x, h.z);
             let pile = crate::loot::force_visible_pile(&h.mob_id, h.idx, site);
             self.ground_loot.retain(|p| p.hostile_idx != idx);
@@ -549,7 +549,7 @@ impl WorldSession {
             .collect();
         let pairs: Vec<(i32, f64, f64)> = self
             .combat
-            .hostiles
+            .hostiles()
             .iter()
             .filter(|h| !h.alive && sparkle_ids.contains(&h.idx))
             .map(|h| (h.idx, h.x, h.z))
@@ -588,16 +588,13 @@ impl WorldSession {
             f64,
             Option<crate::loot::GroundPile>,
         )> = Vec::new();
-        for h in &self.combat.hostiles {
+        for h in self.combat.hostiles() {
             if h.alive {
                 continue;
             }
             let Some(entity) = h.entity else {
                 continue;
             };
-            if !self.combat_layer.is_death_posed(entity) {
-                continue;
-            }
             let y = self
                 .contact_height(GlobalXZ::at(h.x, h.z))
                 .map(|g| (g + FOOT_CLEARANCE_M) as f64)
@@ -638,19 +635,19 @@ impl WorldSession {
     }
 
     pub fn player_hp(&self) -> f64 {
-        self.combat.player.resources.hp
+        self.combat.player().resources.hp
     }
 
     pub fn player_hp_max(&self) -> f64 {
-        self.combat.player.resources.hp_max
+        self.combat.player().resources.hp_max
     }
 
     pub fn player_mana(&self) -> f64 {
-        self.combat.player.resources.mana
+        self.combat.player().resources.mana
     }
 
     pub fn player_mana_max(&self) -> f64 {
-        self.combat.player.resources.mana_max
+        self.combat.player().resources.mana_max
     }
 
     /// Player HP/mana bars are always drawn in world_hud.
@@ -686,25 +683,25 @@ impl WorldSession {
 
     pub fn slain_line(&self) -> Option<String> {
         self.combat
-            .slain_by
+            .slain_by()
             .as_ref()
             .map(|n| format!("slain by {n}"))
     }
 
     pub fn swings_stopped(&self) -> bool {
-        self.combat.dead
+        self.combat.is_dead()
     }
 
     pub fn is_shaken(&self) -> bool {
         self.combat
-            .player
+            .player()
             .shaken
             .as_ref()
             .is_some_and(|s| s.remaining_s > 0.0)
     }
 
     pub fn combat_log(&self) -> Vec<String> {
-        self.combat.log.lines().map(str::to_string).collect()
+        self.combat.log_lines()
     }
 
     pub fn fail_tell(&self) -> Option<&'static str> {
@@ -744,7 +741,7 @@ impl WorldSession {
             }
         }
         self.combat.finish_death_respawn();
-        self.combat.hostiles.clear();
+        self.combat.clear_hostiles();
         self.combat_layer.despawn_meshes(world);
     }
 
@@ -767,7 +764,7 @@ impl WorldSession {
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
         self.roster_pins_seated = false;
-        self.combat.player.shaken = None;
+        self.combat.player_mut().shaken = None;
         self.combat_layer.skip_roster_pins();
         self.dungeon_skulls_for = None;
         if let Some(spawn) = self.spawn {
@@ -786,8 +783,8 @@ impl WorldSession {
         self.combat_layer.despawn_meshes(world);
         self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
-        self.combat.hostiles.clear();
-        self.combat.lock = None;
+        self.combat.clear_hostiles();
+        self.combat.set_lock(None);
         self.overland_sites.clear();
         self.roster_pins_seated = false;
         self.combat_layer.allow_roster_pins();
@@ -841,14 +838,14 @@ impl WorldSession {
         self.begin_fixture_rearm(world);
         self.combat_layer.request_bones_fixture();
         self.combat_layer.rearm();
-        self.combat.lock = None;
+        self.combat.set_lock(None);
     }
 
     pub fn rearm_mage_fixture(&mut self, world: &mut World) {
         self.begin_fixture_rearm(world);
         self.combat_layer.request_mage_fixture();
         self.combat_layer.rearm();
-        self.combat.lock = None;
+        self.combat.set_lock(None);
     }
 
     pub fn key_binds(&self) -> &KeyBinds {
@@ -860,18 +857,18 @@ impl WorldSession {
     }
 
     pub fn apply_save(&mut self, stand: &crate::save::SavedStand) {
-        self.combat.player.stats.level = stand.level;
-        self.combat.player.xp = stand.xp;
-        self.combat.player.resources.hp = stand.hp;
-        self.combat.player.resources.mana = stand.mana;
-        self.combat.player.stats.attrs = stand.attrs;
-        self.combat.player.stats.ranks = stand.ranks;
+        self.combat.player_mut().stats.level = stand.level;
+        self.combat.player_mut().xp = stand.xp;
+        self.combat.player_mut().resources.hp = stand.hp;
+        self.combat.player_mut().resources.mana = stand.mana;
+        self.combat.player_mut().stats.attrs = stand.attrs;
+        self.combat.player_mut().stats.ranks = stand.ranks;
         if stand.shaken_until > 0.0 {
-            self.combat.player.shaken = Some(crate::combat::Shaken {
+            self.combat.player_mut().shaken = Some(crate::combat::Shaken {
                 remaining_s: stand.shaken_until,
             });
         } else {
-            self.combat.player.shaken = None;
+            self.combat.player_mut().shaken = None;
         }
         self.last_shrine = stand.last_shrine.map(|s| s.to_place());
         self.inventory = stand.inventory;
@@ -879,7 +876,7 @@ impl WorldSession {
 
     pub fn saved_full(&self, seed: i32, size: usize) -> Option<crate::save::SavedStand> {
         let (at, heading) = self.saved_stand()?;
-        let p = &self.combat.player;
+        let p = self.combat.player();
         let mut stand = crate::save::SavedStand::new(seed, size, at, heading);
         stand.level = p.stats.level;
         stand.xp = p.xp;
@@ -1275,9 +1272,18 @@ impl WorldSession {
         self.player = None;
         self.entering = Some(request);
         self.overworld = None;
-        // Bodies died with the stream. Keep planned sites + bandit XZ.
+        // Travel destroys the rendered world and starts a new encounter context.
+        // Do not retain the old fixture latch or hostile roster: that would skip
+        // destination seating and leave the new bodies without combat anchors.
         self.site_prop_ids.clear();
         self.combat_layer.forget_meshes();
+        self.combat_layer.allow_roster_pins();
+        self.combat_layer.rearm();
+        self.combat.clear_hostiles();
+        self.combat.set_lock(None);
+        self.overland_sites.clear();
+        self.roster_pins_seated = false;
+        self.dungeon_skulls_for = None;
         self.forget_ground_loot();
         let travel = self.travel.as_mut().expect("travel");
         travel.handed_off = true;
@@ -1661,7 +1667,7 @@ impl WorldSession {
     ) -> Result<(), SessionError> {
         let feet: Vec<f64> = self
             .combat
-            .hostiles
+            .hostiles()
             .iter()
             .map(|h| self.hostile_feet_y(world, player, h))
             .collect();
@@ -1751,9 +1757,9 @@ impl WorldSession {
         let want = self.overland_sites.len() * 2;
         let have = self
             .combat
-            .hostiles
+            .hostiles()
             .iter()
-            .filter(|h| super::sites::is_bandit_id(&h.mob_id) && h.alive)
+            .filter(|h| super::sites::is_bandit_id(&h.mob_id))
             .count();
         if have < want {
             super::sites::clear_overland_sites(&mut self.combat);
@@ -1849,7 +1855,7 @@ impl WorldSession {
                 }
                 let feet: Vec<f64> = self
                     .combat
-                    .hostiles
+                    .hostiles()
                     .iter()
                     .map(|h| {
                         self.contact_height(GlobalXZ::at(h.x, h.z))
@@ -1963,7 +1969,7 @@ impl WorldSession {
             let py = player.position.y;
             let feet: Vec<(f64, f64, f64)> = self
                 .combat
-                .hostiles
+                .hostiles()
                 .iter()
                 .map(|h| {
                     let y = self
@@ -1984,11 +1990,13 @@ impl WorldSession {
                     .unwrap_or(py)
             };
             self.combat_layer
+                .sync_hostile_transforms(world, &self.combat)?;
+            self.combat_layer
                 .present(world, &self.combat, ground_y, input.dt)?;
             self.sync_ground_loot(world)?;
-            if self.combat.dead
-                && self.combat.player.resources.hp <= 0.0
-                && self.combat.slain_hold_s <= 0.0
+            if self.combat.is_dead()
+                && self.combat.player().resources.hp <= 0.0
+                && self.combat.slain_hold_s() <= 0.0
             {
                 self.resolve_death(world);
             }

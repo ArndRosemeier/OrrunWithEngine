@@ -8,16 +8,13 @@
 //! There is no spider in the fauna catalog; do not route these through FaunaLayer.
 
 use crate::combat::catalog::mesh_spec;
-use crate::combat::math::{
-    mitigation, MAGE_BOLT_DMG, MAGE_BOLT_RANGE_M, MAGE_TELE_S, SKULL_BOLT_DMG, SKULL_BOLT_RANGE_M,
-    SKULL_TELE_S, TICK, WALK_MPS,
-};
+use crate::combat::math::{MAGE_TELE_S, SKULL_TELE_S, WALK_MPS};
 use crate::combat::sheets::{
     blue_demon_sheet, demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet,
     skeleton_minion_sheet, skeleton_warrior_sheet, tribal_veteran_sheet, wolf_sheet, yeti_sheet,
     MobSheet,
 };
-use crate::combat::types::{WorldCombat, WorldHostile};
+use crate::combat::types::{SpecialAttackCue, SpecialAttackEvent, WorldCombat, WorldHostile};
 use crate::combat::Discipline;
 use engine::anim::AnimatedModel;
 use engine::color::Color;
@@ -103,7 +100,6 @@ struct Flinch {
 
 /// Live hostiles + 0.1 s combat clock in front of the player.
 pub struct CombatLayer {
-    accum_s: f64,
     fixture: bool,
     skip_roster_pins: bool,
     first_auto: Option<i32>,
@@ -136,7 +132,6 @@ pub struct CombatLayer {
 impl CombatLayer {
     pub fn install() -> Self {
         Self {
-            accum_s: 0.0,
             fixture: false,
             skip_roster_pins: false,
             first_auto: None,
@@ -382,18 +377,19 @@ impl CombatLayer {
     }
 
     pub fn log_potion(&self, combat: &mut WorldCombat) {
-        let heal = combat.last_potion_heal;
-        combat.log.push(format!("You drink a potion for {heal}"));
+        let heal = combat.last_potion_heal();
+        combat
+            .log_mut()
+            .push(format!("You drink a potion for {heal}"));
     }
 
     pub fn log_ward(&self, combat: &mut WorldCombat) {
-        combat.log.push("You Ward");
+        combat.log_mut().push("You Ward");
     }
 
     pub fn rearm(&mut self) {
         self.fixture = false;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -468,7 +464,7 @@ impl CombatLayer {
         player_yaw_deg: f32,
     ) -> EngineResult<()> {
         self.despawn_meshes(world);
-        for h in &mut combat.hostiles {
+        for h in combat.hostiles_mut() {
             h.entity = None;
         }
         let yaw = player_yaw_deg + 180.0;
@@ -479,7 +475,7 @@ impl CombatLayer {
         let az = away.cos() as f64;
         const WOLF_MESH_BEHIND_M: f64 = 2.55;
         const ORC_MESH_BEHIND_M: f64 = 1.6;
-        for (i, h) in combat.hostiles.iter_mut().enumerate() {
+        for (i, h) in combat.hostiles_mut().iter_mut().enumerate() {
             let result = (|| -> EngineResult<()> {
                 let spec = mesh_spec(&h.mob_id).ok_or_else(|| {
                     EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
@@ -508,7 +504,7 @@ impl CombatLayer {
                 self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
                 Ok(())
             })();
-            let _ = result;
+            result?;
         }
         Ok(())
     }
@@ -556,10 +552,8 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = wolf_sheet(1);
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
         // First at 1.5 m so wolf reach (1.8 m) connects. The other two sit
         // beside it (strafe, metres not centimetres) so Tab can pick one mesh.
         let (sx, sz) = (-fz, fx);
@@ -570,7 +564,7 @@ impl CombatLayer {
                 2 => STRAFE_M,
                 _ => 0.0,
             };
-            combat.hostiles.push(WorldHostile {
+            combat.add_hostile(WorldHostile {
                 idx: i,
                 x: player_x + fx * dist + sx * strafe,
                 z: player_z + fz * dist + sz * strafe,
@@ -589,26 +583,16 @@ impl CombatLayer {
                 swing_s: sheet.swing_s,
                 swing_cd: sheet.swing_s,
                 reach_m: sheet.reach_m,
+                home_x: player_x + fx * 1.5,
+                home_z: player_z + fz * 1.5,
+                aggro: crate::combat::Aggro::default(),
+                state: crate::combat::types::HostileState::Idle,
             });
         }
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -636,11 +620,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = orc_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(WorldHostile {
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(WorldHostile {
             idx: 0,
             x: player_x + fx * 1.5,
             z: player_z + fz * 1.5,
@@ -659,26 +641,16 @@ impl CombatLayer {
             swing_s: sheet.swing_s,
             swing_cd: sheet.swing_s,
             reach_m: sheet.reach_m,
+            home_x: player_x + fx * 1.5,
+            home_z: player_z + fz * 1.5,
+            aggro: crate::combat::Aggro::default(),
+            state: crate::combat::types::HostileState::Idle,
         });
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Orc;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -713,11 +685,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = yeti_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(WorldHostile {
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(WorldHostile {
             idx: 0,
             x: player_x + fx * 1.5,
             z: player_z + fz * 1.5,
@@ -736,26 +706,16 @@ impl CombatLayer {
             swing_s: sheet.swing_s,
             swing_cd: sheet.swing_s,
             reach_m: sheet.reach_m,
+            home_x: player_x + fx * 1.5,
+            home_z: player_z + fz * 1.5,
+            aggro: crate::combat::Aggro::default(),
+            state: crate::combat::types::HostileState::Idle,
         });
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Yeti;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -790,11 +750,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = demon_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(WorldHostile {
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(WorldHostile {
             idx: 0,
             x: player_x + fx * 1.5,
             z: player_z + fz * 1.5,
@@ -813,26 +771,16 @@ impl CombatLayer {
             swing_s: sheet.swing_s,
             swing_cd: sheet.swing_s,
             reach_m: sheet.reach_m,
+            home_x: player_x + fx * 1.5,
+            home_z: player_z + fz * 1.5,
+            aggro: crate::combat::Aggro::default(),
+            state: crate::combat::types::HostileState::Idle,
         });
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Demon;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -867,11 +815,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = blue_demon_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(WorldHostile {
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(WorldHostile {
             idx: 0,
             x: player_x + fx * 1.5,
             z: player_z + fz * 1.5,
@@ -890,26 +836,16 @@ impl CombatLayer {
             swing_s: sheet.swing_s,
             swing_cd: sheet.swing_s,
             reach_m: sheet.reach_m,
+            home_x: player_x + fx * 1.5,
+            home_z: player_z + fz * 1.5,
+            aggro: crate::combat::Aggro::default(),
+            state: crate::combat::types::HostileState::Idle,
         });
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::BlueDemon;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -944,11 +880,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = tribal_veteran_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(WorldHostile {
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(WorldHostile {
             idx: 0,
             x: player_x + fx * 1.5,
             z: player_z + fz * 1.5,
@@ -967,26 +901,16 @@ impl CombatLayer {
             swing_s: sheet.swing_s,
             swing_cd: sheet.swing_s,
             reach_m: sheet.reach_m,
+            home_x: player_x + fx * 1.5,
+            home_z: player_z + fz * 1.5,
+            aggro: crate::combat::Aggro::default(),
+            state: crate::combat::types::HostileState::Idle,
         });
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::TribalVeteran;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -1023,10 +947,8 @@ impl CombatLayer {
         let (sx, sz) = (-fz, fx);
         let warrior = skeleton_warrior_sheet();
         let minion = skeleton_minion_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
         for i in 0..3 {
             let dist = 1.5;
             let strafe = match i {
@@ -1040,7 +962,7 @@ impl CombatLayer {
             } else {
                 "skeleton_minion"
             };
-            combat.hostiles.push(hostile_from_sheet(
+            combat.add_hostile(hostile_from_sheet(
                 i,
                 player_x + fx * dist + sx * strafe,
                 player_z + fz * dist + sz * strafe,
@@ -1049,24 +971,10 @@ impl CombatLayer {
             ));
         }
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Bones;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -1101,11 +1009,9 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let sheet = skeleton_mage_sheet();
-        combat.hostiles.clear();
-        combat.lock = None;
-        combat.cycle.clear();
-        combat.auto_cd = crate::combat::MELEE_SWING_S;
-        combat.hostiles.push(hostile_from_sheet(
+        combat.clear_hostiles();
+        combat.reset_encounter_state();
+        combat.add_hostile(hostile_from_sheet(
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
@@ -1113,24 +1019,10 @@ impl CombatLayer {
             "skeleton_mage",
         ));
         *combat = keep_player(combat);
-        combat.strike_armed = false;
-        combat.ember_started = false;
-        combat.last_potion_heal = 0;
-        combat.busy = 0.0;
-        combat.gcd = 0.0;
-        combat.cds = crate::combat::verbs::empty_cds();
-        combat.cast_kind = None;
-        combat.cast_t = 0.0;
-        combat.cast_target = None;
-        combat.ward = 0.0;
-        combat.ward_t = 0.0;
-        combat.mark_t = 0.0;
-        combat.second_wind_used = false;
-        combat.last_rank_gate = None;
+        combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Mage;
         self.fixture = true;
         self.first_auto = None;
-        self.accum_s = 0.0;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
@@ -1183,38 +1075,22 @@ impl CombatLayer {
             self.hp_chunk_s = (self.hp_chunk_s - dt).max(0.0);
         }
         let mut just = None;
-        self.accum_s += dt;
-        while self.accum_s + 1e-12 >= TICK {
-            self.accum_s -= TICK;
-            let pending_cast = combat.cast_kind;
-            let lock_id = combat.lock;
+        let fixed_steps = combat.consume_fixed_steps(dt);
+        for _ in 0..fixed_steps {
+            let pending_cast = combat.cast_kind();
+            let lock_id = combat.lock_id();
             let lock_hp = lock_id.and_then(|id| {
                 combat
-                    .hostiles
+                    .hostiles()
                     .iter()
                     .find(|h| h.idx == id)
                     .map(|h| (h.name.clone(), h.hp, h.root_s, h.slow_s))
             });
-            let player_hp = combat.player.resources.hp;
-            let ward = combat.ward;
-            let skull_hp: HashMap<i32, f64> = combat
-                .hostiles
-                .iter()
-                .filter(|h| h.mob_id == "orc_skull")
-                .map(|h| (h.idx, h.hp))
-                .collect();
-            let mage_hp: HashMap<i32, f64> = combat
-                .hostiles
-                .iter()
-                .filter(|h| h.mob_id == "skeleton_mage")
-                .map(|h| (h.idx, h.hp))
-                .collect();
-            combat.tick_verbs(player_x, player_z, TICK);
+            let player_hp = combat.player().resources.hp;
+            let ward = combat.ward_value();
+            let step = combat.step_fixed(player_x, player_z, facing_x, facing_z);
             log_finished_cast(combat, pending_cast, lock_id, lock_hp, player_hp, ward);
-            let strike = combat.strike_armed;
-            if let Some(dealt) =
-                combat.tick_melee_auto(player_x, player_z, facing_x, facing_z, TICK)
-            {
+            if let Some((dealt, target_id, strike)) = step.outgoing {
                 if self.first_auto.is_none() {
                     self.first_auto = Some(dealt);
                 }
@@ -1226,227 +1102,90 @@ impl CombatLayer {
                 self.pending_flinch = true;
                 just = Some(dealt);
                 let name = combat
-                    .lock
-                    .and_then(|id| {
-                        combat
-                            .hostiles
-                            .iter()
-                            .find(|h| h.idx == id)
-                            .map(|h| h.name.clone())
-                    })
-                    .or_else(|| combat.hostiles.first().map(|h| h.name.clone()))
+                    .hostiles()
+                    .iter()
+                    .find(|h| h.idx == target_id)
+                    .map(|h| h.name.clone())
                     .unwrap_or_else(|| "wolf-spider".into());
-                if strike {
-                    combat.log.push(format!("You Strike {name} for {dealt}"));
-                } else {
-                    combat.log.push(format!("You hit {name} for {dealt}"));
-                }
+                combat.log_mut().push(format!(
+                    "You {} {name} for {dealt}",
+                    if strike { "Strike" } else { "hit" }
+                ));
             }
-            let prev_hp = combat.player.resources.hp;
-            if let Some(hit) = combat.tick_incoming(player_x, player_z, TICK) {
-                self.latch_incoming_chunk(prev_hp, combat.player.resources.hp_max);
+            if let Some((prev_hp, hit)) = step.incoming {
+                self.latch_incoming_chunk(prev_hp, combat.player().resources.hp_max);
                 self.pending_sfx.push(CombatSfx::Hurt);
                 combat
-                    .log
+                    .log_mut()
                     .push(format!("{} hits you for {}", hit.by, hit.dealt));
                 if hit.killed {
-                    combat.log.push("You are slain");
+                    combat.log_mut().push("You are slain");
                 }
                 if let Some(h) = combat
-                    .hostiles
+                    .hostiles()
                     .iter()
                     .find(|h| h.name == hit.by || h.mob_id == hit.by)
                 {
                     queue_connecting_melee(&mut self.pending_melee, &self.models, h);
                 }
             }
-            self.tick_skull_bolts(combat, player_x, player_z, &skull_hp);
-            self.tick_mage_bolts(combat, player_x, player_z, &mage_hp);
+            self.present_special_events(combat, step.specials);
         }
         just
     }
 
-    fn tick_skull_bolts(
+    fn present_special_events(
         &mut self,
         combat: &mut WorldCombat,
-        player_x: f64,
-        player_z: f64,
-        skull_hp: &HashMap<i32, f64>,
+        events: Vec<SpecialAttackEvent>,
     ) {
-        if combat.dead {
-            self.skull_tele.clear();
-            return;
-        }
-        let grit = combat.player.stats.attrs.grit;
-        let ids: Vec<i32> = combat
-            .hostiles
-            .iter()
-            .filter(|h| h.mob_id == "orc_skull")
-            .map(|h| h.idx)
-            .collect();
-        for idx in ids {
-            let Some(slot) = combat.hostiles.iter().position(|h| h.idx == idx) else {
-                self.skull_tele.remove(&idx);
-                continue;
-            };
-            let took_hp = skull_hp
-                .get(&idx)
-                .is_some_and(|hp| combat.hostiles[slot].hp < *hp);
-            let alive = combat.hostiles[slot].alive;
-            let stun_s = combat.hostiles[slot].stun_s;
-            let hx = combat.hostiles[slot].x;
-            let hz = combat.hostiles[slot].z;
-            if !alive || stun_s > 0.0 || took_hp {
-                self.skull_tele.remove(&idx);
-                continue;
-            }
-            let dx = player_x - hx;
-            let dz = player_z - hz;
-            if (dx * dx + dz * dz).sqrt() > SKULL_BOLT_RANGE_M {
-                continue;
-            }
-            if let Some(rem) = self.skull_tele.get(&idx).copied() {
-                let next = rem - TICK;
-                if next > 1e-12 {
-                    self.skull_tele.insert(idx, next);
-                    continue;
-                }
-                self.skull_tele.remove(&idx);
-                let dealt = mitigation(f64::from(SKULL_BOLT_DMG), grit);
-                let prev_hp = combat.player.resources.hp;
-                let hp_max = combat.player.resources.hp_max;
-                combat.player.resources.hp =
-                    (combat.player.resources.hp - f64::from(dealt)).max(0.0);
-                let killed = combat.player.resources.hp <= 0.0;
-                let name = combat.hostiles[slot].name.clone();
-                combat.log.push(format!("{name} hits you for {dealt}"));
-                self.latch_incoming_chunk(prev_hp, hp_max);
-                self.pending_sfx.push(CombatSfx::Hurt);
-                if killed {
-                    combat.dead = true;
-                    combat.lock = None;
-                    combat.auto_cd = 999.0;
-                    combat.slain_by = Some(name);
-                    combat.slain_hold_s = crate::combat::math::SLAIN_HOLD_S;
-                    combat.log.push("You are slain");
-                    break;
-                }
-            } else {
-                self.skull_tele.insert(idx, SKULL_TELE_S);
-                queue_weapon_anim(
-                    &mut self.pending_melee,
-                    &self.models,
-                    &combat.hostiles[slot],
+        for event in events {
+            let Some(h) = combat
+                .hostiles()
+                .iter()
+                .find(|h| h.idx == event.attacker_idx)
+            else {
+                panic!(
+                    "special attack event references missing hostile {}",
+                    event.attacker_idx
                 );
-            }
-        }
-    }
-
-    fn tick_mage_bolts(
-        &mut self,
-        combat: &mut WorldCombat,
-        player_x: f64,
-        player_z: f64,
-        mage_hp: &HashMap<i32, f64>,
-    ) {
-        if combat.dead {
-            self.mage_tele.clear();
-            return;
-        }
-        let grit = combat.player.stats.attrs.grit;
-        let ids: Vec<i32> = combat
-            .hostiles
-            .iter()
-            .filter(|h| h.mob_id == "skeleton_mage")
-            .map(|h| h.idx)
-            .collect();
-        for idx in ids {
-            let Some(slot) = combat.hostiles.iter().position(|h| h.idx == idx) else {
-                self.mage_tele.remove(&idx);
-                continue;
             };
-            let took_hp = mage_hp
-                .get(&idx)
-                .is_some_and(|hp| combat.hostiles[slot].hp < *hp);
-            let alive = combat.hostiles[slot].alive;
-            let stun_s = combat.hostiles[slot].stun_s;
-            let hx = combat.hostiles[slot].x;
-            let hz = combat.hostiles[slot].z;
-            if !alive || stun_s > 0.0 || took_hp {
-                self.mage_tele.remove(&idx);
-                continue;
-            }
-            let dx = player_x - hx;
-            let dz = player_z - hz;
-            if (dx * dx + dz * dz).sqrt() > MAGE_BOLT_RANGE_M {
-                continue;
-            }
-            if let Some(rem) = self.mage_tele.get(&idx).copied() {
-                let next = rem - TICK;
-                if next > 1e-12 {
-                    self.mage_tele.insert(idx, next);
-                    continue;
-                }
-                self.mage_tele.remove(&idx);
-                let dealt = mitigation(f64::from(MAGE_BOLT_DMG), grit);
-                let prev_hp = combat.player.resources.hp;
-                let hp_max = combat.player.resources.hp_max;
-                combat.player.resources.hp =
-                    (combat.player.resources.hp - f64::from(dealt)).max(0.0);
-                let killed = combat.player.resources.hp <= 0.0;
-                let name = combat.hostiles[slot].name.clone();
-                combat.log.push(format!("{name} hits you for {dealt}"));
-                self.latch_incoming_chunk(prev_hp, hp_max);
-                self.pending_sfx.push(CombatSfx::Hurt);
-                if killed {
-                    combat.dead = true;
-                    combat.lock = None;
-                    combat.auto_cd = 999.0;
-                    combat.slain_by = Some(name);
-                    combat.slain_hold_s = crate::combat::math::SLAIN_HOLD_S;
-                    combat.log.push("You are slain");
-                    break;
-                }
-            } else {
-                self.mage_tele.insert(idx, MAGE_TELE_S);
-                let h = &combat.hostiles[slot];
-                let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
-                    panic!(
-                        "{}",
-                        EngineError::Model(format!(
-                            "tick_mage_bolts: no mesh spec for '{}'",
-                            h.mob_id
-                        ))
-                    )
-                });
-                let clip = spec.anim_weapon.unwrap_or_else(|| {
-                    panic!(
-                        "{}",
-                        EngineError::Model(format!(
-                            "tick_mage_bolts: '{}' has no anim_weapon",
-                            h.mob_id
-                        ))
-                    )
-                });
-                if clip != "Spellcast_Shoot" {
-                    panic!(
-                        "{}",
-                        EngineError::Model(format!(
-                            "tick_mage_bolts: want Spellcast_Shoot, got '{clip}'"
-                        ))
-                    );
-                }
+            let tele = match event.cue {
+                SpecialAttackCue::Weapon => &mut self.skull_tele,
+                SpecialAttackCue::SpellcastShoot => &mut self.mage_tele,
+            };
+            if event.hit.is_none() {
+                let duration = match event.cue {
+                    SpecialAttackCue::Weapon => SKULL_TELE_S,
+                    SpecialAttackCue::SpellcastShoot => MAGE_TELE_S,
+                };
+                tele.insert(event.attacker_idx, duration);
+                let clip = match event.cue {
+                    SpecialAttackCue::Weapon => "Weapon",
+                    SpecialAttackCue::SpellcastShoot => "Spellcast_Shoot",
+                };
                 self.pending_melee = Some((h.entity, clip));
+                continue;
+            }
+            tele.remove(&event.attacker_idx);
+            let hit = event.hit.expect("special hit present after is_none check");
+            self.latch_incoming_chunk(event.previous_player_hp, combat.player().resources.hp_max);
+            self.pending_sfx.push(CombatSfx::Hurt);
+            combat
+                .log_mut()
+                .push(format!("{} hits you for {}", hit.by, hit.dealt));
+            if hit.killed {
+                combat.log_mut().push("You are slain");
             }
         }
     }
 
     /// Play catalog anim_melee on the locked mesh only.
     pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
-        let Some(lock) = combat.lock else {
+        let Some(lock) = combat.lock_id() else {
             panic!("{}", EngineError::Model("replay_melee: no lock".into()));
         };
-        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
             panic!(
                 "{}",
                 EngineError::Model("replay_melee: lock not in hostiles".into())
@@ -1483,10 +1222,10 @@ impl CombatLayer {
 
     /// Play catalog anim_weapon (Spellcast_Shoot) on the locked mesh. Fail-loud.
     pub fn replay_weapon(&mut self, world: &mut World, combat: &WorldCombat) {
-        let Some(lock) = combat.lock else {
+        let Some(lock) = combat.lock_id() else {
             panic!("{}", EngineError::Model("replay_weapon: no lock".into()));
         };
-        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
             panic!(
                 "{}",
                 EngineError::Model("replay_weapon: lock not in hostiles".into())
@@ -1565,17 +1304,35 @@ impl CombatLayer {
         Ok(())
     }
 
+    /// Synchronize render-space hostile transforms after deterministic combat AI moves them.
+    pub fn sync_hostile_transforms(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+    ) -> EngineResult<()> {
+        for h in combat.hostiles() {
+            let Some(id) = h.entity else {
+                continue;
+            };
+            let Some(anchor) = self.mesh_anchors.iter().find(|a| a.id == id) else {
+                continue;
+            };
+            let render = world.to_render(GlobalPosition::at(h.x, anchor.pos.y, h.z))?;
+            let place = Place::at(render.x, render.y, render.z)?.yaw_deg(anchor.yaw)?;
+            world.set_place(id, place).map_err(|err| {
+                EngineError::Model(format!(
+                    "hostile transform sync failed for {}: {err}",
+                    h.mob_id
+                ))
+            })?;
+        }
+        Ok(())
+    }
     fn play_death_poses(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
-        for h in &combat.hostiles {
+        for h in combat.hostiles() {
             if h.alive {
                 continue;
             }
-            let Some(spec) = mesh_spec(&h.mob_id) else {
-                continue;
-            };
-            let Some(clip) = spec.anim_death else {
-                continue;
-            };
             let Some(id) = h
                 .entity
                 .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
@@ -1585,6 +1342,15 @@ impl CombatLayer {
             if !self.death_posed.insert(id) {
                 continue;
             }
+            let Some(spec) = mesh_spec(&h.mob_id) else {
+                return Err(EngineError::Model(format!(
+                    "no mesh spec for dead hostile '{}'",
+                    h.mob_id
+                )));
+            };
+            let Some(clip) = spec.anim_death else {
+                continue;
+            };
             world
                 .play_animation_once(id, clip)
                 .map_err(|err| EngineError::Model(format!("death clip '{clip}' failed: {err}")))?;
@@ -1601,7 +1367,7 @@ impl CombatLayer {
         combat: &WorldCombat,
         ground_y: &mut impl FnMut(f64, f64) -> f64,
     ) -> EngineResult<()> {
-        let want = combat.lock.filter(|_| self.fixture);
+        let want = combat.lock_id().filter(|_| self.fixture);
         let still = want == self.ring_on
             && self
                 .lock_ring
@@ -1614,7 +1380,7 @@ impl CombatLayer {
         let Some(lock) = want else {
             return Ok(());
         };
-        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock && h.alive) else {
+        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock && h.alive) else {
             return Ok(());
         };
         let (x, z) = self
@@ -1640,10 +1406,10 @@ impl CombatLayer {
         ground_y: &mut impl FnMut(f64, f64) -> f64,
     ) -> EngineResult<()> {
         self.despawn_flash(world);
-        let Some(lock) = combat.lock else {
+        let Some(lock) = combat.lock_id() else {
             return Ok(());
         };
-        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
             return Ok(());
         };
         let (x, z) = self
@@ -1676,10 +1442,10 @@ impl CombatLayer {
     }
 
     fn start_flinch(&mut self, world: &mut World, combat: &WorldCombat) -> EngineResult<()> {
-        let Some(lock) = combat.lock else {
+        let Some(lock) = combat.lock_id() else {
             return Ok(());
         };
-        let Some(h) = combat.hostiles.iter().find(|h| h.idx == lock) else {
+        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
             return Ok(());
         };
         let Some(entity) = h.entity else {
@@ -1833,7 +1599,7 @@ fn log_finished_cast(
         .or_else(|| {
             lock_id.and_then(|id| {
                 combat
-                    .hostiles
+                    .hostiles()
                     .iter()
                     .find(|h| h.idx == id)
                     .map(|h| h.name.clone())
@@ -1843,7 +1609,8 @@ fn log_finished_cast(
     match kind {
         "aimed" | "pin" | "ember" => {
             if let Some((_, hp0, _, _)) = before {
-                if let Some(h) = lock_id.and_then(|id| combat.hostiles.iter().find(|h| h.idx == id))
+                if let Some(h) =
+                    lock_id.and_then(|id| combat.hostiles().iter().find(|h| h.idx == id))
                 {
                     let dealt = (hp0 - h.hp).round() as i32;
                     if dealt > 0 {
@@ -1853,64 +1620,40 @@ fn log_finished_cast(
                             "ember" => "Ember",
                             _ => kind,
                         };
-                        combat.log.push(format!("You {verb} {name} for {dealt}"));
+                        combat
+                            .log_mut()
+                            .push(format!("You {verb} {name} for {dealt}"));
                     }
                 }
             }
         }
         "bind" => {
             if let Some((_, _, root0, _)) = before {
-                if let Some(h) = lock_id.and_then(|id| combat.hostiles.iter().find(|h| h.idx == id))
+                if let Some(h) =
+                    lock_id.and_then(|id| combat.hostiles().iter().find(|h| h.idx == id))
                 {
                     if h.root_s > root0 {
-                        combat.log.push(format!("You Bind {name}"));
+                        combat.log_mut().push(format!("You Bind {name}"));
                     }
                 }
             }
         }
         "mend" => {
-            let heal = (combat.player.resources.hp - player_hp).round() as i32;
+            let heal = (combat.player().resources.hp - player_hp).round() as i32;
             if heal > 0 {
-                combat.log.push(format!("You Mend for {heal}"));
+                combat.log_mut().push(format!("You Mend for {heal}"));
             }
         }
-        "ward" if combat.ward > ward => {
-            combat.log.push("You Ward");
+        "ward" if combat.ward_value() > ward => {
+            combat.log_mut().push("You Ward");
         }
         _ => {}
     }
 }
 
 fn keep_player(combat: &WorldCombat) -> WorldCombat {
-    let mut out =
-        WorldCombat::specialist(combat.player.stats.level, combat.player.stats.discipline);
-    out.player = combat.player.clone();
-    out.hostiles = combat.hostiles.clone();
-    out.lock = combat.lock;
-    out.cycle = combat.cycle.clone();
-    out.auto_cd = combat.auto_cd;
-    out.last_auto_dealt = combat.last_auto_dealt;
-    out.strike_armed = combat.strike_armed;
-    out.ember_started = combat.ember_started;
-    out.last_potion_heal = combat.last_potion_heal;
-    out.busy = combat.busy;
-    out.gcd = combat.gcd;
-    out.cds = combat.cds.clone();
-    out.cast_kind = combat.cast_kind;
-    out.cast_t = combat.cast_t;
-    out.cast_target = combat.cast_target;
-    out.ward = combat.ward;
-    out.ward_t = combat.ward_t;
-    out.mark_t = combat.mark_t;
-    out.second_wind_used = combat.second_wind_used;
-    out.last_rank_gate = combat.last_rank_gate;
-    out.dead = combat.dead;
-    out.slain_by = combat.slain_by.clone();
-    out.slain_hold_s = combat.slain_hold_s;
-    out.last_incoming = combat.last_incoming.clone();
-    out.log = combat.log.clone();
-    out.fail_tell = combat.fail_tell;
-    out.fail_tell_s = combat.fail_tell_s;
+    let mut out = combat.clone();
+    out.reset_for_encounter();
     out
 }
 
@@ -1955,20 +1698,6 @@ fn queue_connecting_melee(
         return;
     }
     queue_clip(pending, models, h, spec.anim_melee);
-}
-
-fn queue_weapon_anim(
-    pending: &mut Option<(Option<EntityId>, &'static str)>,
-    models: &HashMap<String, Arc<AnimatedModel>>,
-    h: &WorldHostile,
-) {
-    let Some(spec) = mesh_spec(&h.mob_id) else {
-        return;
-    };
-    let Some(clip) = spec.anim_weapon else {
-        return;
-    };
-    queue_clip(pending, models, h, clip);
 }
 
 fn assets_dir() -> EngineResult<PathBuf> {
@@ -2044,37 +1773,41 @@ fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) 
         swing_s: sheet.swing_s,
         swing_cd: sheet.swing_s,
         reach_m: sheet.reach_m,
+        home_x: x,
+        home_z: z,
+        aggro: crate::combat::Aggro::default(),
+        state: crate::combat::types::HostileState::Idle,
     }
 }
 
 pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
     let sheet = orc_skull_sheet();
-    let next = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    let next = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     for (idx, p) in (next..).zip(spots.iter()) {
         combat
-            .hostiles
+            .hostiles_mut()
             .push(hostile_from_sheet(idx, p.x, p.z, &sheet, "orc_skull"));
     }
 }
 
 pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
-    combat.hostiles.retain(|h| h.mob_id != "orc_skull");
-    if let Some(lock) = combat.lock {
-        if !combat.hostiles.iter().any(|h| h.idx == lock) {
-            combat.lock = None;
+    combat.hostiles_mut().retain(|h| h.mob_id != "orc_skull");
+    if let Some(lock) = combat.lock_id() {
+        if !combat.hostiles().iter().any(|h| h.idx == lock) {
+            combat.set_lock(None);
         }
     }
 }
 
 pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: Option<GlobalXZ>) {
-    let mut idx = combat.hostiles.iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
+    let mut idx = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     let warrior = skeleton_warrior_sheet();
     let minion = skeleton_minion_sheet();
     let mage = skeleton_mage_sheet();
     let (fx, fz) = (1.0, 0.0);
     let (sx, sz) = (-fz, fx);
     for p in spots {
-        combat.hostiles.push(hostile_from_sheet(
+        combat.add_hostile(hostile_from_sheet(
             idx,
             p.x,
             p.z,
@@ -2082,7 +1815,7 @@ pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: O
             "skeleton_warrior",
         ));
         idx += 1;
-        combat.hostiles.push(hostile_from_sheet(
+        combat.add_hostile(hostile_from_sheet(
             idx,
             p.x + sx * -STRAFE_M,
             p.z + sz * -STRAFE_M,
@@ -2090,7 +1823,7 @@ pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: O
             "skeleton_minion",
         ));
         idx += 1;
-        combat.hostiles.push(hostile_from_sheet(
+        combat.add_hostile(hostile_from_sheet(
             idx,
             p.x + sx * STRAFE_M,
             p.z + sz * STRAFE_M,
@@ -2105,7 +1838,7 @@ pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: O
             .unwrap_or(spots.len() > 1)
     });
     if let Some(p) = mage_at {
-        combat.hostiles.push(hostile_from_sheet(
+        combat.add_hostile(hostile_from_sheet(
             idx,
             p.x + fx * STRAFE_M,
             p.z + fz * STRAFE_M,
@@ -2116,10 +1849,10 @@ pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: O
 }
 
 pub fn clear_dungeon_bones(combat: &mut WorldCombat) {
-    combat.hostiles.retain(|h| !is_bone_id(&h.mob_id));
-    if let Some(lock) = combat.lock {
-        if !combat.hostiles.iter().any(|h| h.idx == lock) {
-            combat.lock = None;
+    combat.hostiles_mut().retain(|h| !is_bone_id(&h.mob_id));
+    if let Some(lock) = combat.lock_id() {
+        if !combat.hostiles().iter().any(|h| h.idx == lock) {
+            combat.set_lock(None);
         }
     }
 }
@@ -2129,7 +1862,7 @@ pub fn first_fixture_auto_hit() -> i32 {
     let mut combat = WorldCombat::specialist(1, Discipline::Martial);
     let mut layer = CombatLayer::install();
     layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-    combat.lock = Some(0);
+    combat.set_lock(Some(0));
     layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
     layer
         .first_auto()
@@ -2139,6 +1872,7 @@ pub fn first_fixture_auto_hit() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::math::{mitigation, MAGE_BOLT_DMG, SKULL_BOLT_DMG};
     use crate::world::fauna::FaunaCatalog;
 
     #[test]
@@ -2151,8 +1885,8 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_orc_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 1);
-        let h = &combat.hostiles[0];
+        assert_eq!(combat.hostiles().len(), 1);
+        let h = &combat.hostiles()[0];
         assert_eq!(h.mob_id, "orc");
         assert_eq!(h.name, "orc");
         assert!((h.x - 1.5).abs() < 1e-9);
@@ -2168,8 +1902,8 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_demon_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 1);
-        let h = &combat.hostiles[0];
+        assert_eq!(combat.hostiles().len(), 1);
+        let h = &combat.hostiles()[0];
         assert_eq!(h.mob_id, "demon");
         assert_eq!(h.name, "demon");
         assert!((h.x - 1.5).abs() < 1e-9);
@@ -2186,8 +1920,8 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_bluedemon_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 1);
-        let h = &combat.hostiles[0];
+        assert_eq!(combat.hostiles().len(), 1);
+        let h = &combat.hostiles()[0];
         assert_eq!(h.mob_id, "blue_demon");
         assert_eq!(h.name, "blue_demon");
         assert!((h.x - 1.5).abs() < 1e-9);
@@ -2205,8 +1939,8 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_tribal_veteran_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 1);
-        let h = &combat.hostiles[0];
+        assert_eq!(combat.hostiles().len(), 1);
+        let h = &combat.hostiles()[0];
         assert_eq!(h.mob_id, "tribal_veteran");
         assert_eq!(h.name, "tribal_veteran");
         assert!((h.x - 1.5).abs() < 1e-9);
@@ -2224,8 +1958,8 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_yeti_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 1);
-        let h = &combat.hostiles[0];
+        assert_eq!(combat.hostiles().len(), 1);
+        let h = &combat.hostiles()[0];
         assert_eq!(h.mob_id, "yeti");
         assert_eq!(h.name, "yeti");
         assert!((h.x - 1.5).abs() < 1e-9);
@@ -2246,7 +1980,7 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.7);
         assert!(layer.first_auto().is_none());
         assert!(!layer.swing_whoosh());
@@ -2271,7 +2005,7 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         assert!(combat.press_verb(crate::combat::CombatVerb::Strike, 0.0, 0.0, 1.0, 0.0));
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
         assert_eq!(layer.first_auto(), Some(16));
@@ -2282,14 +2016,16 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ember_started);
-        combat.cast_kind = None;
-        combat.gcd = 0.0;
-        combat.busy = 0.0;
+        assert!(combat.ember_is_started());
+        combat.set_cast_kind(None);
+        combat.set_gcd(0.0);
+        combat.set_busy_time(0.0);
         assert!(!combat.press_verb(crate::combat::CombatVerb::Bind, 0.0, 0.0, 1.0, 0.0));
-        let gate = combat.last_rank_gate.expect("bind rank miss is fail-loud");
+        let gate = combat
+            .last_rank_gate()
+            .expect("bind rank miss is fail-loud");
         assert!(gate.blocked);
         assert_eq!(gate.action, crate::combat::CombatVerb::Bind);
     }
@@ -2299,13 +2035,13 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
-        assert_eq!(combat.player.stats.ranks.arcane, 0);
-        let mana_before = combat.player.resources.mana;
+        combat.set_lock(Some(0));
+        assert_eq!(combat.player().stats.ranks.arcane, 0);
+        let mana_before = combat.player().resources.mana;
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ember_started);
-        assert_eq!(combat.player.stats.ranks.arcane, 0);
-        assert!(combat.player.resources.mana < mana_before);
+        assert!(combat.ember_is_started());
+        assert_eq!(combat.player().stats.ranks.arcane, 0);
+        assert!(combat.player().resources.mana < mana_before);
     }
 
     #[test]
@@ -2313,22 +2049,22 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         assert!(!combat.press_verb(crate::combat::CombatVerb::Bash, 0.0, 0.0, 1.0, 0.0));
-        let gate = combat.last_rank_gate.expect("rank miss is fail-loud");
+        let gate = combat.last_rank_gate().expect("rank miss is fail-loud");
         assert!(gate.blocked);
         assert_eq!(gate.action, crate::combat::CombatVerb::Bash);
-        assert_ne!(combat.cast_kind, Some("bash"));
+        assert_ne!(combat.cast_kind(), Some("bash"));
     }
 
     #[test]
     fn potion_heals_forty() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.player.resources.hp = 50.0;
+        combat.set_player_hp(50.0);
         assert!(combat.press_verb(crate::combat::CombatVerb::Potion, 0.0, 0.0, 1.0, 0.0));
-        assert_eq!(combat.player.resources.hp, 90.0);
-        assert_eq!(combat.player.potions, 0);
-        assert_eq!(combat.last_potion_heal, 40);
+        assert_eq!(combat.player().resources.hp, 90.0);
+        assert_eq!(combat.player().potions, 0);
+        assert_eq!(combat.last_potion_heal(), 40);
     }
 
     #[test]
@@ -2336,12 +2072,12 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles.len(), 3);
-        assert!(combat.hostiles.iter().all(|h| h.name == "wolf-spider"));
-        assert!((combat.hostiles[0].x - 1.5).abs() < 1e-9);
-        assert!(combat.hostiles[0].z.abs() < 1e-9);
-        assert!((combat.hostiles[1].z + 1.8).abs() < 1e-9);
-        assert!((combat.hostiles[2].z - 1.8).abs() < 1e-9);
+        assert_eq!(combat.hostiles().len(), 3);
+        assert!(combat.hostiles().iter().all(|h| h.name == "wolf-spider"));
+        assert!((combat.hostiles()[0].x - 1.5).abs() < 1e-9);
+        assert!(combat.hostiles()[0].z.abs() < 1e-9);
+        assert!((combat.hostiles()[1].z + 1.8).abs() < 1e-9);
+        assert!((combat.hostiles()[2].z - 1.8).abs() < 1e-9);
         let catalog = FaunaCatalog::load().expect("fauna catalog");
         let spec = catalog.spec("wolf");
         assert_eq!(spec.source, "wolf/wolf.gltf");
@@ -2369,29 +2105,29 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(
             lines
                 .iter()
                 .any(|l| l.starts_with("You hit wolf-spider for ")),
             "{lines:?}"
         );
-        combat.player.resources.hp = 5.0;
-        for h in &mut combat.hostiles {
+        combat.set_player_hp(5.0);
+        for h in combat.hostiles_mut() {
             h.swing_cd = 0.0;
         }
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(
             lines.iter().any(|l| l.contains(" hits you for ")),
             "{lines:?}"
         );
         layer.log_potion(&mut combat);
         assert!(combat
-            .log
-            .lines()
+            .log_lines()
+            .iter()
             .any(|l| l.starts_with("You drink a potion for ")));
     }
 
@@ -2400,10 +2136,10 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.5);
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(
             lines
                 .iter()
@@ -2415,12 +2151,12 @@ mod tests {
     #[test]
     fn mage_bolt_telegraphs_spellcast_shoot_then_deals_mitigated_15() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.hostiles.clear();
+        combat.clear_hostiles();
         let sheet = skeleton_mage_sheet();
         combat
-            .hostiles
+            .hostiles_mut()
             .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "skeleton_mage"));
-        let hp0 = combat.player.resources.hp;
+        let hp0 = combat.player().resources.hp;
         let mut layer = CombatLayer::install();
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
         assert!(
@@ -2432,33 +2168,33 @@ mod tests {
             Some("Spellcast_Shoot"),
             "Spellcast_Shoot queued"
         );
-        assert_eq!(combat.player.resources.hp, hp0);
+        assert_eq!(combat.player().resources.hp, hp0);
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
-        let want = mitigation(f64::from(MAGE_BOLT_DMG), combat.player.stats.attrs.grit);
-        let skull = mitigation(f64::from(SKULL_BOLT_DMG), combat.player.stats.attrs.grit);
+        let want = mitigation(f64::from(MAGE_BOLT_DMG), combat.player().stats.attrs.grit);
+        let skull = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
         assert_ne!(want, skull, "mage bolt 15 is not skull bolt 14");
-        assert_eq!(combat.player.resources.hp, hp0 - f64::from(want));
+        assert_eq!(combat.player().resources.hp, hp0 - f64::from(want));
     }
 
     #[test]
     fn seat_dungeon_bones_is_warrior_two_minions_and_one_non_heart_mage() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.hostiles.clear();
+        combat.clear_hostiles();
         let spots = [GlobalXZ::at(0.0, 0.0), GlobalXZ::at(10.0, 0.0)];
         let heart = Some(GlobalXZ::at(10.0, 0.0));
         seat_dungeon_bones(&mut combat, &spots, heart);
         let warriors: Vec<_> = combat
-            .hostiles
+            .hostiles()
             .iter()
             .filter(|h| h.mob_id == "skeleton_warrior")
             .collect();
         let minions: Vec<_> = combat
-            .hostiles
+            .hostiles()
             .iter()
             .filter(|h| h.mob_id == "skeleton_minion")
             .collect();
         let mages: Vec<_> = combat
-            .hostiles
+            .hostiles()
             .iter()
             .filter(|h| h.mob_id == "skeleton_mage")
             .collect();
@@ -2476,12 +2212,12 @@ mod tests {
     #[test]
     fn skull_bolt_telegraphs_weapon_then_deals_mitigated_14() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.hostiles.clear();
+        combat.clear_hostiles();
         let sheet = orc_skull_sheet();
         combat
-            .hostiles
+            .hostiles_mut()
             .push(hostile_from_sheet(0, 10.0, 0.0, &sheet, "orc_skull"));
-        let hp0 = combat.player.resources.hp;
+        let hp0 = combat.player().resources.hp;
         let mut layer = CombatLayer::install();
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
         assert!(
@@ -2493,11 +2229,11 @@ mod tests {
             Some("Weapon"),
             "Weapon queued"
         );
-        assert_eq!(combat.player.resources.hp, hp0);
+        assert_eq!(combat.player().resources.hp, hp0);
         layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
-        let want = mitigation(f64::from(SKULL_BOLT_DMG), combat.player.stats.attrs.grit);
-        assert_eq!(combat.player.resources.hp, hp0 - f64::from(want));
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let want = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
+        assert_eq!(combat.player().resources.hp, hp0 - f64::from(want));
+        let lines: Vec<_> = combat.log_lines();
         assert!(
             lines.iter().any(|l| l.contains(" hits you for ")),
             "{lines:?}"
@@ -2509,11 +2245,11 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = None;
+        combat.set_lock(None);
         assert!(!combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(!combat.ember_started);
+        assert!(!combat.ember_is_started());
         assert_eq!(combat.fail_tell(), Some("No target"));
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(lines.iter().any(|l| l == "No target"), "{lines:?}");
     }
 
@@ -2522,23 +2258,23 @@ mod tests {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
         let mut layer = CombatLayer::install();
         layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.lock = Some(0);
+        combat.set_lock(Some(0));
         assert!(!combat.press_verb(crate::combat::CombatVerb::Strike, -4.0, 0.0, 1.0, 0.0));
-        assert!(!combat.strike_armed);
+        assert!(!combat.strike_is_armed());
         assert_eq!(combat.fail_tell(), Some("Out of range"));
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(lines.iter().any(|l| l == "Out of range"), "{lines:?}");
     }
 
     #[test]
     fn ward_success_pushes_you_ward() {
         let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.player.stats.ranks.arcane = 7;
+        combat.player_mut().stats.ranks.arcane = 7;
         let layer = CombatLayer::install();
         assert!(combat.press_verb(crate::combat::CombatVerb::Ward, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ward > 0.0);
+        assert!(combat.ward_value() > 0.0);
         layer.log_ward(&mut combat);
-        let lines: Vec<_> = combat.log.lines().map(str::to_string).collect();
+        let lines: Vec<_> = combat.log_lines();
         assert!(lines.iter().any(|l| l == "You Ward"), "{lines:?}");
     }
 }

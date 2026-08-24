@@ -36,7 +36,7 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                let ranks = combat.player.stats.ranks;
+                let ranks = combat.player().stats.ranks;
                 for action in HOTBAR {
                     let gated = !action.rank_ok(ranks.martial, ranks.hunt, ranks.arcane)
                         || binds.get(action).is_none();
@@ -105,7 +105,8 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
 
 pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
     let screen = ctx.screen_rect();
-    let lines: Vec<&str> = combat.log.lines().collect();
+    let log_lines = combat.log_lines();
+    let lines: Vec<&str> = log_lines.iter().map(String::as_str).collect();
     if lines.is_empty() {
         return;
     }
@@ -130,13 +131,13 @@ pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
 }
 
 pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
-    if combat.dead {
+    if combat.is_dead() {
         return;
     }
-    let Some(id) = combat.lock else {
+    let Some(id) = combat.lock_id() else {
         return;
     };
-    let Some(h) = combat.hostiles.iter().find(|h| h.idx == id && h.alive) else {
+    let Some(h) = combat.hostiles().iter().find(|h| h.idx == id && h.alive) else {
         return;
     };
     let max = h.max_hp.max(1.0);
@@ -148,7 +149,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     } else {
         Color32::from_rgb(40, 180, 64)
     };
-    let band = con_band(combat.player.stats.level, h.level);
+    let band = con_band(combat.player().stats.level, h.level);
     let (nr, ng, nb) = band.rgb();
     let name_color = Color32::from_rgb(nr, ng, nb);
     let screen = ctx.screen_rect();
@@ -198,7 +199,7 @@ pub fn nameplate_report(
     screen_h: f32,
 ) -> Vec<NameplateInfo> {
     let mut out = Vec::new();
-    for h in &combat.hostiles {
+    for h in combat.hostiles() {
         if !h.alive {
             continue;
         }
@@ -208,7 +209,7 @@ pub fn nameplate_report(
         if dist > NAMEPLATE_RANGE_M {
             continue;
         }
-        let band = con_band(combat.player.stats.level, h.level);
+        let band = con_band(combat.player().stats.level, h.level);
         let world = Vec4::new(h.x as f32, 1.55, h.z as f32, 1.0);
         let clip = view_proj * world;
         if clip.w.abs() < 1e-5 {
@@ -236,7 +237,7 @@ pub fn draw_nameplates(
     eye: Vec3,
     view_proj: glam::Mat4,
 ) {
-    if combat.dead {
+    if combat.is_dead() {
         return;
     }
     let screen = ctx.screen_rect();
@@ -245,7 +246,7 @@ pub fn draw_nameplates(
         if !plate.on_screen {
             continue;
         }
-        let band = con_band(combat.player.stats.level, plate.level);
+        let band = con_band(combat.player().stats.level, plate.level);
         let (r, g, b) = band.rgb();
         let color = Color32::from_rgb(r, g, b);
         let x = plate.screen_x - 40.0;
