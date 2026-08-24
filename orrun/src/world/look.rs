@@ -46,7 +46,7 @@ pub const SNOW_SLOPE_END: f32 = 0.68;
 pub fn install_daylight(world: &mut World) {
     let sky = Sky::daylight();
     world.set_sun(SUN_DIR, 0.34);
-    world.light.color = sky.sun_color.to_vec3();
+    world.set_sun_color(sky.sun_color.to_vec3());
     // The walker carries a lantern. In daylight it is drowned by the sun; in a
     // cave or at dusk it is the only light there is.
     world.set_torch(Some(TorchLight::lantern()));
@@ -144,7 +144,7 @@ mod tests {
         let sky = world.sky().expect("sky");
         let haze = world.haze().expect("haze");
         assert_eq!(sky.horizon, haze.color);
-        assert_eq!(world.clear_color, sky.horizon);
+        assert_eq!(world.clear_color(), sky.horizon);
         assert!(world.sky().is_some());
         assert_eq!(world.shadows(), Some(ShadowSettings::default()));
     }

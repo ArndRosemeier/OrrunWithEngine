@@ -3364,7 +3364,7 @@ impl Driver {
         };
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
         let aspect = frame.aspect.max(0.1);
-        let view_proj = world.camera.view_projection(aspect);
+        let view_proj = world.camera().view_projection(aspect);
         let plates = hud::nameplate_report(
             self.session.combat(),
             eye,
@@ -5838,7 +5838,7 @@ fn draw_combat_hud(session: &WorldSession, world: &World, frame: &Frame) {
     hud::draw_hotbar_and_log(&ctx, session.combat(), session.key_binds());
     if let Some(pos) = session.player_position() {
         let eye = Vec3::new(pos.x as f32, pos.y as f32 + EYE_HEIGHT_M, pos.z as f32);
-        let view_proj = world.camera.view_projection(frame.aspect.max(0.1));
+        let view_proj = world.camera().view_projection(frame.aspect.max(0.1));
         hud::draw_nameplates(&ctx, session.combat(), eye, view_proj);
     }
 }

@@ -1422,8 +1422,7 @@ impl WorldSession {
     fn apply_travel_view(&self, world: &mut World, view: TravelView) -> Result<(), SessionError> {
         world.set_view_distance(view.view_distance_m)?;
         world.look_at_global(view.look.eye, view.look.target)?;
-        world.camera.fov_y_degrees = view.fov_y_degrees;
-        world.camera.near = view.near_m;
+        world.set_camera_lens(view.fov_y_degrees, view.near_m);
         let sky = world.sky().unwrap_or_else(Sky::daylight);
         world.set_haze(Some(
             Haze::new(sky.horizon, view.haze_visibility_m).thinning_above(0.0, 4_000.0),

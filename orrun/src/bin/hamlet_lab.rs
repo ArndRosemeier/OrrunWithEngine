@@ -278,7 +278,7 @@ fn main() {
 
     Engine::run("Orrun — Hamlet Lab", move |world, frame| {
         if frame.first {
-            world.clear_color = Color::rgb(20, 22, 24);
+            world.set_clear_color(Color::rgb(20, 22, 24));
         }
 
         let ctx = frame.ui.ctx().clone();
