@@ -5,6 +5,7 @@
 
 use engine::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
 use engine::prelude::*;
+use orrun::gamedata::GameData;
 use orrun::hamlet::{castle_layout, plan, HamletLabConfig, Plan2D, Shape, ShapeKind};
 
 const MIN_ZOOM: f32 = 0.5;
@@ -274,6 +275,7 @@ fn obb_corners(center: glam::Vec2, half_x: f32, half_z: f32, yaw: f32) -> [glam:
 }
 
 fn main() {
+    let _game_data = GameData::load("data/OrrunGameData.xml").expect("canonical GameData");
     let mut lab = HamletLab::new();
 
     Engine::run("Orrun — Hamlet Lab", move |world, frame| {

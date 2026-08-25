@@ -5,7 +5,7 @@ use engine::world::World;
 use engine::Frame;
 use glam::{Vec3, Vec4};
 
-use crate::combat::{con_band, WorldCombat};
+use crate::combat::WorldCombat;
 use crate::controls::{Action, KeyBinds};
 
 const HOTBAR: [Action; 9] = [
@@ -153,9 +153,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
     } else {
         Color32::from_rgb(40, 180, 64)
     };
-    let band = con_band(combat.player().stats.level, h.level);
-    let (nr, ng, nb) = band.rgb();
-    let name_color = Color32::from_rgb(nr, ng, nb);
+    let name_color = Color32::WHITE;
     let screen = ctx.screen_rect();
     let x = (screen.width() * 0.5 - 110.0).max(12.0);
     egui::Area::new(egui::Id::new("target_frame"))
@@ -167,7 +165,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(format!("{}  ({})", h.name, band.as_str()))
+                        egui::RichText::new(format!("{}", h.name))
                             .size(16.0)
                             .color(name_color),
                     );
@@ -185,8 +183,6 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
 #[derive(Clone, Debug)]
 pub struct NameplateInfo {
     pub name: String,
-    pub level: i32,
-    pub con: &'static str,
     pub on_screen: bool,
     pub screen_x: f32,
     pub screen_y: f32,
@@ -213,7 +209,6 @@ pub fn nameplate_report(
         if dist > NAMEPLATE_RANGE_M {
             continue;
         }
-        let band = con_band(combat.player().stats.level, h.level);
         let world = Vec4::new(h.x as f32, 1.55, h.z as f32, 1.0);
         let clip = view_proj * world;
         if clip.w.abs() < 1e-5 {
@@ -225,8 +220,6 @@ pub fn nameplate_report(
         let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * screen_h;
         out.push(NameplateInfo {
             name: h.name.clone(),
-            level: h.level,
-            con: band.as_str(),
             on_screen,
             screen_x: sx,
             screen_y: sy,
@@ -250,9 +243,7 @@ pub fn draw_nameplates(
         if !plate.on_screen {
             continue;
         }
-        let band = con_band(combat.player().stats.level, plate.level);
-        let (r, g, b) = band.rgb();
-        let color = Color32::from_rgb(r, g, b);
+        let color = Color32::WHITE;
         let x = plate.screen_x - 40.0;
         let y = plate.screen_y - 28.0;
         egui::Area::new(egui::Id::new(("nameplate", i)))
@@ -261,7 +252,7 @@ pub fn draw_nameplates(
             .interactable(false)
             .show(ctx, |ui| {
                 ui.label(
-                    egui::RichText::new(format!("{}  {}", plate.name, plate.level))
+                    egui::RichText::new(plate.name.clone())
                         .size(13.0)
                         .color(color),
                 );

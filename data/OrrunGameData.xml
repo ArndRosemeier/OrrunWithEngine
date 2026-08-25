@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<OrrunGameData schema_version="1">
+  <skills>
+    <skill id="slashing_damage" name="Slashing Damage" level_scale="1.0" />
+    <skill id="fire_damage" name="Fire Damage" level_scale="1.0" />
+    <skill id="frost_damage" name="Frost Damage" level_scale="1.0" />
+    <skill id="piercing_damage" name="Piercing Damage" level_scale="1.0" />
+    <skill id="bludgeoning_damage" name="Bludgeoning Damage" level_scale="1.0" />
+    <skill id="poison_damage" name="Poison Damage" level_scale="1.0" />
+    <skill id="lightning_damage" name="Lightning Damage" level_scale="1.0" />
+    <skill id="root" name="Root" level_scale="1.0" />
+    <skill id="hold" name="Hold" level_scale="1.0" />
+    <skill id="snare" name="Snare" level_scale="1.0" />
+    <skill id="charm" name="Charm" level_scale="1.0" />
+    <skill id="healing" name="Healing" level_scale="1.0" />
+    <skill id="illusion" name="Illusion" level_scale="1.0" />
+  </skills>
+  <factions>
+    <faction id="neutral" name="Neutral" neutral="true" />
+    <faction id="citizen" name="Citizen" neutral="false" />
+    <faction id="wild" name="Wild" neutral="false" />
+    <faction id="robber" name="Robber" neutral="false" />
+  </factions>
+  <effects>
+    <effect id="slashing_damage" name="Slashing Damage" kind="damage" skill_id="slashing_damage" progression="skill_level" />
+    <effect id="fire_damage" name="Fire Damage" kind="damage" skill_id="fire_damage" progression="skill_level" />
+    <effect id="frost_damage" name="Frost Damage" kind="damage" skill_id="frost_damage" progression="skill_level" />
+    <effect id="piercing_damage" name="Piercing Damage" kind="damage" skill_id="piercing_damage" progression="skill_level" />
+    <effect id="bludgeoning_damage" name="Bludgeoning Damage" kind="damage" skill_id="bludgeoning_damage" progression="skill_level" />
+    <effect id="poison_damage" name="Poison Damage" kind="damage" skill_id="poison_damage" progression="skill_level" />
+    <effect id="lightning_damage" name="Lightning Damage" kind="damage" skill_id="lightning_damage" progression="skill_level" />
+    <effect id="root" name="Root" kind="control" skill_id="root" progression="skill_level" />
+    <effect id="hold" name="Hold" kind="control" skill_id="hold" progression="skill_level" />
+    <effect id="snare" name="Snare" kind="control" skill_id="snare" progression="skill_level" />
+    <effect id="charm" name="Charm" kind="control" skill_id="charm" progression="skill_level" />
+    <effect id="healing" name="Healing" kind="heal" skill_id="healing" progression="skill_level" />
+  </effects>
+  <actions>
+    <action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="1" application="single_target" range_m="1.8" /></effects></action>
+    <action id="fire_bolt" name="Fire Bolt" target="hostile"><effects><effect effect_id="fire_damage" magnitude="1" application="single_target" range_m="18" /></effects></action>
+    <action id="mend" name="Mend" target="friendly"><effects><effect effect_id="healing" magnitude="1" application="single_target" range_m="18" /></effects></action>
+  </actions>
+  <players>
+    <profile id="default_player" name="Orrun Adventurer" faction="citizen"><skill id="slashing_damage" /><skill id="fire_damage" /><skill id="healing" /></profile>
+  </players>
+  <mobs>
+    <mob id="crawler_spider_wolf" name="Wolf-spider" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk"><action id="strike" /></mob>
+    <mob id="crawler_scorpion" name="Scorpion" faction="wild" mode="active" hp="110" armor="2" damage="14" movement_id="walk"><action id="strike" /></mob>
+    <mob id="line_mother" name="Line-Mother" faction="wild" mode="active" hp="600" armor="8" damage="35" movement_id="walk"><action id="strike" /></mob>
+    <mob id="green_blob" name="Green Blob" faction="wild" mode="passive" hp="90" armor="1" damage="8" movement_id="walk"><action id="strike" /></mob>
+    <mob id="orc" name="Orc" faction="wild" mode="active" hp="150" armor="4" damage="20" movement_id="walk"><action id="strike" /></mob>
+    <mob id="tribal" name="Tribal" faction="wild" mode="active" hp="130" armor="3" damage="18" movement_id="walk"><action id="strike" /></mob>
+    <mob id="bandit" name="Bandit" faction="robber" mode="active" hp="120" armor="3" damage="17" movement_id="walk"><action id="strike" /></mob>
+    <mob id="orc_skull" name="Orc Skull" faction="wild" mode="active" hp="220" armor="6" damage="27" movement_id="walk"><action id="strike" /><action id="fire_bolt" /></mob>
+    <mob id="skeleton_warrior" name="Skeleton Warrior" faction="wild" mode="active" hp="160" armor="5" damage="22" movement_id="walk"><action id="strike" /></mob>
+    <mob id="skeleton_minion" name="Skeleton Minion" faction="wild" mode="active" hp="100" armor="3" damage="15" movement_id="walk"><action id="strike" /></mob>
+    <mob id="skeleton_mage" name="Skeleton Mage" faction="wild" mode="active" hp="130" armor="3" damage="20" movement_id="walk"><action id="strike" /><action id="fire_bolt" /></mob>
+    <mob id="yeti" name="Yeti" faction="wild" mode="active" hp="350" armor="8" damage="32" movement_id="walk"><action id="strike" /></mob>
+    <mob id="demon" name="Demon" faction="wild" mode="active" hp="480" armor="10" damage="40" movement_id="walk"><action id="strike" /></mob>
+    <mob id="blue_demon" name="Blue Demon" faction="wild" mode="active" hp="450" armor="9" damage="38" movement_id="walk"><action id="strike" /></mob>
+    <mob id="tribal_veteran" name="Tribal Veteran" faction="wild" mode="active" hp="250" armor="6" damage="30" movement_id="walk"><action id="strike" /></mob>
+  </mobs>
+  <movement><spec id="walk" speed_mps="2.5" /></movement>
+  <hamlet enabled="true" width="32" depth="32" kit_catalog="catalogs/medieval.json"><layer id="terrain" /><layer id="roads" /><layer id="dwellings" /></hamlet>
+  <defaults><value key="player_faction" value="citizen" /><value key="neutral_faction" value="neutral" /><value key="default_player_profile" value="default_player" /><value key="mob_sight_m" value="24" /><value key="mob_hear_m" value="12" /><value key="mob_leash_m" value="48" /><value key="mob_social_m" value="10" /></defaults>
+</OrrunGameData>

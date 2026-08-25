@@ -128,7 +128,6 @@ WOLF_XP_PER = 12
 # Line-Mother first try HP/armor/swing/xp kept; dmg 18 one-shot the
 # L9 tank window (player died before 420 HP). Dropped auto to 12 so
 # heart ends 20–50% HP. Slam 24 (= 2× auto). Speed/telegraph locked.
-MOTHER_LEVEL = 9
 MOTHER_HP = 420
 MOTHER_DMG = 12
 MOTHER_SWING_S = 2.2
@@ -145,12 +144,10 @@ MOTHER_ENRAGE_DMG = 1.30
 MOTHER_ENRAGE_SWING = 0.77
 
 # Scorpion = L3 even trash, wolf-shaped + poison
-SCORP_LEVEL = 3
 SCORP_POISON_DPS = 3.0
 SCORP_POISON_S = 4.0
 
 # GreenBlob — L2 even trash, slow, no poison, no token
-BLOB_LEVEL = 2
 BLOB_HP = 82
 BLOB_DMG = 11
 BLOB_SWING_S = 2.4
@@ -160,7 +157,6 @@ BLOB_REACH_M = 1.6
 BLOB_XP = 47
 
 # Orc — L4 grunt (Quaternius big). No special.
-ORC_LEVEL = 4
 ORC_HP = 130
 ORC_DMG = 15
 ORC_SWING_S = 2.0
@@ -170,7 +166,6 @@ ORC_REACH_M = 2.0
 ORC_XP = 80
 
 # Yeti — L6 brute, weaker Line-Mother slam
-YETI_LEVEL = 6
 YETI_HP = 240
 YETI_DMG = 14
 YETI_SWING_S = 2.3
@@ -183,7 +178,6 @@ YETI_REACH_M = 2.2
 YETI_XP = 160
 
 # Demon — L8 melee, Punch only. Shout tell HOLD (no clip).
-DEMON_LEVEL = 8
 DEMON_HP = 220
 DEMON_ARMOR = 12
 DEMON_DMG = 16
@@ -193,7 +187,6 @@ DEMON_SPEED = 3.2
 DEMON_XP = 180
 
 # BlueDemon - L7 melee, Punch only. Bolt/self-Mend/Ward tells HOLD (no mob caster API).
-BLUE_DEMON_LEVEL = 7
 BLUE_DEMON_HP = 155
 BLUE_DEMON_ARMOR = 9
 BLUE_DEMON_DMG = 12
@@ -203,7 +196,6 @@ BLUE_DEMON_SPEED = 3.6
 BLUE_DEMON_XP = 140
 
 # Tribal Veteran - L10 melee, Punch only. Pin/slow HOLD (no clip).
-TRIBAL_VETERAN_LEVEL = 10
 TRIBAL_VETERAN_HP = 210
 TRIBAL_VETERAN_ARMOR = 10
 TRIBAL_VETERAN_DMG = 22
@@ -230,7 +222,6 @@ FIRST_CLEAR = {0: 80, 1: 140, 2: 200}
 MIN_PER_DUNGEON = {0: 4, 1: 7, 2: 12}
 
 DUNGEON_WOLVES = {0: 2, 1: 4, 2: 6}  # LOCKED
-DUNGEON_WOLF_LEVEL = {0: 1, 1: 4, 2: 6}
 
 
 def trunc(x: float) -> int:
@@ -255,14 +246,13 @@ def bow_range_mult(distance: float) -> float:
     return (BOW_FALLOFF_END_M - distance) / (BOW_FALLOFF_END_M - BOW_FULL_M)
 
 
-def wolf_sheet(level: int) -> Dict[str, Any]:
+def wolf_sheet() -> Dict[str, Any]:
     return {
         "id": "crawler_spider_wolf",
         "name": "wolf-spider",
-        "level": level,
-        "hp": WOLF_HP_BASE + WOLF_HP_PER * (level - 1),
+        "hp": WOLF_HP_BASE,
         "armor": WOLF_ARMOR,
-        "damage": WOLF_DMG_BASE + WOLF_DMG_PER * (level - 1),
+        "damage": WOLF_DMG_BASE,
         "swing_s": WOLF_SWING_S,
         "reach_m": WOLF_REACH_M,
         "speed_mps": WOLF_SPEED,
@@ -270,7 +260,7 @@ def wolf_sheet(level: int) -> Dict[str, Any]:
         "hear_m": HEAR_AGGRO_M,
         "leash_m": LEASH_M,
         "social_m": SOCIAL_M,
-        "xp": WOLF_XP_BASE + WOLF_XP_PER * (level - 1),
+        "xp": WOLF_XP_BASE,
         "token_brood": 1,
         "specials": [],
         "scale_hp": "70 + 18*(lvl-1)",
@@ -283,7 +273,6 @@ def mother_sheet() -> Dict[str, Any]:
     return {
         "id": "line_mother",
         "name": "Line-Mother",
-        "level": MOTHER_LEVEL,
         "hp": MOTHER_HP,
         "armor": MOTHER_ARMOR,
         "damage": MOTHER_DMG,
@@ -307,11 +296,10 @@ def mother_sheet() -> Dict[str, Any]:
 
 
 def scorpion_sheet() -> Dict[str, Any]:
-    w = wolf_sheet(SCORP_LEVEL)
+    w = wolf_sheet()
     return {
         "id": "crawler_scorpion",
         "name": "scorpion",
-        "level": SCORP_LEVEL,
         "hp": w["hp"],
         "armor": w["armor"],
         "damage": w["damage"],
@@ -332,7 +320,6 @@ def blob_sheet() -> Dict[str, Any]:
     return {
         "id": "green_blob",
         "name": "GreenBlob",
-        "level": BLOB_LEVEL,
         "hp": BLOB_HP,
         "armor": BLOB_ARMOR,
         "damage": BLOB_DMG,
@@ -353,7 +340,6 @@ def orc_sheet() -> Dict[str, Any]:
     return {
         "id": "orc",
         "name": "orc",
-        "level": ORC_LEVEL,
         "hp": ORC_HP,
         "armor": ORC_ARMOR,
         "damage": ORC_DMG,
@@ -374,7 +360,6 @@ def demon_sheet() -> Dict[str, Any]:
     return {
         "id": "demon",
         "name": "demon",
-        "level": DEMON_LEVEL,
         "hp": DEMON_HP,
         "armor": DEMON_ARMOR,
         "damage": DEMON_DMG,
@@ -395,7 +380,6 @@ def blue_demon_sheet() -> Dict[str, Any]:
     return {
         "id": "blue_demon",
         "name": "blue_demon",
-        "level": BLUE_DEMON_LEVEL,
         "hp": BLUE_DEMON_HP,
         "armor": BLUE_DEMON_ARMOR,
         "damage": BLUE_DEMON_DMG,
@@ -416,7 +400,6 @@ def tribal_veteran_sheet() -> Dict[str, Any]:
     return {
         "id": "tribal_veteran",
         "name": "tribal_veteran",
-        "level": TRIBAL_VETERAN_LEVEL,
         "hp": TRIBAL_VETERAN_HP,
         "armor": TRIBAL_VETERAN_ARMOR,
         "damage": TRIBAL_VETERAN_DMG,
@@ -437,7 +420,6 @@ def yeti_sheet() -> Dict[str, Any]:
     return {
         "id": "yeti",
         "name": "yeti",
-        "level": YETI_LEVEL,
         "hp": YETI_HP,
         "armor": YETI_ARMOR,
         "damage": YETI_DMG,
@@ -458,8 +440,8 @@ def yeti_sheet() -> Dict[str, Any]:
 
 
 MOB_BUILDERS = {
-    "crawler_spider_wolf": lambda lvl=1: wolf_sheet(lvl),
-    "crawler_scorpion": lambda lvl=None: scorpion_sheet(),
+    "crawler_spider_wolf": wolf_sheet,
+    "crawler_scorpion": scorpion_sheet,
     "line_mother": lambda lvl=None: mother_sheet(),
     "green_blob": lambda lvl=None: blob_sheet(),
     "orc": lambda lvl=None: orc_sheet(),
@@ -1188,7 +1170,6 @@ def simulate_fight(
     seed: int = 1,
     potions: Optional[int] = None,
     arrows: Optional[int] = None,
-    mob_level: Optional[int] = None,
     kite: Optional[bool] = None,
     notes: str = "",
 ) -> Dict[str, Any]:
@@ -1211,7 +1192,7 @@ def simulate_fight(
     mobs: List[Mob] = []
     for i in range(count):
         if mob_id == "crawler_spider_wolf":
-            sh = wolf_sheet(mob_level if mob_level is not None else level)
+            sh = wolf_sheet()
         else:
             sh = builder()
         sheets.append(sh)
@@ -1252,7 +1233,6 @@ def simulate_fight(
         "player_level": level,
         "discipline": disc,
         "mob_id": mob_id,
-        "mob_level": sheets[0]["level"] if sheets else None,
         "count": count,
         "seed": seed,
         "potions_used": p.spells.get("potion", 0),
@@ -1371,7 +1351,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "crawler_spider_wolf",
         "count": 1,
-        "mob_level": 1,
         "potions": 1,
         "kite": False,
         "band": "even_1v1",
@@ -1384,7 +1363,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "crawler_spider_wolf",
         "count": 2,
-        "mob_level": 1,
         "potions": 0,
         "kite": False,
         "band": "2pull_nopot",
@@ -1397,7 +1375,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "crawler_spider_wolf",
         "count": 2,
-        "mob_level": 1,
         "potions": 1,
         "kite": False,
         "band": "2pull_pot",
@@ -1410,7 +1387,6 @@ SCENARIOS = [
         "discipline": "Hunt",
         "mob": "crawler_scorpion",
         "count": 1,
-        "mob_level": 3,
         "potions": 1,
         "kite": True,
         "band": "even_1v1",
@@ -1423,7 +1399,6 @@ SCENARIOS = [
         "discipline": "Arcane",
         "mob": "crawler_spider_wolf",
         "count": 4,
-        "mob_level": 4,
         "potions": 1,
         "kite": True,
         "band": "pale_hall",
@@ -1436,7 +1411,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "line_mother",
         "count": 1,
-        "mob_level": 9,
         "potions": 1,
         "kite": False,
         "band": "heart",
@@ -1449,7 +1423,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "green_blob",
         "count": 1,
-        "mob_level": 2,
         "potions": 1,
         "kite": False,
         "band": "even_1v1",
@@ -1462,7 +1435,6 @@ SCENARIOS = [
         "discipline": "Martial",
         "mob": "crawler_spider_wolf",
         "count": 2,
-        "mob_level": 1,
         "potions": 1,
         "kite": False,
         "band": "d1_clear",
@@ -1479,7 +1451,6 @@ def run_scenario(sc: Dict[str, Any], seed: int = 1) -> Dict[str, Any]:
         count=sc["count"],
         seed=seed,
         potions=sc["potions"],
-        mob_level=sc.get("mob_level"),
         kite=sc.get("kite"),
         notes=sc["title"],
     )
@@ -1495,7 +1466,7 @@ def run_scenario(sc: Dict[str, Any], seed: int = 1) -> Dict[str, Any]:
 def oneshot_sanity() -> Dict[str, Any]:
     """L5 Arcane must not be one-shot by 4 L4 wolves in the first swing."""
     p = player_stats(5, "Arcane")
-    w = wolf_sheet(4)
+    w = wolf_sheet()
     hit = mitigation(w["damage"], p["attrs"]["Grit"])
     volley = hit * 4
     return {
@@ -1549,14 +1520,12 @@ def xp_curve() -> Dict[str, Any]:
         "first_clear_bonus": FIRST_CLEAR,
         "minutes_per_dungeon": MIN_PER_DUNGEON,
         "dungeon_wolf_counts": DUNGEON_WOLVES,
-        "dungeon_wolf_level": DUNGEON_WOLF_LEVEL,
     }
 
 
 def dungeon_xp(tier: int, first: bool) -> Dict[str, Any]:
     n = DUNGEON_WOLVES[tier]
-    lvl = DUNGEON_WOLF_LEVEL[tier]
-    trash = n * wolf_sheet(lvl)["xp"]
+    trash = n * wolf_sheet()["xp"]
     elite = MOTHER_XP if tier == 2 else 0
     heart = HEART_BONUS[tier]  # named dies
     first_b = FIRST_CLEAR[tier] if first else 0
@@ -1678,9 +1647,9 @@ def run_all(seed: int = 1) -> Dict[str, Any]:
         "xp_curve": xp_curve(),
         "leveling_path": path,
         "mob_sheets": {
-            "crawler_spider_wolf_l1": wolf_sheet(1),
-            "crawler_spider_wolf_l4": wolf_sheet(4),
-            "crawler_spider_wolf_l6": wolf_sheet(6),
+            "crawler_spider_wolf_l1": wolf_sheet(),
+            "crawler_spider_wolf_l4": wolf_sheet(),
+            "crawler_spider_wolf_l6": wolf_sheet(),
             "line_mother": mother_sheet(),
             "crawler_scorpion": scorpion_sheet(),
             "green_blob": blob_sheet(),
@@ -1723,7 +1692,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             count=args.count,
             seed=args.seed,
             potions=args.potions,
-            mob_level=args.mob_level,
         )
         r["band_pass"] = None
         r["title"] = f"L{args.player_level} {args.discipline} vs {args.count} {args.mob}"

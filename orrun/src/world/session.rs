@@ -310,6 +310,7 @@ struct TravelState {
 }
 
 pub struct WorldSession {
+    game_data: Arc<crate::gamedata::GameData>,
     surface: Arc<ContinentalSurface>,
     /// Sub-atlas water around the player, scanned off the main thread.
     ponds: PondWindow,
@@ -363,6 +364,22 @@ pub struct WorldSession {
 
 impl WorldSession {
     pub fn new(surface: Arc<ContinentalSurface>) -> Self {
+        Self::with_game_data(
+            surface,
+            Arc::new(
+                crate::gamedata::GameData::load(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../data/OrrunGameData.xml"),
+                )
+                .expect("canonical GameData"),
+            ),
+        )
+    }
+
+    pub fn with_game_data(
+        surface: Arc<ContinentalSurface>,
+        game_data: Arc<crate::gamedata::GameData>,
+    ) -> Self {
         let ponds = PondWindow::new(Arc::clone(&surface));
         let stream = WorldStream::new(Arc::clone(&surface), ponds.shared());
         Self {
@@ -387,7 +404,13 @@ impl WorldSession {
             proxy_spec: None,
             proxy: None,
             overworld: None,
-            combat: crate::combat::WorldCombat::specialist(1, crate::combat::Discipline::Martial),
+            game_data: Arc::clone(&game_data),
+            combat: crate::combat::WorldCombat::specialist_with_game_data(
+                Arc::clone(&game_data),
+                1,
+                crate::combat::Discipline::Martial,
+            ),
+
             combat_layer: super::combat_layer::CombatLayer::install(),
             inventory: crate::inventory::Inventory::create_kit(),
             ground_loot: Vec::new(),
@@ -416,6 +439,10 @@ impl WorldSession {
     /// Attach a proxy built off the render thread. Travel will upload it once.
     pub fn attach_proxy(&mut self, spec: ContinentProxySpec) {
         self.proxy_spec = Some(spec);
+    }
+
+    pub fn game_data(&self) -> &Arc<crate::gamedata::GameData> {
+        &self.game_data
     }
 
     pub fn combat(&self) -> &crate::combat::WorldCombat {

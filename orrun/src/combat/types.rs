@@ -245,8 +245,6 @@ pub struct WorldHostile {
     pub root_s: f64,
     /// Display name for the lock tell. Fixture wolves use "wolf-spider".
     pub name: String,
-    /// Mob level for consideration coloring.
-    pub level: i32,
     /// Sheet / catalog id (orc, tribal, orc_skull, crawler_spider_wolf).
     pub mob_id: String,
     /// Visible body entity, if the fixture mesh has been spawned.
@@ -291,6 +289,8 @@ pub struct CombatStep {
 
 #[derive(Clone, Debug)]
 pub struct WorldCombat {
+    #[allow(dead_code)]
+    game_data: Option<std::sync::Arc<crate::gamedata::GameData>>,
     player: LivePlayer,
     lock: Option<i32>,
     cycle: Vec<i32>,
@@ -345,7 +345,6 @@ impl WorldHostile {
             slow_s: 0.0,
             root_s: 0.0,
             name: sheet.name.clone(),
-            level: sheet.level,
             mob_id: mob_id.into(),
             entity: None,
             damage: sheet.damage,
@@ -378,6 +377,17 @@ impl WorldHostile {
 }
 
 impl WorldCombat {
+    pub fn game_data(&self) -> Option<&std::sync::Arc<crate::gamedata::GameData>> {
+        self.game_data.as_ref()
+    }
+    pub(crate) fn mob_sheet(&self, id: &str) -> crate::combat::sheets::MobSheet {
+        let data = self
+            .game_data
+            .as_ref()
+            .expect("WorldCombat requires GameData for mob lookup");
+        data.mob_sheet(id)
+            .unwrap_or_else(|err| panic!("invalid combat mob {id:?}: {err}"))
+    }
     pub fn player(&self) -> &LivePlayer {
         &self.player
     }
@@ -534,7 +544,8 @@ impl WorldCombat {
     pub fn reset_for_encounter(&mut self) {
         let player = self.player.clone();
         let hostiles = self.hostiles.clone();
-        *self = Self::specialist(player.stats.level, player.stats.discipline);
+        let game_data = self.game_data.clone();
+        *self = Self::specialist_with_data(game_data, player.stats.level, player.stats.discipline);
         self.player = player;
         self.hostiles = hostiles;
     }
@@ -608,9 +619,26 @@ impl WorldCombat {
     }
 
     pub fn specialist(level: i32, discipline: Discipline) -> Self {
+        Self::specialist_with_data(None, level, discipline)
+    }
+
+    pub fn specialist_with_game_data(
+        game_data: std::sync::Arc<crate::gamedata::GameData>,
+        level: i32,
+        discipline: Discipline,
+    ) -> Self {
+        Self::specialist_with_data(Some(game_data), level, discipline)
+    }
+
+    fn specialist_with_data(
+        #[allow(dead_code)] game_data: Option<std::sync::Arc<crate::gamedata::GameData>>,
+        level: i32,
+        discipline: Discipline,
+    ) -> Self {
         Self {
-            player: LivePlayer::specialist(level, discipline),
+            game_data,
             lock: None,
+            player: LivePlayer::specialist(level, discipline),
             cycle: Vec::new(),
             auto_cd: MELEE_SWING_S,
             last_auto_dealt: 0,
@@ -769,7 +797,7 @@ impl WorldCombat {
     }
 
     fn award_hostile_xp(&mut self, hostile: &WorldHostile) {
-        let sheet = crate::combat::sheets::mob_sheet(&hostile.mob_id, Some(hostile.level))
+        let sheet = crate::combat::sheets::mob_sheet(&hostile.mob_id)
             .unwrap_or_else(|err| panic!("missing XP sheet for {}: {err}", hostile.mob_id));
         self.player.xp += sheet.xp;
         while let Some(need) = crate::combat::sheets::xp_to_next(self.player.stats.level) {
@@ -949,10 +977,9 @@ impl WorldCombat {
                 continue;
             };
             let h = &self.hostiles[slot];
-            let sheet =
-                crate::combat::sheets::mob_sheet(&h.mob_id, Some(h.level)).unwrap_or_else(|err| {
-                    panic!("missing special-attack sheet for {}: {err}", h.mob_id)
-                });
+            let sheet = crate::combat::sheets::mob_sheet(&h.mob_id).unwrap_or_else(|err| {
+                panic!("missing special-attack sheet for {}: {err}", h.mob_id)
+            });
             let (Some(raw), Some(telegraph)) = (sheet.slam_damage, sheet.telegraph_s) else {
                 self.special_tele.remove(&idx);
                 continue;
@@ -1053,7 +1080,7 @@ mod tests {
     use super::*;
 
     fn dummy_wolf(dmg: i32) -> WorldHostile {
-        let mut sheet = crate::combat::sheets::wolf_sheet(1);
+        let mut sheet = crate::combat::sheets::wolf_sheet();
         sheet.damage = dmg;
         let mut wolf =
             WorldHostile::from_sheet(0, 1.0, 0.0, &sheet, "crawler_spider_wolf", 1.0, 0.0);

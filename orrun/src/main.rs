@@ -36,6 +36,7 @@ use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
 use orrun::controls::{is_reserved, Action};
+use orrun::gamedata::GameData;
 use orrun::hud;
 use orrun::save::{SaveError, SavedStand};
 use orrun::settings::{self, clamp_continent_size, Settings};
@@ -707,6 +708,7 @@ fn opening_entry(
 }
 
 fn main() {
+    let game_data = Arc::new(GameData::load("data/OrrunGameData.xml").expect("canonical GameData"));
     let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
     let (seed, size) = parse_args(prefs.continent_size());
     // Read before the window opens. FORMAT 1 migrates. Garbage JSON is
@@ -794,7 +796,8 @@ fn main() {
                 );
                 *status.lock().expect("title status") = String::new();
                 viewer = Some(AtlasViewer::new(Arc::clone(&atlas), Arc::clone(&surface)));
-                let mut world_session = WorldSession::new(surface);
+                let mut world_session =
+                    WorldSession::with_game_data(surface, Arc::clone(&game_data));
                 world_session.attach_proxy(proxy);
                 if let Some(stand) = remembered {
                     world_session.apply_save(&stand);

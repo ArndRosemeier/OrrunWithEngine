@@ -573,7 +573,7 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = wolf_sheet(1);
+        let sheet = wolf_sheet();
         combat.clear_hostiles();
         combat.reset_encounter_state();
         // First at 1.5 m so wolf reach (1.8 m) connects. The other two sit

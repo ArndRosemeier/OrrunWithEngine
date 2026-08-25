@@ -4,7 +4,6 @@
 //! seating. Props are static Model loads; bandits sit through the combat layer.
 
 use crate::atlas::Biome;
-use crate::combat::sheets::bandit_sheet;
 use crate::combat::types::{WorldCombat, WorldHostile};
 use crate::hamlet::kit;
 use crate::world::settlement::HamletStand;
@@ -341,8 +340,8 @@ pub fn is_bandit_id(mob_id: &str) -> bool {
     matches!(mob_id, "bandit" | "male_bandit")
 }
 
-fn hostile_from_sheet(idx: i32, x: f64, z: f64) -> WorldHostile {
-    let sheet = bandit_sheet();
+fn hostile_from_sheet(combat: &WorldCombat, idx: i32, x: f64, z: f64) -> WorldHostile {
+    let sheet = combat.mob_sheet("bandit");
     WorldHostile::from_sheet(idx, x, z, &sheet, sheet.id.clone(), x, z)
 }
 
@@ -350,7 +349,8 @@ pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {
     let mut idx = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     for site in sites {
         for (x, z) in site.bandit_xz() {
-            combat.hostiles_mut().push(hostile_from_sheet(idx, x, z));
+            let hostile = hostile_from_sheet(combat, idx, x, z);
+            combat.hostiles_mut().push(hostile);
             idx += 1;
         }
     }

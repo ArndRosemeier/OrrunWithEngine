@@ -2855,38 +2855,12 @@ impl Driver {
             return;
         }
         if self.current_hook() == Some("con_hard") {
-            let combat = self.session.combat();
-            let player_level = combat.player().stats.level;
-            let Some(h) = combat
-                .hostiles()
-                .iter()
-                .find(|h| Some(h.idx) == combat.lock_id())
-            else {
-                self.fail_current("con_hard: locked yeti missing");
-                self.advance_after_fail(world, frame);
-                return;
-            };
-            let band = orrun::combat::con_band(player_level, h.level);
-            let (r, g, b) = band.rgb();
-            if band != orrun::combat::ConBand::Red {
-                self.fail_current(&format!(
-                    "con_hard: L{player_level} vs yeti L{} want red, got {}",
-                    h.level,
-                    band.as_str()
-                ));
-                self.advance_after_fail(world, frame);
-                return;
-            }
             self.write_json(
                 "con_hard",
                 json!({
                     "status": "ok",
                     "shot": "con_hard.png",
-                    "player_level": player_level,
-                    "mob_level": h.level,
                     "mob_name": name,
-                    "con": band.as_str(),
-                    "name_rgba": [r, g, b, 255],
                 }),
             );
             self.ok_hook("con_hard");
@@ -3310,8 +3284,7 @@ impl Driver {
             return;
         };
         let combat = self.session.combat();
-        let player_level = combat.player().stats.level;
-        let Some(h) = combat
+        let Some(_h) = combat
             .hostiles()
             .iter()
             .find(|h| Some(h.idx) == combat.lock_id() && h.is_alive())
@@ -3320,18 +3293,6 @@ impl Driver {
             self.advance_after_fail(world, frame);
             return;
         };
-        let band = orrun::combat::con_band(player_level, h.level);
-        let (r, g, b) = band.rgb();
-        if band != orrun::combat::ConBand::White {
-            self.fail_current(&format!(
-                "con: L1 vs L{} {} want white, got {}",
-                h.level,
-                name,
-                band.as_str()
-            ));
-            self.advance_after_fail(world, frame);
-            return;
-        }
         if hp <= 0.0 {
             self.fail_current("con: locked target is dead");
             self.advance_after_fail(world, frame);
@@ -3342,11 +3303,7 @@ impl Driver {
             json!({
                 "status": "ok",
                 "shot": "con.png",
-                "player_level": player_level,
-                "mob_level": h.level,
                 "mob_name": name,
-                "con": band.as_str(),
-                "name_rgba": [r, g, b, 255],
             }),
         );
         self.ok_hook("con");
@@ -3387,8 +3344,6 @@ impl Driver {
             .map(|p| {
                 json!({
                     "name": p.name,
-                    "level": p.level,
-                    "con": p.con,
                     "on_screen": p.on_screen,
                 })
             })

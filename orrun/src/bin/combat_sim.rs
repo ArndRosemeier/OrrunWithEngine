@@ -38,7 +38,6 @@ fn run() -> Result<ExitCode, String> {
                 args.seed,
                 args.potions,
                 None,
-                args.mob_level,
                 None,
                 "",
             )?;
@@ -125,7 +124,6 @@ struct Args {
     count: i32,
     seed: i32,
     potions: Option<i32>,
-    mob_level: Option<i32>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -137,7 +135,6 @@ fn parse_args() -> Result<Args, String> {
     let mut count = 1i32;
     let mut seed = 1i32;
     let mut potions = None;
-    let mut mob_level = None;
     let mut raw = std::env::args().skip(1);
     while let Some(arg) = raw.next() {
         match arg.as_str() {
@@ -169,13 +166,6 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|_| "--potions wants an int")?,
                 )
             }
-            "--mob-level" => {
-                mob_level = Some(
-                    need(&mut raw, "--mob-level")?
-                        .parse()
-                        .map_err(|_| "--mob-level wants an int")?,
-                )
-            }
             "--help" | "-h" => {
                 eprintln!(
                     "combat_sim --scenario all|id [--out path] tick={TICK}s cap={HARD_CAP_S}s"
@@ -194,7 +184,6 @@ fn parse_args() -> Result<Args, String> {
         count,
         seed,
         potions,
-        mob_level,
     })
 }
 

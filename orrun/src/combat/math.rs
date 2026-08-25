@@ -109,7 +109,6 @@ pub const WOLF_ARMOR: i32 = 8;
 pub const WOLF_XP_BASE: i32 = 35;
 pub const WOLF_XP_PER: i32 = 12;
 
-pub const MOTHER_LEVEL: i32 = 9;
 pub const MOTHER_HP: i32 = 420;
 pub const MOTHER_DMG: i32 = 12;
 pub const MOTHER_SWING_S: f64 = 2.2;
@@ -125,11 +124,9 @@ pub const MOTHER_ENRAGE_HP: f64 = 0.30;
 pub const MOTHER_ENRAGE_DMG: f64 = 1.30;
 pub const MOTHER_ENRAGE_SWING: f64 = 0.77;
 
-pub const SCORP_LEVEL: i32 = 3;
 pub const SCORP_POISON_DPS: f64 = 3.0;
 pub const SCORP_POISON_S: f64 = 4.0;
 
-pub const BLOB_LEVEL: i32 = 2;
 pub const BLOB_HP: i32 = 82;
 pub const BLOB_DMG: i32 = 11;
 pub const BLOB_SWING_S: f64 = 2.4;
@@ -138,7 +135,6 @@ pub const BLOB_SPEED: f64 = 5.2;
 pub const BLOB_REACH_M: f64 = 1.6;
 pub const BLOB_XP: i32 = 47;
 
-pub const ORC_LEVEL: i32 = 4;
 pub const ORC_HP: i32 = 130;
 pub const ORC_DMG: i32 = 15;
 pub const ORC_SWING_S: f64 = 2.0;
@@ -193,7 +189,6 @@ pub const MAGE_BOLT_DMG: i32 = 15;
 pub const MAGE_TELE_S: f64 = 1.2;
 pub const MAGE_BOLT_RANGE_M: f64 = 24.0;
 
-pub const YETI_LEVEL: i32 = 6;
 pub const YETI_HP: i32 = 240;
 pub const YETI_DMG: i32 = 14;
 pub const YETI_SWING_S: f64 = 2.3;
@@ -205,7 +200,6 @@ pub const YETI_SPEED: f64 = 3.0;
 pub const YETI_REACH_M: f64 = 2.2;
 pub const YETI_XP: i32 = 160;
 
-pub const DEMON_LEVEL: i32 = 8;
 pub const DEMON_HP: i32 = 220;
 pub const DEMON_ARMOR: i32 = 12;
 pub const DEMON_DMG: i32 = 16;
@@ -214,7 +208,6 @@ pub const DEMON_REACH_M: f64 = 2.2;
 pub const DEMON_SPEED: f64 = 3.2;
 pub const DEMON_XP: i32 = 180;
 
-pub const BLUE_DEMON_LEVEL: i32 = 7;
 pub const BLUE_DEMON_HP: i32 = 155;
 pub const BLUE_DEMON_ARMOR: i32 = 9;
 pub const BLUE_DEMON_DMG: i32 = 12;
@@ -223,7 +216,6 @@ pub const BLUE_DEMON_REACH_M: f64 = 2.0;
 pub const BLUE_DEMON_SPEED: f64 = 3.6;
 pub const BLUE_DEMON_XP: i32 = 140;
 
-pub const TRIBAL_VETERAN_LEVEL: i32 = 10;
 pub const TRIBAL_VETERAN_HP: i32 = 210;
 pub const TRIBAL_VETERAN_ARMOR: i32 = 10;
 pub const TRIBAL_VETERAN_DMG: i32 = 22;

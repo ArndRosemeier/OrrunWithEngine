@@ -3,6 +3,7 @@
 pub mod atlas;
 pub mod combat;
 pub mod controls;
+pub mod gamedata;
 pub mod hamlet;
 pub mod hud;
 pub mod inventory;

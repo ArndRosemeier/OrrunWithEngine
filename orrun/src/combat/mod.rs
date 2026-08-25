@@ -3,7 +3,6 @@
 //! One formula set. The `combat_sim` bin is a thin CLI over this crate.
 
 pub mod catalog;
-pub mod consideration;
 pub mod lock;
 pub mod log;
 pub mod math;
@@ -12,7 +11,6 @@ pub mod sim;
 pub mod types;
 pub mod verbs;
 
-pub use consideration::{con_band, ConBand};
 pub use log::CombatLog;
 pub use math::{
     mitigation, skill_rider, Attrs, Discipline, Ranks, BOW_DRAW_S, HEAR_AGGRO_M, LEASH_M,

@@ -798,7 +798,6 @@ pub fn simulate_fight(
     seed: i32,
     potions: Option<i32>,
     arrows: Option<i32>,
-    mob_level: Option<i32>,
     kite: Option<bool>,
     notes: &str,
 ) -> Result<Value, String> {
@@ -815,9 +814,9 @@ pub fn simulate_fight(
     let mut mobs = Vec::new();
     for i in 0..count {
         let sh = if mob_id == "crawler_spider_wolf" {
-            wolf_sheet(mob_level.unwrap_or(level))
+            wolf_sheet()
         } else {
-            mob_sheet(&mob_id, mob_level)?
+            mob_sheet(&mob_id)?
         };
         sheets.push(sh.clone());
         mobs.push(Mob::from_sheet(sh, start_d + f64::from(i) * 0.4, i));
@@ -867,7 +866,6 @@ pub fn simulate_fight(
         "player_level": level,
         "discipline": disc.as_str(),
         "mob_id": mob_id,
-        "mob_level": sheets.first().map(|s| s.level),
         "count": count,
         "seed": seed,
         "potions_used": p.spells.get("potion").copied().unwrap_or(0),
@@ -1007,7 +1005,6 @@ struct Scenario {
     discipline: Discipline,
     mob: &'static str,
     count: i32,
-    mob_level: i32,
     potions: i32,
     kite: bool,
     band: &'static str,
@@ -1022,7 +1019,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "crawler_spider_wolf",
         count: 1,
-        mob_level: 1,
         potions: 1,
         kite: false,
         band: "even_1v1",
@@ -1035,7 +1031,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "crawler_spider_wolf",
         count: 2,
-        mob_level: 1,
         potions: 0,
         kite: false,
         band: "2pull_nopot",
@@ -1048,7 +1043,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "crawler_spider_wolf",
         count: 2,
-        mob_level: 1,
         potions: 1,
         kite: false,
         band: "2pull_pot",
@@ -1061,7 +1055,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Hunt,
         mob: "crawler_scorpion",
         count: 1,
-        mob_level: 3,
         potions: 1,
         kite: true,
         band: "even_1v1",
@@ -1074,7 +1067,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Arcane,
         mob: "crawler_spider_wolf",
         count: 4,
-        mob_level: 4,
         potions: 1,
         kite: true,
         band: "pale_hall",
@@ -1087,7 +1079,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "line_mother",
         count: 1,
-        mob_level: 9,
         potions: 1,
         kite: false,
         band: "heart",
@@ -1100,7 +1091,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "green_blob",
         count: 1,
-        mob_level: 2,
         potions: 1,
         kite: false,
         band: "even_1v1",
@@ -1113,7 +1103,6 @@ const SCENARIOS: &[Scenario] = &[
         discipline: Discipline::Martial,
         mob: "crawler_spider_wolf",
         count: 2,
-        mob_level: 1,
         potions: 1,
         kite: false,
         band: "d1_clear",
@@ -1138,7 +1127,6 @@ fn run_scenario_sc(sc: &Scenario, seed: i32) -> Result<Value, String> {
         seed,
         Some(sc.potions),
         None,
-        Some(sc.mob_level),
         Some(sc.kite),
         sc.title,
     )?;
@@ -1153,7 +1141,7 @@ fn run_scenario_sc(sc: &Scenario, seed: i32) -> Result<Value, String> {
 
 pub fn oneshot_sanity() -> Value {
     let p = player_stats(5, Discipline::Arcane);
-    let w = wolf_sheet(4);
+    let w = wolf_sheet();
     let hit = mitigation(f64::from(w.damage), p.attrs.grit);
     let volley = hit * 4;
     json!({

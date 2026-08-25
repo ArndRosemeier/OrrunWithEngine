@@ -127,7 +127,6 @@ pub fn player_stats(level: i32, discipline: Discipline) -> PlayerStats {
 pub struct MobSheet {
     pub id: String,
     pub name: String,
-    pub level: i32,
     pub hp: i32,
     pub armor: i32,
     pub damage: i32,
@@ -159,15 +158,14 @@ fn aggro_fields() -> (f64, f64, f64, f64) {
     (SIGHT_AGGRO_M, HEAR_AGGRO_M, LEASH_M, SOCIAL_M)
 }
 
-pub fn wolf_sheet(level: i32) -> MobSheet {
+pub fn wolf_sheet() -> MobSheet {
     let (sight, hear, leash, social) = aggro_fields();
     MobSheet {
         id: "crawler_spider_wolf".into(),
         name: "wolf-spider".into(),
-        level,
-        hp: WOLF_HP_BASE + WOLF_HP_PER * (level - 1),
+        hp: WOLF_HP_BASE,
         armor: WOLF_ARMOR,
-        damage: WOLF_DMG_BASE + WOLF_DMG_PER * (level - 1),
+        damage: WOLF_DMG_BASE,
         swing_s: WOLF_SWING_S,
         slam_damage: None,
         slam_every_s: None,
@@ -178,7 +176,7 @@ pub fn wolf_sheet(level: i32) -> MobSheet {
         hear_m: hear,
         leash_m: leash,
         social_m: social,
-        xp: WOLF_XP_BASE + WOLF_XP_PER * (level - 1),
+        xp: WOLF_XP_BASE,
         token_brood: 1,
         specials: vec![],
         scale_hp: Some("70 + 18*(lvl-1)".into()),
@@ -192,7 +190,6 @@ pub fn mother_sheet() -> MobSheet {
     MobSheet {
         id: "line_mother".into(),
         name: "Line-Mother".into(),
-        level: MOTHER_LEVEL,
         hp: MOTHER_HP,
         armor: MOTHER_ARMOR,
         damage: MOTHER_DMG,
@@ -219,7 +216,7 @@ pub fn mother_sheet() -> MobSheet {
 }
 
 pub fn scorpion_sheet() -> MobSheet {
-    let w = wolf_sheet(SCORP_LEVEL);
+    let w = wolf_sheet();
     MobSheet {
         id: "crawler_scorpion".into(),
         name: "scorpion".into(),
@@ -236,7 +233,6 @@ pub fn blob_sheet() -> MobSheet {
     MobSheet {
         id: "green_blob".into(),
         name: "GreenBlob".into(),
-        level: BLOB_LEVEL,
         hp: BLOB_HP,
         armor: BLOB_ARMOR,
         damage: BLOB_DMG,
@@ -264,7 +260,6 @@ pub fn orc_sheet() -> MobSheet {
     MobSheet {
         id: "orc".into(),
         name: "orc".into(),
-        level: ORC_LEVEL,
         hp: ORC_HP,
         armor: ORC_ARMOR,
         damage: ORC_DMG,
@@ -292,7 +287,6 @@ pub fn tribal_sheet() -> MobSheet {
     MobSheet {
         id: "tribal".into(),
         name: "tribal".into(),
-        level: TRIBAL_LEVEL,
         hp: TRIBAL_HP,
         armor: TRIBAL_ARMOR,
         damage: TRIBAL_DMG,
@@ -320,7 +314,6 @@ pub fn bandit_sheet() -> MobSheet {
     MobSheet {
         id: "bandit".into(),
         name: "bandit".into(),
-        level: BANDIT_LEVEL,
         hp: BANDIT_HP,
         armor: BANDIT_ARMOR,
         damage: BANDIT_DMG,
@@ -348,7 +341,6 @@ pub fn orc_skull_sheet() -> MobSheet {
     MobSheet {
         id: "orc_skull".into(),
         name: "orc-skull".into(),
-        level: SKULL_LEVEL,
         hp: SKULL_HP,
         armor: SKULL_ARMOR,
         damage: SKULL_DMG,
@@ -379,7 +371,6 @@ pub fn skeleton_warrior_sheet() -> MobSheet {
     MobSheet {
         id: "skeleton_warrior".into(),
         name: "Warrior".into(),
-        level: BONE_LEVEL,
         hp: WARRIOR_HP,
         armor: WARRIOR_ARMOR,
         damage: WARRIOR_DMG,
@@ -415,7 +406,6 @@ pub fn skeleton_mage_sheet() -> MobSheet {
     MobSheet {
         id: "skeleton_mage".into(),
         name: "Mage".into(),
-        level: BONE_LEVEL,
         hp: MAGE_HP,
         armor: WARRIOR_ARMOR,
         damage: WARRIOR_DMG,
@@ -446,7 +436,6 @@ pub fn demon_sheet() -> MobSheet {
     MobSheet {
         id: "demon".into(),
         name: "demon".into(),
-        level: DEMON_LEVEL,
         hp: DEMON_HP,
         armor: DEMON_ARMOR,
         damage: DEMON_DMG,
@@ -474,7 +463,6 @@ pub fn blue_demon_sheet() -> MobSheet {
     MobSheet {
         id: "blue_demon".into(),
         name: "blue_demon".into(),
-        level: BLUE_DEMON_LEVEL,
         hp: BLUE_DEMON_HP,
         armor: BLUE_DEMON_ARMOR,
         damage: BLUE_DEMON_DMG,
@@ -502,7 +490,6 @@ pub fn tribal_veteran_sheet() -> MobSheet {
     MobSheet {
         id: "tribal_veteran".into(),
         name: "tribal_veteran".into(),
-        level: TRIBAL_VETERAN_LEVEL,
         hp: TRIBAL_VETERAN_HP,
         armor: TRIBAL_VETERAN_ARMOR,
         damage: TRIBAL_VETERAN_DMG,
@@ -530,7 +517,6 @@ pub fn yeti_sheet() -> MobSheet {
     MobSheet {
         id: "yeti".into(),
         name: "yeti".into(),
-        level: YETI_LEVEL,
         hp: YETI_HP,
         armor: YETI_ARMOR,
         damage: YETI_DMG,
@@ -576,10 +562,10 @@ pub fn resolve_mob_id(name: &str) -> Result<String, String> {
     }
 }
 
-pub fn mob_sheet(id: &str, level: Option<i32>) -> Result<MobSheet, String> {
+pub fn mob_sheet(id: &str) -> Result<MobSheet, String> {
     let id = resolve_mob_id(id)?;
     Ok(match id.as_str() {
-        "crawler_spider_wolf" => wolf_sheet(level.unwrap_or(1)),
+        "crawler_spider_wolf" => wolf_sheet(),
         "crawler_scorpion" => scorpion_sheet(),
         "line_mother" => mother_sheet(),
         "green_blob" => blob_sheet(),
@@ -660,8 +646,7 @@ pub fn dungeon_wolf_level(tier: i32) -> i32 {
 
 pub fn dungeon_xp(tier: i32, first: bool) -> Value {
     let n = dungeon_wolves(tier);
-    let lvl = dungeon_wolf_level(tier);
-    let trash = n * wolf_sheet(lvl).xp;
+    let trash = n * wolf_sheet().xp;
     let elite = if tier == 2 { MOTHER_XP } else { 0 };
     let heart = heart_bonus(tier);
     let first_b = if first { first_clear(tier) } else { 0 };
@@ -1001,9 +986,9 @@ pub fn formulas() -> Value {
 
 pub fn mob_sheets_json() -> Value {
     json!({
-        "crawler_spider_wolf_l1": wolf_sheet(1),
-        "crawler_spider_wolf_l4": wolf_sheet(4),
-        "crawler_spider_wolf_l6": wolf_sheet(6),
+        "crawler_spider_wolf_l1": wolf_sheet(),
+        "crawler_spider_wolf_l4": wolf_sheet(),
+        "crawler_spider_wolf_l6": wolf_sheet(),
         "line_mother": mother_sheet(),
         "crawler_scorpion": scorpion_sheet(),
         "green_blob": blob_sheet(),
