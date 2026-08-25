@@ -74,9 +74,9 @@ class PlayerProfile:
 
 @dataclass(frozen=True)
 class Mob:
-    id: str; name: str; faction: str = "wild"; mode: str = "active"; hp: int = 1; armor: int = 0; damage: int = 1; movement_id: str = "walk"; swing_s: float = 1.0; reach_m: float = 1.8; xp: int = 0; actions: tuple[str, ...] = ()
+    id: str; name: str; faction: str = "wild"; mode: str = "active"; hp: int = 1; armor: int = 0; damage: int = 1; movement_id: str = "walk"; swing_s: float = 1.0; reach_m: float = 1.8; actions: tuple[str, ...] = ()
     def xml(self, parent: ET.Element) -> None:
-        node = ET.SubElement(parent, "mob", {"id": self.id, "name": self.name, "faction": self.faction, "mode": self.mode, "hp": str(self.hp), "armor": str(self.armor), "damage": str(self.damage), "movement_id": self.movement_id, "swing_s": _num(self.swing_s), "reach_m": _num(self.reach_m), "xp": str(self.xp)})
+        node = ET.SubElement(parent, "mob", {"id": self.id, "name": self.name, "faction": self.faction, "mode": self.mode, "hp": str(self.hp), "armor": str(self.armor), "damage": str(self.damage), "movement_id": self.movement_id, "swing_s": _num(self.swing_s), "reach_m": _num(self.reach_m)})
         for action in self.actions: ET.SubElement(node, "action", {"id": action})
 
 @dataclass(frozen=True)
@@ -114,11 +114,15 @@ class GameData:
     def hamlet(self) -> Hamlet: return self._hamlet
     def validate(self) -> list[str]:
         errors: list[str] = []
-        for label, values in (("skill", self.skills), ("faction", self.factions), ("effect", self.effects), ("action", self.actions), ("profile", self.player_profiles), ("mob", self.mobs)):
+        for label, values in (("skill", self.skills), ("faction", self.factions), ("effect", self.effects), ("action", self.actions), ("profile", self.player_profiles), ("mob", self.mobs), ("movement", self.movement)):
             ids = [x.id for x in values]
             errors.extend(f"duplicate {label} id {item!r}" for item in sorted({x for x in ids if ids.count(x) > 1}))
-        factions = {x.id for x in self.factions}; skills = {x.id for x in self.skills}; effects = {x.id for x in self.effects}; actions = {x.id for x in self.actions}
+        factions = {x.id for x in self.factions}; skills = {x.id for x in self.skills}; effects = {x.id for x in self.effects}; actions = {x.id for x in self.actions}; movement = {x.id for x in self.movement}
         if sum(f.neutral for f in self.factions) != 1: errors.append("exactly one neutral faction is required")
+        for effect in self.effects:
+            if effect.kind not in {"damage", "heal", "control", "movement", "defense", "utility"}: errors.append(f"effect {effect.id}: unknown kind {effect.kind!r}")
+            if effect.skill_id not in skills: errors.append(f"effect {effect.id}: unknown skill {effect.skill_id!r}")
+            if effect.progression not in {"skill_level", "flat"}: errors.append(f"effect {effect.id}: unknown progression {effect.progression!r}")
         for action in self.actions:
             for assignment in action.effects:
                 if assignment.effect_id not in effects: errors.append(f"action {action.id}: unknown effect {assignment.effect_id!r}")
@@ -134,6 +138,10 @@ class GameData:
             if effect.progression not in {"skill_level", "flat"}: errors.append(f"effect {effect.id}: unknown progression {effect.progression!r}")
         for actor in (*self.player_profiles, *self.mobs):
             if actor.faction not in factions: errors.append(f"{actor.id}: unknown faction {actor.faction!r}")
+        for profile in self.player_profiles:
+            for known in profile.skills:
+                if known[0] not in skills: errors.append(f"profile {profile.id}: unknown skill {known[0]!r}")
+                if known[1] <= 0: errors.append(f"profile {profile.id}: skill {known[0]!r} level must be positive")
         for action in self.actions:
             if action.target not in {"hostile", "friendly", "self", "any", "none"}: errors.append(f"action {action.id}: unknown target {action.target!r}")
         for mob in self.mobs:
@@ -141,7 +149,10 @@ class GameData:
         for mob in self.mobs:
             for action in mob.actions:
                 if action not in actions: errors.append(f"mob {mob.id}: unknown action {action!r}")
+            if mob.movement_id not in movement: errors.append(f"mob {mob.id}: unknown movement {mob.movement_id!r}")
             if mob.hp < 1 or mob.damage < 1 or mob.swing_s <= 0 or mob.reach_m <= 0: errors.append(f"mob {mob.id}: combat values must be positive")
+        for spec in self.movement:
+            if spec.speed_mps <= 0: errors.append(f"movement {spec.id}: speed_mps must be positive")
         return errors
     def to_xml(self) -> str:
         errors = self.validate()
@@ -185,8 +196,7 @@ class GameData:
         profiles=[]
         for x in _children(players_node,"profile"): profiles.append(PlayerProfile(_text(x,"id"),_text(x,"name"),_text(x,"faction","citizen"),tuple((_text(s,"id"),_int(s,"level",1)) for s in _children(x,"skill"))))
         mobs=[]
-        for x in _children(mobs_node,"mob"): mobs.append(Mob(_text(x,"id"),_text(x,"name"),_text(x,"faction","wild"),_text(x,"mode","active"),_int(x,"hp",1),_int(x,"armor",0),_int(x,"damage",1),_text(x,"movement_id","walk"),_float(x,"swing_s",1.0),_float(x,"reach_m",1.8),_int(x,"xp",0),tuple(_text(a,"id") for a in _children(x,"action"))))
-        movement=tuple(MovementSpec(_text(x,"id"),_float(x,"speed_mps",1.0)) for x in _children(movement_node,"spec"))
+        for x in _children(mobs_node,"mob"): mobs.append(Mob(_text(x,"id"),_text(x,"name"),_text(x,"faction","wild"),_text(x,"mode","active"),_int(x,"hp",1),_int(x,"armor",0),_int(x,"damage",1),_text(x,"movement_id","walk"),_float(x,"swing_s",1.0),_float(x,"reach_m",1.8),tuple(_text(a,"id") for a in _children(x,"action"))))
         movement=tuple(MovementSpec(_text(x,"id"),_float(x,"speed_mps",1.0)) for x in _children(movement_node,"spec"))
         hamlet=Hamlet(_text(hamlet_node,"enabled","true")=="true",_int(hamlet_node,"width",32),_int(hamlet_node,"depth",32),_text(hamlet_node,"kit_catalog","catalogs/medieval.json"),tuple(_text(x,"id") for x in _children(hamlet_node,"layer")))
         defaults={_text(x,"key"):_text(x,"value") for x in _children(defaults_node,"value")}

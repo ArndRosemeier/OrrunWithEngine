@@ -40,13 +40,13 @@ This is a combat-and-loot vertical slice. The combat bones that drive it are exp
 Skills are the only progression axis. There is no player level.
 
 - **Skill levels.** Each skill (see `data/OrrunGameData.xml` `<skills>`) has its own level. Skill level determines how well the skill works. Levels are discrete because visible level-ups feel like achievements; slowly creeping values do not.
-- **Use trains.** Using an effect trains its skill. There is no success/failure concept for skill use â€” skills just work, and level governs how well. The same rule extends to resources: getting hit trains HP; spending mana trains mana.
-- **Skill XP with non-linear levels.** Each skill accumulates its own skill XP from use. Per-skill level cost grows steeply, so grinding one skill forever yields far less total advancement than training several in parallel. This curve is the only brake â€” no caps, no anti-grind mechanics.
+- **Use trains.** Using an effect trains its skill. There is no success/failure concept for skill use — skills just work, and level governs how well. The same rule extends to resources: getting hit trains HP; spending mana trains mana.
+- **Skill XP with non-linear levels.** Each skill accumulates its own skill XP from use. Per-skill level cost grows steeply, so grinding one skill forever yields far less total advancement than training several in parallel. This curve is the only brake — no caps, no anti-grind mechanics.
 - **No disciplines.** The Martial/Hunt/Arcane split is removed. What you can do flows from your known skills (player profile in GameData) and equipment, not from a class-like gate.
 
 ### Current implementation status
 
-- **Data only:** the GameData model (`data/OrrunGameData.xml`, `orrun/src/gamedata.rs`) already encodes the direction â€” skills as effect channels, every effect declaring `progression="skill_level"`, actions as effect bundles, player profiles as faction + known skills. No runtime advancement uses it yet.
+- **Data only:** the GameData model (`data/OrrunGameData.xml`, `orrun/src/gamedata.rs`) already encodes the direction — skills as effect channels, every effect declaring `progression="skill_level"`, actions as effect bundles, player profiles as faction + known skills. No runtime advancement uses it yet.
 - **Absent:** skill XP accrual, skill level-up, the non-linear level cost curve, HP/mana training, skill-level-driven effect magnitudes, any player-facing skill UI.
 - **Open decisions:** the concrete level-cost curve; how skill level maps to effect magnitude (`level_scale` semantics); starting skill levels for the player profile; how mob difficulty is communicated without a player level to compare against.
 
@@ -79,7 +79,7 @@ Implemented in `orrun/src/combat/types.rs`, `orrun/src/world/session.rs`, `orrun
 - Save format 3 persists world seed/size, position and facing, HP/mana, Shaken timer, last shrine, full inventory and coin. It also still persists legacy level/XP/attribute/discipline fields, which will be dropped with the progression rebuild (expect a format bump that rejects old saves loudly).
 - The save layer validates format and world identity and reports unreadable/incompatible saves loudly. The continent remains a deterministic function of seed and size.
 
-Limitation: no persistent world state â€” defeated enemies, cleared sites, dungeon completion, loot piles, and NPC state all reset per session.
+Limitation: no persistent world state — defeated enemies, cleared sites, dungeon completion, loot piles, and NPC state all reset per session.
 
 ### Gameplay HUD, input, and feedback
 
@@ -89,7 +89,7 @@ Implemented in `orrun/src/hud.rs`, `orrun/src/main.rs`, `orrun/src/controls.rs`.
 - Combat log, failure toast, corpse loot modal, inventory window, loot sparkle, hostile nameplate support.
 - Default combat bindings on 1-8, R, T, G; bindable actions with serialized custom keybindings; reserved movement/interact keys and duplicate-binding resolution.
 
-Limitation: no player-facing progression display of any kind (no skill levels, no resource growth feedback). This is expected â€” it waits for the progression rebuild.
+Limitation: no player-facing progression display of any kind (no skill levels, no resource growth feedback). This is expected — it waits for the progression rebuild.
 
 ### Gameplay audio
 
@@ -121,7 +121,7 @@ Wolf packs, dungeon skeleton packs, Taken Cairn and Woods Hut bandit sites, and 
 
 No implementation exists for:
 
-- Skill-based progression at runtime (see the progression section â€” data only).
+- Skill-based progression at runtime (see the progression section — data only).
 - Quests, objectives, tracking, rewards, or quest persistence.
 - Shops, vendors, buying/selling, pricing, merchant inventories.
 - Chests or generic containers.
