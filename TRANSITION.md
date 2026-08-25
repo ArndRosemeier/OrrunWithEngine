@@ -1,4 +1,4 @@
-# Gameplay transition
+﻿# Gameplay transition
 
 This document is the bridge from Orrun's current combat-and-loot proof of concept to the GameData-driven action, effect, and skill system.
 
@@ -214,15 +214,15 @@ These decisions are fixed for the transition:
 - The system has no cap or anti-grind rule.
 - Level changes are emitted as events; UI does not infer them by polling values.
 
-Still to be selected during M1:
+M1 established the first values (centralized in `orrun/src/progression.rs` `balance`, replaceable):
 
-- the initial mathematical level-cost curve;
-- XP granted per effect execution, damage received, and mana spent;
-- the exact HP/mana capacity increase per level;
-- how `level_scale` maps level to effect magnitude;
-- starting levels for player and mob definitions.
+- level cost is quadratic (`100 * level²`) so cumulative cost is cubic and breadth beats depth;
+- `XP_PER_EFFECT_USE` 10, `XP_PER_HP_DAMAGE` 1 (rounded up), `XP_PER_MANA_SPENT` 1 (rounded up);
+- HP capacity `100 + 12 * (level - 1)`; mana capacity `50 + 6 * (level - 1)`;
+- `level_scale` maps `skill_level` to `base * (1 + level_scale * (level - 1))`; `flat` returns `base`;
+- player profile skills start at their authored level; mob skills start at 1 until the schema carries per-mob skill levels.
 
-These are balance parameters, not reasons to delay the ownership model. Their first values should be simple, centralized, and replaceable.
+These are balance parameters, not design law; M7 retunes them from play evidence.
 
 ## Cutover sequence
 

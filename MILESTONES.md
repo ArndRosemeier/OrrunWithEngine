@@ -13,7 +13,7 @@ This is the living implementation plan for the gameplay rebuild. `game.md` recor
 - A milestone closes only when its exit criteria are covered by automated tests and its player-facing behavior is verified in the live app.
 - Do not expand the old combat formulas, simulator, controls enum, or legacy sheets except where necessary to remove or isolate them.
 
-## M0 — One truthful GameData contract — NEXT
+## M0 — One truthful GameData contract — DONE
 
 Make the Python authoring model, canonical XML, Rust loader, and runtime accessors describe the same data without dropping fields.
 
@@ -37,7 +37,7 @@ Exit criteria:
 - Unknown, duplicate, dangling, geometrically invalid, non-executable, or unsupported data fails before a world session starts.
 - No canonical authored record contains player XP, mob XP, discipline, attribute, rank, or global level data.
 
-## M1 — Actor skills and trainable resources
+## M1 — Actor skills and trainable resources — DONE (headless)
 
 Introduce the new runtime progression owner independently of action execution.
 
@@ -58,7 +58,7 @@ Exit criteria:
 - Training three equal starting skills for the same total number of uses produces more total level gains than training one skill alone.
 - No live combat integration is required yet; the progression domain can be exercised headlessly.
 
-## M2 — Canonical action resolution
+## M2 — Canonical action resolution — NEXT
 
 Build the new combat heart as a headless, typed pipeline before connecting controls or presentation.
 

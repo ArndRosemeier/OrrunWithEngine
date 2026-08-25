@@ -47,8 +47,9 @@ Skills are the only progression axis. There is no player level.
 ### Current implementation status
 
 - **Data only:** the GameData model (`data/OrrunGameData.xml`, `orrun/src/gamedata.rs`) already encodes the direction — skills as effect channels, every effect declaring `progression="skill_level"`, actions as effect bundles, player profiles as faction + known skills. No runtime advancement uses it yet.
-- **Absent:** skill XP accrual, skill level-up, the non-linear level cost curve, HP/mana training, skill-level-driven effect magnitudes, any player-facing skill UI.
-- **Open decisions:** the concrete level-cost curve; how skill level maps to effect magnitude (`level_scale` semantics); starting skill levels for the player profile; how mob difficulty is communicated without a player level to compare against.
+- **Headless progression domain (M1):** `orrun/src/progression.rs` is the new encapsulated progression owner, independent of live combat. It holds per-skill integer level + exact XP, HP and mana as trainable proficiencies, typed training operations (`record_effect_use`, `record_damage_taken`, `record_mana_spent`), typed level-up events, and a strictly increasing non-linear level-cost curve. Provisional balance values are centralized in `progression::balance` (XP per effect use, HP/mana capacity per level, and the `level_scale` → magnitude mapping) and are replaceable, not design law.
+- **Not yet wired into live combat:** action resolution (M2) and the first live vertical slice (M3) come next; no player-facing skill UI exists yet (M4).
+- **Open decisions:** starting skill levels for the player profile (currently authored at 1 in GameData); how mob difficulty is communicated without a player level to compare against.
 
 ## Shipped gameplay features
 
@@ -132,6 +133,7 @@ No implementation exists for:
 ## Canonical source files
 
 - Authored game data: `data/OrrunGameData.xml` (loader: `orrun/src/gamedata.rs`, tooling: `tools/gamedata.py`, `tools/gamedata_ui.py`, `tools/gamedata_viewer.py`)
+- Progression (new): `orrun/src/progression.rs`
 - Plan: `MILESTONES.md` (migration boundaries: `TRANSITION.md`)
 - Combat (POC): `orrun/src/combat/types.rs`, `verbs.rs`, `math.rs`, `sheets.rs`, `sim.rs`
 - Hostile presentation/session: `orrun/src/world/combat_layer.rs`, `orrun/src/world/session.rs`
