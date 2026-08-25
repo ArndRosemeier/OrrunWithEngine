@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "sight_unweaving",
+  "name": "Sight Unweaving",
+  "description": "Reveal and dispel an area.",
+  "target": "area",
+  "delivery": "area",
+  "effects": [
+    {
+      "id": "reveal",
+      "parameters": {
+        "duration": 8,
+        "radius": 5
+      }
+    },
+    {
+      "id": "dispel",
+      "parameters": {
+        "radius": 5
+      }
+    }
+  ],
+  "metadata": {}
+}

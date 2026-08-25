@@ -1,0 +1,11 @@
+"""Canonical initial effect definitions."""
+from .model import EffectDefinition, EffectFamily, TargetMode
+A=frozenset; H=A({TargetMode.HOSTILE, TargetMode.AREA, TargetMode.GROUND}); F=A({TargetMode.FRIENDLY}); S=A({TargetMode.SELF}); U=A({TargetMode.ANY}); AREA=A({TargetMode.AREA, TargetMode.GROUND, TargetMode.HOSTILE})
+D=A({"direct"}); P=A({"projectile"}); C=A({"cone"}); R=A({"area"}); CH=A({"chain"}); G=A({"ground_targeted"}); ALL=D|P|C|R|CH|G
+E=[
+("physical_damage",EffectFamily.DAMAGE,4,H,ALL),("fire_damage",EffectFamily.DAMAGE,6,H,ALL),("frost_damage",EffectFamily.DAMAGE,6,H,ALL),("shock_damage",EffectFamily.DAMAGE,7,H,ALL),("poison_damage",EffectFamily.DAMAGE,5,H,ALL),("shadow_damage",EffectFamily.DAMAGE,7,H,ALL),("radiant_damage",EffectFamily.DAMAGE,7,H,ALL),
+("direct",EffectFamily.DELIVERY,1,U,D),("projectile",EffectFamily.DELIVERY,2,U,P),("cone",EffectFamily.DELIVERY,2,H,C),("area",EffectFamily.DELIVERY,3,AREA,R),("chain",EffectFamily.DELIVERY,4,H,CH),("ground_targeted",EffectFamily.DELIVERY,2,AREA,G),
+("root",EffectFamily.CONTROL,5,H,D|P|C|R|G),("slow",EffectFamily.CONTROL,3,H,ALL),("stun",EffectFamily.CONTROL,8,H,D|P|C|R),("silence",EffectFamily.CONTROL,6,H,D|P|R),("interrupt",EffectFamily.CONTROL,4,H,D|P|C),("knockback",EffectFamily.CONTROL,5,H,D|P|C),
+("heal",EffectFamily.RESTORATION,5,F|S,D|P|R|G),("regeneration",EffectFamily.RESTORATION,7,F|S,D|P|R|G),("shield",EffectFamily.RESTORATION,8,F|S,D|P|R|G),("cleanse",EffectFamily.RESTORATION,6,F|S,D|P|R|G),("damage_absorption",EffectFamily.RESTORATION,9,F|S,D|P|R|G),
+("reveal",EffectFamily.UTILITY,3,U,D|P|R|G),("dispel",EffectFamily.UTILITY,5,U,D|P|R|G),("mark",EffectFamily.UTILITY,3,H,D|P|R|G),("teleport",EffectFamily.UTILITY,10,S|F,G|D),("summon",EffectFamily.UTILITY,12,S|F,G|D),("charm",EffectFamily.UTILITY,10,H,D|P|R),("invisibility",EffectFamily.UTILITY,9,S|F,D|P|R),("haste",EffectFamily.UTILITY,6,F|S,D|P|R|G),("stat_buff",EffectFamily.UTILITY,6,F|S,D|P|R|G),("debuff",EffectFamily.UTILITY,5,H,D|P|R|G),("resource_drain",EffectFamily.UTILITY,7,H,D|P|R|G),("resistance_change",EffectFamily.UTILITY,7,U,D|P|R|G)]
+EFFECTS={x[0]:EffectDefinition(x[0],x[1],x[2],x[3],x[4]) for x in E}

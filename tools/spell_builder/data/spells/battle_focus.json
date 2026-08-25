@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "battle_focus",
+  "name": "Battle Focus",
+  "description": "A friendly haste and stat buff.",
+  "target": "friendly",
+  "delivery": "direct",
+  "effects": [
+    {
+      "id": "haste",
+      "parameters": {
+        "duration": 12
+      }
+    },
+    {
+      "id": "stat_buff",
+      "parameters": {
+        "duration": 12
+      }
+    }
+  ],
+  "metadata": {}
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "renew",
+  "name": "Renew",
+  "description": "Healing over time.",
+  "target": "friendly",
+  "delivery": "direct",
+  "effects": [
+    {
+      "id": "regeneration",
+      "parameters": {
+        "duration": 8,
+        "magnitude": 1.0
+      }
+    }
+  ],
+  "metadata": {}
+}

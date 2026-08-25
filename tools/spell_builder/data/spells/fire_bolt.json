@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "fire_bolt",
+  "name": "Fire Bolt",
+  "description": "A direct burst of fire.",
+  "target": "hostile",
+  "delivery": "projectile",
+  "effects": [
+    {
+      "id": "fire_damage",
+      "parameters": {
+        "magnitude": 1.0,
+        "range": 12
+      }
+    }
+  ],
+  "metadata": {}
+}

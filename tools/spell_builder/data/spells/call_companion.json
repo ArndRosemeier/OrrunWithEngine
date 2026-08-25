@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "call_companion",
+  "name": "Call Companion",
+  "description": "Summon a temporary pet.",
+  "target": "self",
+  "delivery": "ground_targeted",
+  "effects": [
+    {
+      "id": "summon",
+      "parameters": {
+        "duration": 30
+      }
+    }
+  ],
+  "metadata": {}
+}

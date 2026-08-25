@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "spells": [
+    {
+      "id": "battle_focus",
+      "name": "Battle Focus",
+      "path": "battle_focus.json",
+      "cost": 26.4
+    },
+    {
+      "id": "beguiling_word",
+      "name": "Beguiling Word",
+      "path": "beguiling_word.json",
+      "cost": 16.0
+    },
+    {
+      "id": "blink",
+      "name": "Blink",
+      "path": "blink.json",
+      "cost": 15.0
+    },
+    {
+      "id": "call_companion",
+      "name": "Call Companion",
+      "path": "call_companion.json",
+      "cost": 48.0
+    },
+    {
+      "id": "fire_bolt",
+      "name": "Fire Bolt",
+      "path": "fire_bolt.json",
+      "cost": 9.6
+    },
+    {
+      "id": "frost_nova",
+      "name": "Frost Nova",
+      "path": "frost_nova.json",
+      "cost": 13.95
+    },
+    {
+      "id": "renew",
+      "name": "Renew",
+      "path": "renew.json",
+      "cost": 12.6
+    },
+    {
+      "id": "searing_root",
+      "name": "Searing Root",
+      "path": "searing_root.json",
+      "cost": 12.5
+    },
+    {
+      "id": "sight_unweaving",
+      "name": "Sight Unweaving",
+      "path": "sight_unweaving.json",
+      "cost": 16.9
+    },
+    {
+      "id": "ward_cleanse",
+      "name": "Ward and Cleanse",
+      "path": "ward_cleanse.json",
+      "cost": 22.0
+    }
+  ]
+}

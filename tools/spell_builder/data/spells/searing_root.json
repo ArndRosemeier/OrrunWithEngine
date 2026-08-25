@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "searing_root",
+  "name": "Searing Root",
+  "description": "Damage and hold a foe.",
+  "target": "hostile",
+  "delivery": "direct",
+  "effects": [
+    {
+      "id": "fire_damage",
+      "parameters": {
+        "magnitude": 1.0
+      }
+    },
+    {
+      "id": "root",
+      "parameters": {
+        "duration": 3
+      }
+    }
+  ],
+  "metadata": {}
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "frost_nova",
+  "name": "Frost Nova",
+  "description": "Frost damage around the caster.",
+  "target": "area",
+  "delivery": "area",
+  "effects": [
+    {
+      "id": "frost_damage",
+      "parameters": {
+        "magnitude": 1.0,
+        "radius": 5
+      }
+    },
+    {
+      "id": "slow",
+      "parameters": {
+        "duration": 4
+      }
+    }
+  ],
+  "metadata": {}
+}

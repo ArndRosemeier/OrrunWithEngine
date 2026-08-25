@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "ward_cleanse",
+  "name": "Ward and Cleanse",
+  "description": "A clean protective ward.",
+  "target": "friendly",
+  "delivery": "direct",
+  "effects": [
+    {
+      "id": "shield",
+      "parameters": {
+        "duration": 10,
+        "magnitude": 1.0
+      }
+    },
+    {
+      "id": "cleanse",
+      "parameters": {}
+    }
+  ],
+  "metadata": {}
+}

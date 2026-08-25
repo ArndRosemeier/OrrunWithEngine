@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "blink",
+  "name": "Blink",
+  "description": "Teleport a short distance.",
+  "target": "self",
+  "delivery": "ground_targeted",
+  "effects": [
+    {
+      "id": "teleport",
+      "parameters": {
+        "range": 10
+      }
+    }
+  ],
+  "metadata": {}
+}

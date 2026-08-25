@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "beguiling_word",
+  "name": "Beguiling Word",
+  "description": "Charm one hostile target.",
+  "target": "hostile",
+  "delivery": "direct",
+  "effects": [
+    {
+      "id": "charm",
+      "parameters": {
+        "duration": 6
+      }
+    }
+  ],
+  "metadata": {}
+}
