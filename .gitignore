@@ -4,3 +4,8 @@ Cargo.lock
 # ENGINE_SCREENSHOT captures
 /shots/
 /release/
+
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+
