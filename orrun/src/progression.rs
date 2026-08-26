@@ -167,6 +167,11 @@ pub struct ActorProgression {
 }
 
 impl ActorProgression {
+    /// An actor that knows no skills yet. HP and mana start at level 1.
+    pub fn empty() -> Self {
+        Self::from_levels(std::iter::empty())
+    }
+
     fn from_levels(levels: impl IntoIterator<Item = (SkillId, i32)>) -> Self {
         let mut skills = BTreeMap::new();
         for (id, level) in levels {

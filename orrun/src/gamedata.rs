@@ -323,6 +323,10 @@ struct RawAction {
     target: String,
     #[serde(rename = "@mana_cost", default)]
     mana_cost: f64,
+    #[serde(rename = "@cast_s", default)]
+    cast_s: f64,
+    #[serde(rename = "@cooldown_s", default)]
+    cooldown_s: f64,
     #[serde(rename = "effects", default)]
     effects: RawActionEffects,
 }
@@ -609,6 +613,8 @@ pub struct Action {
     description: String,
     target: ActionTarget,
     mana_cost: f64,
+    cast_s: f64,
+    cooldown_s: f64,
     effects: Vec<ActionEffect>,
 }
 
@@ -627,6 +633,12 @@ impl Action {
     }
     pub fn mana_cost(&self) -> f64 {
         self.mana_cost
+    }
+    pub fn cast_s(&self) -> f64 {
+        self.cast_s
+    }
+    pub fn cooldown_s(&self) -> f64 {
+        self.cooldown_s
     }
     pub fn effects(&self) -> &[ActionEffect] {
         &self.effects
@@ -917,6 +929,8 @@ impl GameData {
                     description: a.description,
                     target: ActionTarget::from_str(&a.target)?,
                     mana_cost: a.mana_cost,
+                    cast_s: a.cast_s,
+                    cooldown_s: a.cooldown_s,
                     effects: a
                         .effects
                         .items
@@ -1068,6 +1082,12 @@ impl GameData {
             if action.mana_cost() < 0.0 {
                 return Err(validation(format!(
                     "action {} mana_cost must be non-negative",
+                    action.id()
+                )));
+            }
+            if action.cast_s() < 0.0 || action.cooldown_s() < 0.0 {
+                return Err(validation(format!(
+                    "action {} cast_s and cooldown_s must be non-negative",
                     action.id()
                 )));
             }
