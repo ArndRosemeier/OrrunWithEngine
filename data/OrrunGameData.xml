@@ -36,9 +36,9 @@
     <effect id="healing" name="Healing" kind="heal" skill_id="healing" progression="skill_level" />
   </effects>
   <actions>
-    <action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="1" application="single_target" range_m="1.8" /></effects></action>
-    <action id="fire_bolt" name="Fire Bolt" target="hostile"><effects><effect effect_id="fire_damage" magnitude="1" application="single_target" range_m="18" /></effects></action>
-    <action id="mend" name="Mend" target="friendly"><effects><effect effect_id="healing" magnitude="1" application="single_target" range_m="18" /></effects></action>
+    <action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="8" application="single_target" range_m="1.8" /></effects></action>
+    <action id="fire_bolt" name="Fire Bolt" target="hostile" mana_cost="3"><effects><effect effect_id="fire_damage" magnitude="14" application="single_target" range_m="18" /></effects></action>
+    <action id="mend" name="Mend" target="friendly" mana_cost="20"><effects><effect effect_id="healing" magnitude="25" application="single_target" range_m="18" /></effects></action>
   </actions>
   <players>
     <profile id="default_player" name="Orrun Adventurer" faction="citizen"><skill id="slashing_damage" /><skill id="fire_damage" /><skill id="healing" /></profile>

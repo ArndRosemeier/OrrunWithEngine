@@ -321,6 +321,8 @@ struct RawAction {
     description: String,
     #[serde(rename = "@target", default = "default_target")]
     target: String,
+    #[serde(rename = "@mana_cost", default)]
+    mana_cost: f64,
     #[serde(rename = "effects", default)]
     effects: RawActionEffects,
 }
@@ -606,6 +608,7 @@ pub struct Action {
     name: String,
     description: String,
     target: ActionTarget,
+    mana_cost: f64,
     effects: Vec<ActionEffect>,
 }
 
@@ -621,6 +624,9 @@ impl Action {
     }
     pub fn target(&self) -> ActionTarget {
         self.target
+    }
+    pub fn mana_cost(&self) -> f64 {
+        self.mana_cost
     }
     pub fn effects(&self) -> &[ActionEffect] {
         &self.effects
@@ -838,6 +844,13 @@ impl GameData {
         Self::from_raw(raw)
     }
 
+    /// Parse and validate GameData from an XML string (authoring tooling and
+    /// headless tests).
+    pub fn from_xml_str(text: &str) -> Result<Self, GameDataError> {
+        let raw: RawGameData = from_str(text)?;
+        Self::from_raw(raw)
+    }
+
     fn from_raw(raw: RawGameData) -> Result<Self, GameDataError> {
         if raw.schema_version != SCHEMA_VERSION {
             return Err(validation(format!(
@@ -903,6 +916,7 @@ impl GameData {
                     name: a.name,
                     description: a.description,
                     target: ActionTarget::from_str(&a.target)?,
+                    mana_cost: a.mana_cost,
                     effects: a
                         .effects
                         .items
@@ -1051,6 +1065,12 @@ impl GameData {
         }
 
         for action in &self.actions {
+            if action.mana_cost() < 0.0 {
+                return Err(validation(format!(
+                    "action {} mana_cost must be non-negative",
+                    action.id()
+                )));
+            }
             for assignment in action.effects() {
                 if !self.effects_by_id.contains_key(assignment.effect_id()) {
                     return Err(validation(format!(

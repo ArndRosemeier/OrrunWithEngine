@@ -9,6 +9,7 @@ pub mod hud;
 pub mod inventory;
 pub mod loot;
 pub mod progression;
+pub mod resolution;
 pub mod save;
 pub mod settings;
 pub mod world;

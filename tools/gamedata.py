@@ -59,9 +59,11 @@ class ActionEffect:
 
 @dataclass(frozen=True)
 class Action:
-    id: str; name: str; target: str = "hostile"; effects: tuple[ActionEffect, ...] = (); description: str = ""
+    id: str; name: str; target: str = "hostile"; effects: tuple[ActionEffect, ...] = (); description: str = ""; mana_cost: float = 0.0
     def xml(self, parent: ET.Element) -> None:
-        node = ET.SubElement(parent, "action", {"id": self.id, "name": self.name, "target": self.target, "description": self.description})
+        attrs = {"id": self.id, "name": self.name, "target": self.target, "description": self.description}
+        if self.mana_cost: attrs["mana_cost"] = _num(self.mana_cost)
+        node = ET.SubElement(parent, "action", attrs)
         effects = ET.SubElement(node, "effects")
         for effect in self.effects: effect.xml(effects)
 
@@ -144,6 +146,7 @@ class GameData:
                 if known[1] <= 0: errors.append(f"profile {profile.id}: skill {known[0]!r} level must be positive")
         for action in self.actions:
             if action.target not in {"hostile", "friendly", "self", "any", "none"}: errors.append(f"action {action.id}: unknown target {action.target!r}")
+            if action.mana_cost < 0: errors.append(f"action {action.id}: mana_cost must be non-negative")
         for mob in self.mobs:
             if mob.mode not in {"active", "passive"}: errors.append(f"mob {mob.id}: unknown mode {mob.mode!r}")
         for mob in self.mobs:
@@ -192,7 +195,7 @@ class GameData:
         effects = tuple(EffectDefinition(_text(x,"id"), _text(x,"name"), _text(x,"kind"), _text(x,"skill_id"), _text(x,"progression","skill_level")) for x in _children(effects_node,"effect"))
         actions=[]
         for x in _children(actions_node,"action"):
-            e_node=x.find("effects"); actions.append(Action(_text(x,"id"),_text(x,"name"),_text(x,"target","hostile"),tuple(ActionEffect(_text(e,"effect_id"), _float(e,"magnitude",1.0), _text(e,"application","single_target"), _float(e,"range_m",1.8), _float(e,"radius_m",0.0), _float(e,"angle_deg",0.0)) for e in _children(e_node,"effect")),_text(x,"description")))
+            e_node=x.find("effects"); actions.append(Action(_text(x,"id"),_text(x,"name"),_text(x,"target","hostile"),tuple(ActionEffect(_text(e,"effect_id"), _float(e,"magnitude",1.0), _text(e,"application","single_target"), _float(e,"range_m",1.8), _float(e,"radius_m",0.0), _float(e,"angle_deg",0.0)) for e in _children(e_node,"effect")),_text(x,"description"),_float(x,"mana_cost",0.0)))
         profiles=[]
         for x in _children(players_node,"profile"): profiles.append(PlayerProfile(_text(x,"id"),_text(x,"name"),_text(x,"faction","citizen"),tuple((_text(s,"id"),_int(s,"level",1)) for s in _children(x,"skill"))))
         mobs=[]
