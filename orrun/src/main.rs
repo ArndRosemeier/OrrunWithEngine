@@ -1853,7 +1853,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     let dungeon = session.dungeon_build_status();
     let cave = session.cave_build_status();
     let text = format!(
-        "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  {mouse}{door}",
+        "({:.0} m, {:.0} m)  y {:.1}  loft {:.0}  iq {:+.0}  massif {:.0}  yaw {heading:.0}°  |  {stance}  |  chunks {}  |  fauna {}  |  {:.0} fps {submit}  |  F fly  |  Space jump  |  M map  |  O summon  |  {mouse}{door}",
         p.x,
         p.z,
         p.y,
@@ -1984,4 +1984,5 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     hud::draw_combat_log(&ctx, session.combat());
     hud::draw_fail_toast(&ctx, session.combat());
     hud::draw_loot_windows(session, world, frame);
+    hud::draw_summon_window(session, world, frame);
 }

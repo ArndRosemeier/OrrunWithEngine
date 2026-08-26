@@ -300,3 +300,22 @@ The transition is complete when:
 - controls, HUD, animation, audio, VFX, death, and loot consume the new domain state/results;
 - the legacy combat simulator and formula tables are gone or replaced by tooling using the live resolver;
 - adding a normal action or assigning it to a mob/player requires authored data, not a new concrete action branch in Rust.
+
+## Canonical animal integration
+
+Ambient fauna and combat mobs now share one runtime identity. The fauna catalog owns habitat, density, model paths, dimensions, and animation clips; every species links exactly once to a GameData mob. Canonical actor state owns faction, mode, targets, personal provocation, resources, actions, position while engaged, death, and stable corpse/loot identity.
+
+Animal policy has no per-species hostility scripting:
+
+- fixed-step canonical AI performs deterministic detection rolls on a staggered one-second cadence;
+- visual likelihood is strongest in front, weaker at the sides, and weakest at the rear, while close-range hearing contributes an angle-independent likelihood rather than automatic detection;
+- awareness persists briefly and is refreshed by later successful rolls so behavior does not flicker between ticks;
+- `active` actors pursue detected hostile actors; `passive` actors flee only from detected actors that are active, hostile, and non-neutral;
+- flight keeps a separate threat from attack targeting; taking damage immediately cancels flight and establishes personal retaliation against the attacker without a detection roll;
+- each actor instance receives one stable deterministic movement multiplier from its spawn seed, bounded by its mob's authored symmetric variance of at most ±20%; predators are authored slightly faster but with lower endurance;
+- authored endurance drains only during actual movement in pursuit or flight; at zero, both behaviors continue at a centralized slower exhausted speed, and endurance recovers outside sprint movement;
+- streaming deactivation unregisters an actor without producing death or loot;
+- idle movement remains deterministic fauna roaming, while canonical AI exclusively owns engaged position, heading, awareness, movement, endurance, and behavior state;
+- the existing fauna entity is presentation-only for locomotion, attack, death, targeting, VFX, corpse, and loot and never decides gameplay behavior.
+
+The old fauna role, flee, hunt, catch, and direct prey-despawn path is deleted. `wolf` is the canonical mob ID; combat-facing aliases no longer create a second wolf actor.

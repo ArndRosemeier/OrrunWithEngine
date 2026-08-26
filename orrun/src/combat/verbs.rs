@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::controls::RankGate;
+use crate::gamedata::{ActionId, ActionTarget};
+use crate::resolution::TargetSelection;
 
 use super::math::*;
 use super::types::WorldCombat;
@@ -18,6 +20,162 @@ pub fn empty_cds() -> BTreeMap<&'static str, f64> {
 }
 
 impl WorldCombat {
+    pub fn action_cd_frac(&self, action_id: &ActionId) -> f32 {
+        let left = self.canonical_cds.get(action_id).copied().unwrap_or(0.0);
+        let max = self
+            .game_data
+            .as_ref()
+            .and_then(|data| data.action(action_id))
+            .unwrap_or_else(|| panic!("unknown live action {action_id}"))
+            .cooldown_s();
+        if left <= 0.0 || max <= 0.0 {
+            0.0
+        } else {
+            (left / max).clamp(0.0, 1.0) as f32
+        }
+    }
+
+    pub fn action_cast_frac(&self) -> Option<f32> {
+        let cast = self.canonical_cast.as_ref()?;
+        if cast.total_s <= 0.0 || cast.remaining_s <= 0.0 {
+            None
+        } else {
+            Some((cast.remaining_s / cast.total_s).clamp(0.0, 1.0) as f32)
+        }
+    }
+
+    pub fn action_cast_label(&self) -> Option<&str> {
+        let cast = self.canonical_cast.as_ref()?;
+        Some(
+            self.game_data
+                .as_ref()
+                .and_then(|data| data.action(&cast.action_id))
+                .unwrap_or_else(|| panic!("unknown live cast action {}", cast.action_id))
+                .name(),
+        )
+    }
+
+    pub fn press_action(
+        &mut self,
+        action_id: &ActionId,
+        player_x: f64,
+        player_z: f64,
+        _facing_x: f64,
+        _facing_z: f64,
+    ) -> bool {
+        let data = self
+            .game_data
+            .clone()
+            .expect("press_action requires GameData");
+        let action = data
+            .action(action_id)
+            .unwrap_or_else(|| panic!("unknown live action {action_id}"));
+        if self.is_dead() || self.canonical_cast.is_some() {
+            return false;
+        }
+        if self.canonical_cds.get(action_id).copied().unwrap_or(0.0) > 0.0 {
+            return false;
+        }
+        let target = match action.target() {
+            ActionTarget::ActorSelf | ActionTarget::Friendly => None,
+            ActionTarget::Hostile | ActionTarget::Any => {
+                let Some(lock) = self.lock_id() else {
+                    self.note_fail("No target");
+                    return false;
+                };
+                if self.hostile_actor_index(lock).is_none() {
+                    self.note_fail("No target");
+                    return false;
+                }
+                Some(lock)
+            }
+            ActionTarget::None => panic!("action {action_id} has no executable target"),
+        };
+        if self.player().resources.mana() < action.mana_cost() {
+            self.note_fail("Not enough mana");
+            return false;
+        }
+        if action.cast_s() > 0.0 {
+            self.canonical_cast = Some(super::types::CanonicalCast {
+                action_id: action_id.clone(),
+                target,
+                remaining_s: action.cast_s(),
+                total_s: action.cast_s(),
+            });
+            return true;
+        }
+        self.finish_action(action_id.clone(), target, player_x, player_z)
+    }
+
+    fn finish_action(
+        &mut self,
+        action_id: ActionId,
+        target: Option<i32>,
+        player_x: f64,
+        player_z: f64,
+    ) -> bool {
+        let target_class = self
+            .game_data
+            .as_ref()
+            .and_then(|data| data.action(&action_id))
+            .expect("validated live action")
+            .target();
+        let selection = match target_class {
+            ActionTarget::ActorSelf | ActionTarget::Friendly => TargetSelection::Single(0),
+            ActionTarget::Hostile | ActionTarget::Any => {
+                let Some(actor_index) = target.and_then(|idx| self.hostile_actor_index(idx)) else {
+                    self.note_fail("No target");
+                    return false;
+                };
+                TargetSelection::Single(actor_index)
+            }
+            ActionTarget::None => panic!("action {action_id} has no executable target"),
+        };
+        match self.execute_canonical(0, &action_id, selection, player_x, player_z) {
+            Ok(resolution) => {
+                let cooldown = self
+                    .game_data
+                    .as_ref()
+                    .and_then(|data| data.action(&action_id))
+                    .expect("validated live action")
+                    .cooldown_s();
+                if cooldown > 0.0 {
+                    self.canonical_cds.insert(action_id.clone(), cooldown);
+                }
+                self.pending_resolutions.push(resolution);
+                true
+            }
+            Err(crate::resolution::ResolutionError::OutOfRange(_)) => {
+                self.note_fail("Out of range");
+                false
+            }
+            Err(crate::resolution::ResolutionError::NoTarget(_)) => {
+                self.note_fail("No target");
+                false
+            }
+            Err(crate::resolution::ResolutionError::InsufficientMana { .. }) => {
+                self.note_fail("Not enough mana");
+                false
+            }
+            Err(err) => panic!("canonical player action {action_id} failed: {err}"),
+        }
+    }
+
+    fn tick_canonical_actions(&mut self, player_x: f64, player_z: f64, dt: f64) {
+        for remaining in self.canonical_cds.values_mut() {
+            *remaining = (*remaining - dt).max(0.0);
+        }
+        let Some(cast) = self.canonical_cast.as_mut() else {
+            return;
+        };
+        cast.remaining_s -= dt;
+        if cast.remaining_s > 0.0 {
+            return;
+        }
+        let cast = self.canonical_cast.take().expect("canonical cast exists");
+        self.finish_action(cast.action_id, cast.target, player_x, player_z);
+    }
+
     fn cd(&self, k: &str) -> f64 {
         *self.cds().get(k).unwrap_or(&0.0)
     }
@@ -37,6 +195,9 @@ impl WorldCombat {
     /// Remaining-time fraction of the live cast. `1.0` just started, `0.0` gone.
     /// Same remaining-visible convention as [`Self::verb_cd_frac`].
     pub fn cast_frac(&self) -> Option<f32> {
+        if self.canonical_cast.is_some() {
+            return self.action_cast_frac();
+        }
         let kind = self.cast_kind()?;
         let max = cast_duration_s(kind);
         if max <= 0.0 || self.cast_time() <= 0.0 {
@@ -45,7 +206,10 @@ impl WorldCombat {
         Some((self.cast_time() / max).clamp(0.0, 1.0) as f32)
     }
 
-    pub fn cast_label(&self) -> Option<&'static str> {
+    pub fn cast_label(&self) -> Option<&str> {
+        if self.canonical_cast.is_some() {
+            return self.action_cast_label();
+        }
         Some(match self.cast_kind()? {
             "ember" => "Ember",
             "mend" => "Mend",
@@ -118,6 +282,17 @@ impl WorldCombat {
         facing_x: f64,
         facing_z: f64,
     ) -> bool {
+        if self.game_data.is_some() {
+            let action_id = match verb {
+                CombatVerb::Strike => Some(ActionId::new("strike")),
+                CombatVerb::Ember => Some(ActionId::new("fire_bolt")),
+                CombatVerb::Mend => Some(ActionId::new("mend")),
+                _ => None,
+            };
+            if let Some(action_id) = action_id {
+                return self.press_action(&action_id, player_x, player_z, facing_x, facing_z);
+            }
+        }
         let _ = (facing_x, facing_z);
         let ranks = self.player().stats.ranks;
         if !verb.rank_ok(ranks.martial, ranks.hunt, ranks.arcane) {
@@ -309,6 +484,9 @@ impl WorldCombat {
     pub fn tick_verbs(&mut self, player_x: f64, player_z: f64, dt: f64) {
         if dt <= 0.0 {
             return;
+        }
+        if self.game_data.is_some() {
+            self.tick_canonical_actions(player_x, player_z, dt);
         }
         if self.slain_hold_s() > 0.0 {
             *self.slain_hold_s_mut() = (self.slain_hold_s() - dt).max(0.0);

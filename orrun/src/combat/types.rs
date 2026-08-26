@@ -1,8 +1,13 @@
 //! Live combat types. Same numbers as the sim — do not invent a second formula set.
 
+use std::collections::BTreeMap;
+
 use super::log::CombatLog;
 use super::math::*;
 use super::sheets::{player_stats, PlayerStats};
+use crate::gamedata::{ActionId, FactionId, MobId, MobMode};
+use crate::progression::ActorProgression;
+use crate::resolution::{Actor, Resolution, Resolver, TargetSelection};
 
 #[derive(Clone, Debug)]
 pub struct CombatResources {
@@ -189,6 +194,8 @@ pub struct LivePlayer {
     pub sprinted: bool,
     pub used_pin_or_bind: bool,
     pub xp: i32,
+    faction: FactionId,
+    progression: ActorProgression,
 }
 
 impl LivePlayer {
@@ -205,6 +212,8 @@ impl LivePlayer {
             sprinted: false,
             used_pin_or_bind: false,
             xp: 0,
+            faction: FactionId::new("citizen"),
+            progression: ActorProgression::empty(),
         }
     }
 
@@ -221,11 +230,95 @@ impl LivePlayer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ActorId {
+    canonical: u32,
+    runtime_index: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SpawnSeed(u64);
+impl SpawnSeed {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalHeading {
+    x: f64,
+    z: f64,
+}
+impl CanonicalHeading {
+    pub fn from_xz(x: f64, z: f64) -> Self {
+        let length = x.hypot(z);
+        if !length.is_finite() || length <= 1e-9 {
+            panic!("canonical heading requires a finite non-zero direction");
+        }
+        Self {
+            x: x / length,
+            z: z / length,
+        }
+    }
+    pub fn from_degrees(degrees: f32) -> Self {
+        if !degrees.is_finite() {
+            panic!("canonical heading degrees must be finite");
+        }
+        let radians = f64::from(degrees).to_radians();
+        Self::from_xz(radians.sin(), radians.cos())
+    }
+    pub const fn x(self) -> f64 {
+        self.x
+    }
+    pub const fn z(self) -> f64 {
+        self.z
+    }
+}
+
+impl ActorId {
+    pub const PLAYER: Self = Self {
+        canonical: 0,
+        runtime_index: -1,
+    };
+
+    pub fn from_runtime_index(index: i32) -> Self {
+        let canonical = u32::try_from(index)
+            .expect("actor runtime index must be non-negative")
+            .checked_add(1)
+            .expect("actor id space exhausted");
+        Self {
+            canonical,
+            runtime_index: index,
+        }
+    }
+
+    pub fn runtime_index(self) -> Option<i32> {
+        (self != Self::PLAYER).then_some(self.runtime_index)
+    }
+
+    fn assigned(canonical: u32, runtime_index: i32) -> Self {
+        if canonical == 0 {
+            panic!("canonical actor sequence cannot use the player id");
+        }
+        if runtime_index < 0 {
+            panic!("actor runtime index must be non-negative");
+        }
+        Self {
+            canonical,
+            runtime_index,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostileState {
     Idle,
     Alerted,
     Pursuing,
+    Fleeing,
     Attacking,
     Leashing,
     Dead,
@@ -234,6 +327,7 @@ pub enum HostileState {
 #[derive(Clone, Debug)]
 pub struct WorldHostile {
     pub idx: i32,
+    actor_id: ActorId,
     pub x: f64,
     pub z: f64,
     hp: f64,
@@ -245,7 +339,7 @@ pub struct WorldHostile {
     pub root_s: f64,
     /// Display name for the lock tell. Fixture wolves use "wolf-spider".
     pub name: String,
-    /// Sheet / catalog id (orc, tribal, orc_skull, crawler_spider_wolf).
+    /// Sheet / catalog id (orc, tribal, orc_skull, wolf).
     pub mob_id: String,
     /// Visible body entity, if the fixture mesh has been spawned.
     pub entity: Option<engine::world::EntityId>,
@@ -257,6 +351,22 @@ pub struct WorldHostile {
     pub home_z: f64,
     pub aggro: Aggro,
     pub state: HostileState,
+    faction: FactionId,
+    mode: MobMode,
+    target: Option<ActorId>,
+    provoked_by: Option<ActorId>,
+    flee_threat: Option<ActorId>,
+    movement_speed_mps: f64,
+    speed_multiplier: f64,
+    heading: CanonicalHeading,
+    spawn_seed: SpawnSeed,
+    detection_check: u64,
+    detection_left_s: f64,
+    awareness_s: f64,
+    endurance_s: f64,
+    endurance_max_s: f64,
+    progression: ActorProgression,
+    actions: Vec<ActionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -285,18 +395,28 @@ pub struct CombatStep {
     pub outgoing: Option<(i32, i32, bool)>,
     pub incoming: Option<(f64, IncomingHit)>,
     pub specials: Vec<SpecialAttackEvent>,
+    pub resolutions: Vec<Resolution>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CanonicalCast {
+    pub(crate) action_id: ActionId,
+    pub(crate) target: Option<i32>,
+    pub(crate) remaining_s: f64,
+    pub(crate) total_s: f64,
 }
 
 #[derive(Clone, Debug)]
 pub struct WorldCombat {
     #[allow(dead_code)]
-    game_data: Option<std::sync::Arc<crate::gamedata::GameData>>,
+    pub(crate) game_data: Option<std::sync::Arc<crate::gamedata::GameData>>,
     player: LivePlayer,
     lock: Option<i32>,
     cycle: Vec<i32>,
     auto_cd: f64,
     last_auto_dealt: i32,
     hostiles: Vec<WorldHostile>,
+    next_actor_id: u32,
     strike_armed: bool,
     ember_started: bool,
     last_potion_heal: i32,
@@ -321,6 +441,9 @@ pub struct WorldCombat {
     special_tele: std::collections::BTreeMap<i32, f64>,
     /// Fixed-step accumulator owned by the simulation, never by presentation.
     fixed_accum_s: f64,
+    pub(crate) canonical_cds: BTreeMap<ActionId, f64>,
+    pub(crate) canonical_cast: Option<CanonicalCast>,
+    pub(crate) pending_resolutions: Vec<Resolution>,
 }
 
 impl WorldHostile {
@@ -335,6 +458,7 @@ impl WorldHostile {
     ) -> Self {
         Self {
             idx,
+            actor_id: ActorId::from_runtime_index(idx),
             x,
             z,
             hp: f64::from(sheet.hp),
@@ -360,7 +484,50 @@ impl WorldHostile {
                 social_m: sheet.social_m,
             },
             state: HostileState::Idle,
+            faction: FactionId::new("wild"),
+            mode: MobMode::Active,
+            target: None,
+            provoked_by: None,
+            flee_threat: None,
+            movement_speed_mps: sheet.speed_mps,
+            speed_multiplier: 1.0,
+            heading: CanonicalHeading::from_xz(1.0, 0.0),
+            spawn_seed: SpawnSeed::new(0),
+            detection_check: 0,
+            detection_left_s: 0.0,
+            awareness_s: 0.0,
+            endurance_s: 1.0,
+            endurance_max_s: 1.0,
+            progression: ActorProgression::empty(),
+            actions: Vec::new(),
         }
+    }
+
+    pub fn actor_id(&self) -> ActorId {
+        self.actor_id
+    }
+
+    pub fn faction(&self) -> &FactionId {
+        &self.faction
+    }
+
+    pub fn mode(&self) -> MobMode {
+        self.mode
+    }
+
+    pub fn target(&self) -> Option<ActorId> {
+        self.target
+    }
+
+    pub fn is_engaged(&self) -> bool {
+        matches!(
+            self.state,
+            HostileState::Alerted
+                | HostileState::Pursuing
+                | HostileState::Fleeing
+                | HostileState::Attacking
+                | HostileState::Leashing
+        )
     }
 
     pub fn hp(&self) -> f64 {
@@ -374,6 +541,91 @@ impl WorldHostile {
     pub fn is_alive(&self) -> bool {
         self.alive
     }
+    pub fn heading(&self) -> CanonicalHeading {
+        self.heading
+    }
+    pub fn movement_speed_mps(&self) -> f64 {
+        self.movement_speed_mps * self.speed_multiplier
+    }
+    pub fn effective_movement_speed_mps(&self) -> f64 {
+        movement_speed(self)
+    }
+    pub fn speed_multiplier(&self) -> f64 {
+        self.speed_multiplier
+    }
+    pub fn endurance_seconds(&self) -> f64 {
+        self.endurance_s
+    }
+    pub fn endurance_max_seconds(&self) -> f64 {
+        self.endurance_max_s
+    }
+    pub fn flee_threat(&self) -> Option<ActorId> {
+        self.flee_threat
+    }
+}
+
+const DETECTION_INTERVAL_S: f64 = 1.0;
+const AWARENESS_PERSIST_S: f64 = 3.0;
+const EXHAUSTED_SPEED_RATIO: f64 = 0.45;
+
+fn mix64(mut v: u64) -> u64 {
+    v ^= v >> 30;
+    v = v.wrapping_mul(0xbf58476d1ce4e5b9);
+    v ^= v >> 27;
+    v = v.wrapping_mul(0x94d049bb133111eb);
+    v ^ (v >> 31)
+}
+fn deterministic_unit(seed: SpawnSeed, draw: u64) -> f64 {
+    (mix64(seed.value() ^ draw.wrapping_mul(0x9e3779b97f4a7c15)) >> 11) as f64
+        / ((1u64 << 53) as f64)
+}
+fn deterministic_signed_unit(seed: SpawnSeed, draw: u64) -> f64 {
+    deterministic_unit(seed, draw) * 2.0 - 1.0
+}
+fn stable_spawn_hash(idx: i32, id: &[u8], x: f64, z: f64) -> u64 {
+    let mut h = mix64(u64::try_from(idx).expect("spawn index must be non-negative"));
+    for b in id {
+        h = mix64(h ^ u64::from(*b));
+    }
+    mix64(h ^ x.to_bits() ^ z.to_bits().rotate_left(17))
+}
+fn movement_speed(a: &WorldHostile) -> f64 {
+    a.movement_speed_mps
+        * a.speed_multiplier
+        * if a.endurance_s <= 0.0 {
+            EXHAUSTED_SPEED_RATIO
+        } else {
+            1.0
+        }
+        * if a.slow_s > 0.0 { 0.5 } else { 1.0 }
+}
+fn detection_probability(a: &WorldHostile, x: f64, z: f64) -> f64 {
+    let dx = x - a.x;
+    let dz = z - a.z;
+    let d = dx.hypot(dz);
+    let facing = if d <= 1e-9 {
+        1.0
+    } else {
+        let dot = a.heading.x * dx / d + a.heading.z * dz / d;
+        if dot >= 0.5 {
+            1.0
+        } else if dot <= -0.5 {
+            0.2
+        } else {
+            0.55
+        }
+    };
+    let sight = if d < a.aggro.sight_m {
+        (1.0 - d / a.aggro.sight_m) * facing
+    } else {
+        0.0
+    };
+    let hearing = if d < a.aggro.hear_m {
+        1.0 - d / a.aggro.hear_m
+    } else {
+        0.0
+    };
+    sight.max(hearing).clamp(0.0, 1.0)
 }
 
 impl WorldCombat {
@@ -394,11 +646,190 @@ impl WorldCombat {
     pub fn player_mut(&mut self) -> &mut LivePlayer {
         &mut self.player
     }
+
+    pub fn player_progression(&self) -> &ActorProgression {
+        &self.player.progression
+    }
+
+    fn initialize_canonical_player(&mut self) {
+        let data = self
+            .game_data
+            .as_ref()
+            .expect("canonical player initialization requires GameData");
+        let profile_id = data
+            .default_player_profile_id()
+            .unwrap_or_else(|err| panic!("invalid default player profile: {err}"));
+        let profile = data
+            .profile(&profile_id)
+            .unwrap_or_else(|| panic!("missing validated player profile {profile_id}"));
+        self.player.faction = profile.faction().clone();
+        self.player.progression = ActorProgression::from_profile(profile);
+        self.player.resources.hp_max = self.player.progression.hp_max();
+        self.player.resources.mana_max = self.player.progression.mana_max();
+        self.player.resources.hp = self.player.resources.hp_max;
+        self.player.resources.mana = self.player.resources.mana_max;
+    }
+
+    fn hydrate_hostile(&self, hostile: &mut WorldHostile) {
+        let Some(data) = self.game_data.as_ref() else {
+            return;
+        };
+        let mob_id = MobId::new(hostile.mob_id.clone());
+        let mob = data
+            .mob(&mob_id)
+            .unwrap_or_else(|| panic!("live hostile references unknown GameData mob {mob_id}"));
+        hostile.name = mob.name().to_string();
+        hostile.faction = mob.faction().clone();
+        hostile.mode = mob.mode();
+        hostile.movement_speed_mps = data
+            .movement_by_id(mob.movement_id())
+            .expect("validated mob movement")
+            .speed_mps();
+        let variance = mob.speed_variance_ratio().as_ratio();
+        hostile.speed_multiplier =
+            1.0 + deterministic_signed_unit(hostile.spawn_seed, 0) * variance;
+        hostile.endurance_max_s = mob.endurance_s().seconds();
+        hostile.endurance_s = hostile.endurance_max_s;
+        hostile.progression = ActorProgression::from_mob(mob, data);
+        hostile.actions = mob.actions().to_vec();
+    }
+
+    fn hydrate_all_hostiles(&mut self) {
+        let Some(data) = self.game_data.clone() else {
+            return;
+        };
+        for hostile in &mut self.hostiles {
+            if !hostile.actions.is_empty() {
+                continue;
+            }
+            let mob_id = MobId::new(hostile.mob_id.clone());
+            let mob = data
+                .mob(&mob_id)
+                .unwrap_or_else(|| panic!("live hostile references unknown GameData mob {mob_id}"));
+            hostile.name = mob.name().to_string();
+            hostile.faction = mob.faction().clone();
+            hostile.mode = mob.mode();
+            hostile.movement_speed_mps = data
+                .movement_by_id(mob.movement_id())
+                .expect("validated mob movement")
+                .speed_mps();
+            hostile.progression = ActorProgression::from_mob(mob, &data);
+            hostile.actions = mob.actions().to_vec();
+        }
+    }
+
+    fn canonical_actors(&self, player_x: f64, player_z: f64) -> Vec<Actor> {
+        let mut actors = Vec::with_capacity(self.hostiles.len() + 1);
+        actors.push(Actor {
+            id: 0,
+            name: "Adventurer".into(),
+            faction: self.player.faction.clone(),
+            x: player_x,
+            z: player_z,
+            armor: 0,
+            hp: self.player.resources.hp,
+            mana: self.player.resources.mana,
+            alive: !self.dead,
+            progression: self.player.progression.clone(),
+        });
+        actors.extend(self.hostiles.iter().map(|hostile| Actor {
+            id: hostile.actor_id.canonical,
+            name: hostile.name.clone(),
+            faction: hostile.faction.clone(),
+            x: hostile.x,
+            z: hostile.z,
+            armor: hostile.armor,
+            hp: hostile.hp,
+            mana: hostile.progression.mana_max(),
+            alive: hostile.alive,
+            progression: hostile.progression.clone(),
+        }));
+        actors
+    }
+
+    fn sync_canonical_actors(&mut self, actors: Vec<Actor>, source: ActorId) {
+        let mut iter = actors.into_iter();
+        let player = iter.next().expect("canonical actor set contains player");
+        self.player.resources.hp = player.hp;
+        self.player.resources.hp_max = player.hp_max();
+        self.player.resources.mana = player.mana;
+        self.player.resources.mana_max = player.mana_max();
+        self.player.progression = player.progression;
+        if !player.alive && !self.dead {
+            self.dead = true;
+            self.lock = None;
+            self.auto_cd = 999.0;
+            self.slain_by.get_or_insert_with(|| "hostile".into());
+            self.slain_hold_s = SLAIN_HOLD_S;
+        }
+        for (hostile, actor) in self.hostiles.iter_mut().zip(iter) {
+            let took_damage = actor.hp < hostile.hp;
+            hostile.hp = actor.hp;
+            hostile.progression = actor.progression;
+            if took_damage && actor.alive {
+                hostile.provoked_by = Some(source);
+                hostile.flee_threat = None;
+                hostile.target = Some(source);
+                hostile.awareness_s = AWARENESS_PERSIST_S;
+                hostile.state = HostileState::Alerted;
+            }
+            if hostile.alive && !actor.alive {
+                hostile.alive = false;
+                hostile.state = HostileState::Dead;
+                if self.lock == Some(hostile.idx) {
+                    self.lock = None;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn hostile_actor_index(&self, hostile_idx: i32) -> Option<usize> {
+        self.hostiles
+            .iter()
+            .position(|hostile| hostile.idx == hostile_idx && hostile.alive)
+            .map(|index| index + 1)
+    }
+
+    pub(crate) fn execute_canonical(
+        &mut self,
+        caster: usize,
+        action_id: &ActionId,
+        selection: TargetSelection,
+        player_x: f64,
+        player_z: f64,
+    ) -> Result<Resolution, crate::resolution::ResolutionError> {
+        self.hydrate_all_hostiles();
+        let data = self
+            .game_data
+            .clone()
+            .expect("canonical action execution requires GameData");
+        let mut actors = self.canonical_actors(player_x, player_z);
+        let result = Resolver::new(&data).execute(&mut actors, caster, action_id, selection)?;
+        let source = if caster == 0 {
+            ActorId::PLAYER
+        } else {
+            self.hostiles
+                .get(caster - 1)
+                .expect("resolver caster maps to live actor")
+                .actor_id
+        };
+        self.sync_canonical_actors(actors, source);
+        Ok(result)
+    }
     pub fn hostiles(&self) -> &[WorldHostile] {
         &self.hostiles
     }
-    pub fn hostiles_mut(&mut self) -> &mut Vec<WorldHostile> {
+    pub fn hostiles_mut(&mut self) -> &mut [WorldHostile] {
         &mut self.hostiles
+    }
+    pub fn retain_hostiles(&mut self, mut keep: impl FnMut(&WorldHostile) -> bool) {
+        self.hostiles.retain(|actor| keep(actor));
+        if self
+            .lock
+            .is_some_and(|idx| !self.hostiles.iter().any(|actor| actor.idx == idx))
+        {
+            self.lock = None;
+        }
     }
     pub fn lock_id(&self) -> Option<i32> {
         self.lock
@@ -419,7 +850,13 @@ impl WorldCombat {
         self.ward
     }
     pub fn cast_time(&self) -> f64 {
-        self.cast_t
+        self.canonical_cast
+            .as_ref()
+            .map(|cast| cast.remaining_s)
+            .unwrap_or(self.cast_t)
+    }
+    pub fn casting_action_id(&self) -> Option<&ActionId> {
+        self.canonical_cast.as_ref().map(|cast| &cast.action_id)
     }
     pub fn strike_is_armed(&self) -> bool {
         self.strike_armed
@@ -538,16 +975,114 @@ impl WorldCombat {
         self.lock = None;
         self.cycle.clear();
     }
-    pub fn add_hostile(&mut self, hostile: WorldHostile) {
+    pub fn deactivate_actors(&mut self, ids: &[ActorId]) {
+        if ids.contains(&ActorId::PLAYER) {
+            panic!("player cannot be streaming-deactivated");
+        }
+        let deactivated_runtime_indices: Vec<i32> = self
+            .hostiles
+            .iter()
+            .filter(|actor| ids.contains(&actor.actor_id))
+            .map(|actor| actor.idx)
+            .collect();
+        self.hostiles.retain(|actor| !ids.contains(&actor.actor_id));
+        if self
+            .lock
+            .is_some_and(|idx| deactivated_runtime_indices.contains(&idx))
+        {
+            self.lock = None;
+        }
+        self.cycle
+            .retain(|idx| !deactivated_runtime_indices.contains(idx));
+    }
+
+    pub fn update_idle_actor_position(&mut self, id: ActorId, x: f64, z: f64) {
+        let actor = self
+            .hostiles
+            .iter_mut()
+            .find(|actor| actor.actor_id == id)
+            .unwrap_or_else(|| panic!("idle fauna actor {id:?} missing from canonical arena"));
+        if actor.is_engaged() {
+            panic!("fauna attempted to move engaged actor {id:?}");
+        }
+        actor.x = x;
+        actor.z = z;
+    }
+    pub fn next_actor_runtime_index(&self) -> i32 {
+        self.hostiles
+            .iter()
+            .map(|actor| actor.idx)
+            .max()
+            .unwrap_or(-1)
+            + 1
+    }
+
+    pub fn register_hostile(
+        &mut self,
+        mut hostile: WorldHostile,
+        seed: SpawnSeed,
+        heading: CanonicalHeading,
+    ) -> ActorId {
+        if self.hostiles.iter().any(|actor| actor.idx == hostile.idx) {
+            panic!("duplicate hostile runtime index {}", hostile.idx);
+        }
+        if self.next_actor_id == 0 {
+            panic!("canonical actor id space exhausted");
+        }
+        hostile.actor_id = ActorId::assigned(self.next_actor_id, hostile.idx);
+        self.next_actor_id = self
+            .next_actor_id
+            .checked_add(1)
+            .expect("canonical actor id space exhausted");
+        hostile.spawn_seed = seed;
+        hostile.heading = heading;
+        hostile.detection_left_s = deterministic_unit(seed, 1);
+        self.hydrate_hostile(&mut hostile);
+        let id = hostile.actor_id;
         self.hostiles.push(hostile);
+        id
+    }
+    pub fn add_hostile(&mut self, hostile: WorldHostile) {
+        let seed = SpawnSeed::new(stable_spawn_hash(
+            hostile.idx,
+            hostile.mob_id.as_bytes(),
+            hostile.x,
+            hostile.z,
+        ));
+        self.register_hostile(hostile, seed, CanonicalHeading::from_xz(1.0, 0.0));
+    }
+
+    /// Seat one validated GameData mob in the canonical arena.
+    pub fn add_canonical_mob(
+        &mut self,
+        mob_id: &MobId,
+        runtime_index: i32,
+        x: f64,
+        z: f64,
+        home_x: f64,
+        home_z: f64,
+    ) -> ActorId {
+        let sheet = self.mob_sheet(mob_id.as_str());
+        let hostile =
+            WorldHostile::from_sheet(runtime_index, x, z, &sheet, mob_id.as_str(), home_x, home_z);
+        let seed = SpawnSeed::new(stable_spawn_hash(
+            runtime_index,
+            mob_id.as_str().as_bytes(),
+            x,
+            z,
+        ));
+        self.register_hostile(hostile, seed, CanonicalHeading::from_xz(1.0, 0.0))
     }
     pub fn reset_for_encounter(&mut self) {
         let player = self.player.clone();
         let hostiles = self.hostiles.clone();
         let game_data = self.game_data.clone();
+        let next_actor_id = self.next_actor_id;
         *self = Self::specialist_with_data(game_data, player.stats.level, player.stats.discipline);
         self.player = player;
         self.hostiles = hostiles;
+        self.next_actor_id = next_actor_id;
+        self.hydrate_all_hostiles();
     }
     pub fn reset_encounter_state(&mut self) {
         self.lock = None;
@@ -569,7 +1104,25 @@ impl WorldCombat {
         self.last_rank_gate = None;
         self.special_tele.clear();
         self.fixed_accum_s = 0.0;
+        self.canonical_cds.clear();
+        self.canonical_cast = None;
+        self.pending_resolutions.clear();
     }
+    /// Restore the player and transient combat state when a seated fixture is armed.
+    pub fn reset_for_fixture_start(&mut self) {
+        self.reset_encounter_state();
+        self.player.resources.hp = self.player.resources.hp_max;
+        self.player.resources.mana = self.player.resources.mana_max;
+        self.player.shaken = None;
+        self.dead = false;
+        self.slain_by = None;
+        self.slain_hold_s = 0.0;
+        self.last_incoming = None;
+        self.log = CombatLog::new();
+        self.fail_tell = None;
+        self.fail_tell_s = 0.0;
+    }
+
     pub fn set_player_hp(&mut self, hp: f64) {
         self.player.resources.hp = hp;
     }
@@ -611,6 +1164,7 @@ impl WorldCombat {
             outgoing,
             incoming,
             specials,
+            resolutions: std::mem::take(&mut self.pending_resolutions),
         }
     }
 
@@ -627,7 +1181,9 @@ impl WorldCombat {
         level: i32,
         discipline: Discipline,
     ) -> Self {
-        Self::specialist_with_data(Some(game_data), level, discipline)
+        let mut combat = Self::specialist_with_data(Some(game_data), level, discipline);
+        combat.initialize_canonical_player();
+        combat
     }
 
     fn specialist_with_data(
@@ -643,6 +1199,7 @@ impl WorldCombat {
             auto_cd: MELEE_SWING_S,
             last_auto_dealt: 0,
             hostiles: Vec::new(),
+            next_actor_id: 1,
             strike_armed: false,
             ember_started: false,
             last_potion_heal: 0,
@@ -666,13 +1223,21 @@ impl WorldCombat {
             fail_tell_s: 0.0,
             special_tele: std::collections::BTreeMap::new(),
             fixed_accum_s: 0.0,
+            canonical_cds: BTreeMap::new(),
+            canonical_cast: None,
+            pending_resolutions: Vec::new(),
         }
     }
 
     fn hostile_pairs(&self) -> Vec<(i32, f64, f64)> {
         self.hostiles
             .iter()
-            .filter(|h| h.alive)
+            .filter(|h| {
+                h.alive
+                    && self.game_data.as_ref().is_none_or(|data| {
+                        data.factions_are_hostile(&self.player.faction, &h.faction)
+                    })
+            })
             .map(|h| (h.idx, h.x, h.z))
             .collect()
     }
@@ -767,7 +1332,7 @@ impl WorldCombat {
             panic!("damage reported for missing or dead hostile {idx}");
         };
         self.hostiles[hi].hp = (self.hostiles[hi].hp - f64::from(dealt)).max(0.0);
-        self.hostiles[hi].state = HostileState::Alerted;
+        self.set_retaliation(hi, ActorId::PLAYER);
         if self.hostiles[hi].hp <= 0.0 {
             self.defeat_hostile(idx);
             true
@@ -779,6 +1344,18 @@ impl WorldCombat {
         let Some(h) = self.hostiles.iter_mut().find(|h| h.idx == idx && h.alive) else {
             panic!("damage reported for missing or dead hostile {idx}");
         };
+        h.flee_threat = None;
+        h.provoked_by = Some(ActorId::PLAYER);
+        h.target = Some(ActorId::PLAYER);
+        h.awareness_s = AWARENESS_PERSIST_S;
+        h.state = HostileState::Alerted;
+    }
+    fn set_retaliation(&mut self, index: usize, source: ActorId) {
+        let h = &mut self.hostiles[index];
+        h.flee_threat = None;
+        h.provoked_by = Some(source);
+        h.target = Some(source);
+        h.awareness_s = AWARENESS_PERSIST_S;
         h.state = HostileState::Alerted;
     }
 
@@ -789,30 +1366,8 @@ impl WorldCombat {
         self.hostiles[hi].hp = 0.0;
         self.hostiles[hi].alive = false;
         self.hostiles[hi].state = HostileState::Dead;
-        let defeated = self.hostiles[hi].clone();
-        self.award_hostile_xp(&defeated);
         if self.lock == Some(idx) {
             self.lock = None;
-        }
-    }
-
-    fn award_hostile_xp(&mut self, hostile: &WorldHostile) {
-        let sheet = crate::combat::sheets::mob_sheet(&hostile.mob_id)
-            .unwrap_or_else(|err| panic!("missing XP sheet for {}: {err}", hostile.mob_id));
-        self.player.xp += sheet.xp;
-        while let Some(need) = crate::combat::sheets::xp_to_next(self.player.stats.level) {
-            if self.player.xp < need {
-                break;
-            }
-            self.player.xp -= need;
-            self.player.stats = crate::combat::sheets::player_stats(
-                self.player.stats.level + 1,
-                self.player.stats.discipline,
-            );
-            self.player.resources.hp_max = f64::from(self.player.stats.hp);
-            self.player.resources.mana_max = f64::from(self.player.stats.mana);
-            self.player.resources.hp = self.player.resources.hp_max;
-            self.player.resources.mana = self.player.resources.mana_max;
         }
     }
 
@@ -837,6 +1392,9 @@ impl WorldCombat {
         dt: f64,
     ) -> Option<i32> {
         if self.dead {
+            return None;
+        }
+        if self.game_data.is_some() {
             return None;
         }
         if self.player.stats.discipline != Discipline::Martial {
@@ -871,82 +1429,202 @@ impl WorldCombat {
         Some(dealt)
     }
 
-    /// Advances deterministic sight/hearing aggro, pursuit, melee range, and leash reset.
+    /// Advances deterministic perception, flight, pursuit, endurance, and leash reset.
     pub fn tick_hostile_ai(&mut self, player_x: f64, player_z: f64, dt: f64) {
         if self.dead || dt <= 0.0 {
             return;
         }
-        let social_targets: Vec<(f64, f64)> = self
+        self.hydrate_all_hostiles();
+        let data = self.game_data.as_ref();
+        let player = (
+            ActorId::PLAYER,
+            self.player.faction.clone(),
+            player_x,
+            player_z,
+            true,
+        );
+        let actors: Vec<(ActorId, FactionId, MobMode, f64, f64, bool)> = self
             .hostiles
             .iter()
-            .filter(|h| {
-                h.alive
-                    && matches!(
-                        h.state,
-                        HostileState::Alerted | HostileState::Pursuing | HostileState::Attacking
-                    )
-            })
-            .map(|h| (h.x, h.z))
+            .map(|a| (a.actor_id, a.faction.clone(), a.mode, a.x, a.z, a.alive))
             .collect();
-        for h in &mut self.hostiles {
-            if !h.alive {
-                h.state = HostileState::Dead;
+
+        for actor in &mut self.hostiles {
+            if !actor.alive {
+                actor.state = HostileState::Dead;
+                actor.target = None;
+                actor.flee_threat = None;
                 continue;
             }
-            let home_distance = (h.x - h.home_x).hypot(h.z - h.home_z);
-            if home_distance > h.aggro.leash_m {
-                h.state = HostileState::Leashing;
+            let home_distance = (actor.x - actor.home_x).hypot(actor.z - actor.home_z);
+            if home_distance > actor.aggro.leash_m {
+                actor.state = HostileState::Leashing;
+                actor.target = None;
+                actor.flee_threat = None;
+                actor.awareness_s = 0.0;
             }
-            if h.state == HostileState::Leashing {
-                let dx = h.home_x - h.x;
-                let dz = h.home_z - h.z;
+            if actor.state == HostileState::Leashing {
+                actor.endurance_s = (actor.endurance_s + dt).min(actor.endurance_max_s);
+                let dx = actor.home_x - actor.x;
+                let dz = actor.home_z - actor.z;
                 let distance = dx.hypot(dz);
                 if distance <= 0.05 {
-                    h.x = h.home_x;
-                    h.z = h.home_z;
-                    h.aggro = Aggro::default();
-                    h.state = HostileState::Idle;
-                } else if h.root_s <= 0.0 {
-                    let speed = crate::combat::WALK_MPS * if h.slow_s > 0.0 { 0.5 } else { 1.0 };
-                    let step = (speed * dt).min(distance);
-                    h.x += dx / distance * step;
-                    h.z += dz / distance * step;
-                    if step >= distance - 1e-9 {
-                        h.x = h.home_x;
-                        h.z = h.home_z;
-                        h.aggro = Aggro::default();
-                        h.state = HostileState::Idle;
-                    }
+                    actor.x = actor.home_x;
+                    actor.z = actor.home_z;
+                    actor.provoked_by = None;
+                    actor.state = HostileState::Idle;
+                } else if actor.root_s <= 0.0 {
+                    let step =
+                        (actor.movement_speed_mps * actor.speed_multiplier * dt).min(distance);
+                    actor.heading = CanonicalHeading::from_xz(dx, dz);
+                    actor.x += dx / distance * step;
+                    actor.z += dz / distance * step;
                 }
                 continue;
             }
-            let player_distance = (player_x - h.x).hypot(player_z - h.z);
-            let social = social_targets.iter().any(|&(x, z)| {
-                (x - h.x).hypot(z - h.z) > 1e-9 && (x - h.x).hypot(z - h.z) <= h.aggro.social_m
-            });
-            let can_aggro =
-                player_distance <= h.aggro.sight_m || player_distance <= h.aggro.hear_m || social;
-            if matches!(h.state, HostileState::Idle) && can_aggro {
-                h.state = HostileState::Alerted;
-            }
-            if matches!(h.state, HostileState::Alerted | HostileState::Pursuing) {
-                if player_distance <= h.reach_m {
-                    h.state = HostileState::Attacking;
-                } else if h.root_s <= 0.0 {
-                    h.state = HostileState::Pursuing;
-                    let dx = player_x - h.x;
-                    let dz = player_z - h.z;
-                    let distance = dx.hypot(dz);
-                    let speed = crate::combat::WALK_MPS * if h.slow_s > 0.0 { 0.5 } else { 1.0 };
-                    let step = (speed * dt).min((distance - h.reach_m).max(0.0));
-                    if distance > 1e-9 {
-                        h.x += dx / distance * step;
-                        h.z += dz / distance * step;
+            let hostile_to = |faction: &FactionId| {
+                data.map_or(
+                    actor.faction != *faction
+                        && actor.faction.as_str() != "neutral"
+                        && faction.as_str() != "neutral",
+                    |d| {
+                        !d.faction(&actor.faction)
+                            .expect("validated observer faction")
+                            .is_neutral()
+                            && !d
+                                .faction(faction)
+                                .expect("validated candidate faction")
+                                .is_neutral()
+                            && d.factions_are_hostile(&actor.faction, faction)
+                    },
+                )
+            };
+            let locate = |id: ActorId| -> Option<(f64, f64)> {
+                if id == ActorId::PLAYER {
+                    return (player.4 && hostile_to(&player.1)).then_some((player.2, player.3));
+                }
+                actors
+                    .iter()
+                    .find(|c| c.0 == id && c.5 && hostile_to(&c.1))
+                    .map(|c| (c.3, c.4))
+            };
+
+            actor.awareness_s = (actor.awareness_s - dt).max(0.0);
+            actor.detection_left_s -= dt;
+            if actor.detection_left_s <= 0.0 {
+                while actor.detection_left_s <= 0.0 {
+                    actor.detection_left_s += DETECTION_INTERVAL_S;
+                }
+                let mut candidates: Vec<(ActorId, MobMode, f64, f64, f64)> = Vec::new();
+                if hostile_to(&player.1) {
+                    candidates.push((
+                        player.0,
+                        MobMode::Active,
+                        player.2,
+                        player.3,
+                        (player.2 - actor.x).hypot(player.3 - actor.z),
+                    ));
+                }
+                candidates.extend(
+                    actors
+                        .iter()
+                        .filter(|c| c.0 != actor.actor_id && c.5 && hostile_to(&c.1))
+                        .map(|c| (c.0, c.2, c.3, c.4, (c.3 - actor.x).hypot(c.4 - actor.z))),
+                );
+                candidates.retain(|(_, candidate_mode, _, _, _)| {
+                    actor.mode == MobMode::Active || *candidate_mode == MobMode::Active
+                });
+                candidates.sort_by(|a, b| a.4.total_cmp(&b.4).then_with(|| a.0.cmp(&b.0)));
+                for (id, mode, x, z, _) in candidates {
+                    let probability = detection_probability(actor, x, z);
+                    let draw = deterministic_unit(actor.spawn_seed, 2 + actor.detection_check);
+                    actor.detection_check += 1;
+                    if draw >= probability {
+                        continue;
                     }
-                    if (player_x - h.x).hypot(player_z - h.z) <= h.reach_m {
-                        h.state = HostileState::Attacking;
+                    actor.awareness_s = AWARENESS_PERSIST_S;
+                    match actor.mode {
+                        MobMode::Active => {
+                            actor.target = Some(id);
+                            actor.flee_threat = None;
+                            actor.state = HostileState::Alerted;
+                        }
+                        MobMode::Passive if mode == MobMode::Active => {
+                            actor.flee_threat = Some(id);
+                            actor.target = None;
+                            actor.state = HostileState::Fleeing;
+                        }
+                        MobMode::Passive => {}
+                    }
+                    break;
+                }
+            }
+            if actor.awareness_s <= 0.0 {
+                actor.target = None;
+                actor.flee_threat = None;
+                actor.provoked_by = None;
+                actor.state = HostileState::Idle;
+            }
+
+            let sprinting = match actor.state {
+                HostileState::Fleeing => {
+                    let Some((tx, tz)) = actor.flee_threat.and_then(locate) else {
+                        actor.flee_threat = None;
+                        actor.state = HostileState::Idle;
+                        continue;
+                    };
+                    if actor.root_s > 0.0 {
+                        false
+                    } else {
+                        let dx = actor.x - tx;
+                        let dz = actor.z - tz;
+                        let distance = dx.hypot(dz);
+                        if distance <= 1e-9 {
+                            false
+                        } else {
+                            let speed = movement_speed(actor);
+                            let step = speed * dt;
+                            actor.heading = CanonicalHeading::from_xz(dx, dz);
+                            actor.x += dx / distance * step;
+                            actor.z += dz / distance * step;
+                            step > 0.0
+                        }
                     }
                 }
+                HostileState::Alerted | HostileState::Pursuing | HostileState::Attacking => {
+                    let Some((tx, tz)) = actor.target.and_then(locate) else {
+                        actor.target = None;
+                        actor.state = HostileState::Idle;
+                        continue;
+                    };
+                    let dx = tx - actor.x;
+                    let dz = tz - actor.z;
+                    let distance = dx.hypot(dz);
+                    if distance <= actor.reach_m {
+                        actor.state = HostileState::Attacking;
+                        false
+                    } else if actor.root_s <= 0.0 {
+                        actor.state = HostileState::Pursuing;
+                        let speed = movement_speed(actor);
+                        let step = (speed * dt).min((distance - actor.reach_m).max(0.0));
+                        if step > 0.0 {
+                            actor.heading = CanonicalHeading::from_xz(dx, dz);
+                            actor.x += dx / distance * step;
+                            actor.z += dz / distance * step;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if sprinting {
+                actor.endurance_s = (actor.endurance_s - dt).max(0.0);
+            } else {
+                actor.endurance_s = (actor.endurance_s + dt).min(actor.endurance_max_s);
             }
         }
     }
@@ -977,6 +1655,15 @@ impl WorldCombat {
                 continue;
             };
             let h = &self.hostiles[slot];
+            if self
+                .game_data
+                .as_ref()
+                .and_then(|data| data.mob(&MobId::new(h.mob_id.clone())))
+                .is_some()
+            {
+                self.special_tele.remove(&idx);
+                continue;
+            }
             let sheet = crate::combat::sheets::mob_sheet(&h.mob_id).unwrap_or_else(|err| {
                 panic!("missing special-attack sheet for {}: {err}", h.mob_id)
             });
@@ -1034,10 +1721,87 @@ impl WorldCombat {
         self.lock.is_some() || self.hostiles.iter().any(|h| h.alive)
     }
 
+    fn tick_canonical_actor_attack(
+        &mut self,
+        player_x: f64,
+        player_z: f64,
+        dt: f64,
+    ) -> Option<IncomingHit> {
+        if self.dead || dt <= 0.0 {
+            return None;
+        }
+        self.hydrate_all_hostiles();
+        let mut ready = None;
+        for (index, actor) in self.hostiles.iter_mut().enumerate() {
+            if !actor.alive || actor.stun_s > 0.0 || actor.state != HostileState::Attacking {
+                continue;
+            }
+            let Some(target_id) = actor.target else {
+                panic!("attacking actor {} has no target", actor.mob_id);
+            };
+            actor.swing_cd -= dt;
+            if actor.swing_cd > 0.0 {
+                continue;
+            }
+            actor.swing_cd += actor.swing_s;
+            let action_id = actor
+                .actions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("actor {} has no authored actions", actor.mob_id));
+            ready = Some((
+                index + 1,
+                actor.actor_id,
+                actor.name.clone(),
+                target_id,
+                action_id,
+            ));
+            break;
+        }
+        let (caster, caster_id, name, target_id, action_id) = ready?;
+        let target = if target_id == ActorId::PLAYER {
+            0
+        } else {
+            self.hostiles
+                .iter()
+                .position(|actor| actor.actor_id == target_id && actor.alive)
+                .map(|index| index + 1)
+                .unwrap_or_else(|| {
+                    panic!("actor {caster_id:?} targets missing actor {target_id:?}")
+                })
+        };
+        let previous_player_hp = self.player.resources.hp;
+        match self.execute_canonical(
+            caster,
+            &action_id,
+            TargetSelection::Single(target),
+            player_x,
+            player_z,
+        ) {
+            Ok(resolution) => {
+                let killed_player = target_id == ActorId::PLAYER && self.dead;
+                if killed_player {
+                    self.slain_by = Some(name.clone());
+                }
+                self.pending_resolutions.push(resolution);
+                (target_id == ActorId::PLAYER).then(|| IncomingHit {
+                    dealt: (previous_player_hp - self.player.resources.hp).round() as i32,
+                    by: name,
+                    killed: killed_player,
+                })
+            }
+            Err(crate::resolution::ResolutionError::OutOfRange(_)) => None,
+            Err(err) => panic!("canonical actor action {action_id} failed: {err}"),
+        }
+    }
+
     /// Mob autos. Same mitigation as the sim. Reach is the sheet reach (1.8 m).
     pub fn tick_incoming(&mut self, player_x: f64, player_z: f64, dt: f64) -> Option<IncomingHit> {
         if self.dead || dt <= 0.0 {
             return None;
+        }
+        if self.game_data.is_some() {
+            return self.tick_canonical_actor_attack(player_x, player_z, dt);
         }
         let grit = self.player.stats.attrs.grit;
         let mut last = None;
@@ -1082,22 +1846,169 @@ mod tests {
     fn dummy_wolf(dmg: i32) -> WorldHostile {
         let mut sheet = crate::combat::sheets::wolf_sheet();
         sheet.damage = dmg;
-        let mut wolf =
-            WorldHostile::from_sheet(0, 1.0, 0.0, &sheet, "crawler_spider_wolf", 1.0, 0.0);
+        let mut wolf = WorldHostile::from_sheet(0, 1.0, 0.0, &sheet, "wolf", 1.0, 0.0);
         wolf.swing_cd = 0.0;
         wolf
     }
 
+    fn canonical_combat() -> WorldCombat {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
+        let data =
+            std::sync::Arc::new(crate::gamedata::GameData::load(path).expect("canonical GameData"));
+        let sheet = data.mob_sheet("wolf").expect("canonical wolf sheet");
+        let mut combat = WorldCombat::specialist_with_game_data(data, 1, Discipline::Martial);
+        let mut wolf = WorldHostile::from_sheet(0, 1.5, 0.0, &sheet, "wolf", 1.5, 0.0);
+        wolf.swing_cd = 0.0;
+        combat.add_hostile(wolf);
+        combat.set_lock(Some(0));
+        combat
+    }
+
     #[test]
-    fn hostile_ai_aggros_chases_stops_and_leashes() {
+    fn deterministic_spawn_draws_and_heading_are_stable() {
+        let seed = SpawnSeed::new(42);
+        assert_eq!(deterministic_unit(seed, 7), deterministic_unit(seed, 7));
+        assert_ne!(deterministic_unit(seed, 7), deterministic_unit(seed, 8));
+        let heading = CanonicalHeading::from_xz(3.0, 4.0);
+        assert!((heading.x() - 0.6).abs() < 1e-12);
+        assert!((heading.z() - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn observer_facing_weights_sight_but_not_hearing() {
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 0.0;
+        wolf.z = 0.0;
+        wolf.aggro.sight_m = 20.0;
+        wolf.aggro.hear_m = 0.0;
+        wolf.heading = CanonicalHeading::from_xz(1.0, 0.0);
+        assert!(detection_probability(&wolf, 10.0, 0.0) > detection_probability(&wolf, -10.0, 0.0));
+        wolf.aggro.sight_m = 0.0;
+        wolf.aggro.hear_m = 20.0;
+        assert_eq!(
+            detection_probability(&wolf, 10.0, 0.0),
+            detection_probability(&wolf, -10.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn fleeing_damage_immediately_retaliates() {
         let mut c = WorldCombat::specialist(1, Discipline::Martial);
-        let mut h = dummy_wolf(10);
-        h.x = 10.0;
-        h.home_x = 10.0;
-        h.aggro.sight_m = 12.0;
-        h.aggro.leash_m = 9.0;
-        c.hostiles.push(h);
+        let mut wolf = dummy_wolf(1);
+        wolf.state = HostileState::Fleeing;
+        wolf.flee_threat = Some(ActorId::from_runtime_index(2));
+        c.add_hostile(wolf);
+        c.apply_damage_to_hostile(0, 1);
+        assert_eq!(c.hostiles[0].state, HostileState::Alerted);
+        assert_eq!(c.hostiles[0].flee_threat, None);
+        assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
+    }
+
+    #[test]
+    fn exhausted_pursuit_keeps_moving_at_reduced_speed() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 10.0;
+        wolf.home_x = 10.0;
+        wolf.aggro.leash_m = 100.0;
+        wolf.target = Some(ActorId::PLAYER);
+        wolf.awareness_s = 10.0;
+        wolf.state = HostileState::Pursuing;
+        wolf.endurance_s = 0.0;
+        wolf.endurance_max_s = 5.0;
+        wolf.slow_s = 1.0;
+        wolf.speed_multiplier = 1.2;
+        assert_eq!(
+            wolf.effective_movement_speed_mps(),
+            wolf.movement_speed_mps * 1.2 * EXHAUSTED_SPEED_RATIO * 0.5
+        );
+        wolf.detection_left_s = 100.0;
+        c.add_hostile(wolf);
+        let before = c.hostiles[0].x;
+        c.tick_hostile_ai(0.0, 0.0, 1.0);
+        let moved = before - c.hostiles[0].x;
+        assert!(moved > 0.0);
+        assert!((moved - c.hostiles[0].effective_movement_speed_mps()).abs() < 1e-12);
+        assert_eq!(c.hostiles[0].endurance_seconds(), 0.0);
+    }
+
+    #[test]
+    fn canonical_live_actions_train_and_apply_from_game_data() {
+        let mut combat = canonical_combat();
+        assert!(combat.press_action(&ActionId::new("strike"), 0.0, 0.0, 1.0, 0.0,));
+        assert_eq!(combat.hostiles[0].hp(), 62.0);
+        assert_eq!(
+            combat
+                .player_progression()
+                .skill_xp(&crate::gamedata::SkillId::new("slashing_damage")),
+            Some(10)
+        );
+        assert_eq!(combat.pending_resolutions.len(), 1);
+
+        let mana_before = combat.player.resources.mana();
+        assert!(combat.press_action(&ActionId::new("fire_bolt"), 0.0, 0.0, 1.0, 0.0,));
+        combat.tick_verbs(0.0, 0.0, 1.2);
+        assert_eq!(combat.hostiles[0].hp(), 48.0);
+        assert!(combat.player.resources.mana() < mana_before);
+        assert_eq!(
+            combat
+                .player_progression()
+                .skill_xp(&crate::gamedata::SkillId::new("fire_damage")),
+            Some(10)
+        );
+        assert_eq!(combat.player_progression().mana_xp(), 3);
+
+        combat.player.resources.hp = 50.0;
+        assert!(combat.press_action(&ActionId::new("mend"), 0.0, 0.0, 1.0, 0.0,));
+        combat.tick_verbs(0.0, 0.0, 2.5);
+        assert_eq!(combat.player.resources.hp(), 75.0);
+        assert_eq!(
+            combat
+                .player_progression()
+                .skill_xp(&crate::gamedata::SkillId::new("healing")),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn canonical_damage_alerts_idle_hostile_and_uses_game_data_name() {
+        let mut combat = canonical_combat();
+        assert_eq!(combat.hostiles[0].name, "Wolf");
+        assert_eq!(combat.hostiles[0].state, HostileState::Idle);
+        assert!(combat.press_action(&ActionId::new("fire_bolt"), 0.0, 0.0, 1.0, 0.0,));
+        combat.tick_verbs(0.0, 0.0, 1.2);
+        assert_eq!(combat.hostiles[0].state, HostileState::Alerted);
+    }
+
+    #[test]
+    fn canonical_wolf_attack_uses_same_resolver_and_trains_hp() {
+        let mut combat = canonical_combat();
+        combat.hostiles[0].state = HostileState::Attacking;
+        combat.hostiles[0].target = Some(ActorId::PLAYER);
+        let before = combat.player.resources.hp();
+        let hp_xp_before = combat.player_progression().hp_xp();
+        let hit = combat
+            .tick_incoming(0.0, 0.0, 0.1)
+            .expect("canonical incoming hit");
+        assert_eq!(hit.dealt, 8);
+        assert_eq!(combat.player.resources.hp(), before - 8.0);
+        assert!(combat.player_progression().hp_xp() > hp_xp_before);
+        assert_eq!(combat.pending_resolutions.len(), 1);
+    }
+
+    #[test]
+    fn active_actor_acquires_outside_faction_and_leashes() {
+        let mut c = canonical_combat();
+        c.hostiles[0].x = 10.0;
+        c.hostiles[0].home_x = 10.0;
+        c.hostiles[0].heading = CanonicalHeading::from_xz(-1.0, 0.0);
+        c.hostiles[0].aggro.sight_m = 100.0;
+        c.hostiles[0].aggro.leash_m = 9.0;
+        c.hostiles[0].spawn_seed = SpawnSeed::new(0);
+        c.hostiles[0].detection_left_s = 0.0;
         c.tick_hostile_ai(0.0, 0.0, 0.1);
+        assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
         assert_eq!(c.hostiles[0].state, HostileState::Pursuing);
         let before = c.hostiles[0].x;
         c.tick_hostile_ai(0.0, 0.0, 1.0);
@@ -1108,10 +2019,418 @@ mod tests {
         c.hostiles[0].x = 20.0;
         c.tick_hostile_ai(0.0, 0.0, 0.1);
         assert_eq!(c.hostiles[0].state, HostileState::Leashing);
-        c.hostiles[0].x = 20.0 - WALK_MPS * 2.0;
-        c.tick_hostile_ai(0.0, 0.0, 2.0);
+    }
+
+    #[test]
+    fn passive_prey_flees_active_player_but_not_passive_or_neutral_actor() {
+        fn perception_fixture(candidate_mode: MobMode, candidate_faction: &str) -> WorldCombat {
+            let mut c = canonical_combat();
+            let deer_sheet = c.mob_sheet("deer");
+            c.clear_hostiles();
+            c.add_hostile(WorldHostile::from_sheet(
+                0,
+                0.0,
+                0.0,
+                &deer_sheet,
+                "deer",
+                0.0,
+                0.0,
+            ));
+            let wolf_sheet = c.mob_sheet("wolf");
+            c.add_hostile(WorldHostile::from_sheet(
+                1,
+                3.0,
+                0.0,
+                &wolf_sheet,
+                "wolf",
+                3.0,
+                0.0,
+            ));
+            c.player.faction = FactionId::new("prey");
+            c.hostiles[0].heading = CanonicalHeading::from_xz(1.0, 0.0);
+            c.hostiles[0].aggro.sight_m = 100.0;
+            c.hostiles[0].spawn_seed = SpawnSeed::new(0);
+            c.hostiles[0].detection_left_s = 0.0;
+            c.hostiles[1].mode = candidate_mode;
+            c.hostiles[1].faction = FactionId::new(candidate_faction);
+            c
+        }
+
+        let mut player_threat = perception_fixture(MobMode::Passive, "prey");
+        player_threat.player.faction = FactionId::new("citizen");
+        player_threat.hostiles[1].faction = FactionId::new("prey");
+        player_threat.tick_hostile_ai(3.0, 0.0, 0.1);
+        assert_eq!(player_threat.hostiles[0].state, HostileState::Fleeing);
+        assert_eq!(player_threat.hostiles[0].flee_threat, Some(ActorId::PLAYER));
+        assert_eq!(player_threat.hostiles[0].target, None);
+
+        let mut passive_threat = perception_fixture(MobMode::Passive, "predator");
+        passive_threat.tick_hostile_ai(1000.0, 0.0, 0.1);
+        assert_eq!(passive_threat.hostiles[0].state, HostileState::Idle);
+        assert_eq!(passive_threat.hostiles[0].flee_threat, None);
+
+        let mut neutral_threat = perception_fixture(MobMode::Active, "neutral");
+        neutral_threat.tick_hostile_ai(1000.0, 0.0, 0.1);
+        assert_eq!(neutral_threat.hostiles[0].state, HostileState::Idle);
+        assert_eq!(neutral_threat.hostiles[0].flee_threat, None);
+    }
+    #[test]
+    fn passive_actor_retaliates_through_authoritative_damage_api() {
+        let mut c = canonical_combat();
+        c.hostiles[0].mode = MobMode::Passive;
+        c.hostiles[0].state = HostileState::Fleeing;
+        c.hostiles[0].flee_threat = Some(ActorId::from_runtime_index(2));
+        c.apply_damage_to_hostile(0, 1);
+        assert_eq!(c.hostiles[0].provoked_by, Some(ActorId::PLAYER));
+        assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
+        assert_eq!(c.hostiles[0].flee_threat, None);
+        assert_eq!(c.hostiles[0].state, HostileState::Alerted);
+    }
+    #[test]
+    fn animal_faction_and_mode_matrix_is_authored() {
+        let c = canonical_combat();
+        let data = c.game_data.as_ref().expect("canonical data");
+        for (id, faction, mode) in [
+            ("wolf", "predator", MobMode::Active),
+            ("fox", "predator", MobMode::Active),
+            ("deer", "prey", MobMode::Passive),
+            ("stag", "prey", MobMode::Passive),
+            ("horse", "prey", MobMode::Passive),
+            ("horse_white", "prey", MobMode::Passive),
+            ("cow", "citizen", MobMode::Passive),
+            ("bull", "citizen", MobMode::Passive),
+            ("donkey", "citizen", MobMode::Passive),
+            ("alpaca", "citizen", MobMode::Passive),
+            ("husky", "citizen", MobMode::Passive),
+            ("shiba", "citizen", MobMode::Passive),
+        ] {
+            let mob = data
+                .mob(&MobId::new(id))
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(mob.faction().as_str(), faction, "{id} faction");
+            assert_eq!(mob.mode(), mode, "{id} mode");
+        }
+        assert!(
+            !data.factions_are_hostile(&FactionId::new("predator"), &FactionId::new("predator"))
+        );
+        assert!(data.factions_are_hostile(&FactionId::new("predator"), &FactionId::new("prey")));
+        assert!(data.factions_are_hostile(&FactionId::new("predator"), &FactionId::new("citizen")));
+        assert!(!data.factions_are_hostile(&FactionId::new("citizen"), &FactionId::new("citizen")));
+    }
+
+    #[test]
+    fn predator_selects_nearest_outside_faction_actor() {
+        let mut c = canonical_combat();
+        c.hostiles[0].x = 0.0;
+        c.hostiles[0].z = 0.0;
+        c.hostiles[0].heading = CanonicalHeading::from_xz(1.0, 0.0);
+        c.hostiles[0].aggro.sight_m = 100.0;
+        c.hostiles[0].spawn_seed = SpawnSeed::new(0);
+        c.hostiles[0].detection_left_s = 0.0;
+        let deer_sheet = c.mob_sheet("deer");
+        c.add_hostile(WorldHostile::from_sheet(
+            1,
+            3.0,
+            0.0,
+            &deer_sheet,
+            "deer",
+            3.0,
+            0.0,
+        ));
+        c.tick_hostile_ai(8.0, 0.0, 0.1);
+        assert_eq!(c.hostiles[0].target, Some(c.hostiles[1].actor_id));
+        assert_eq!(c.hostiles[1].target, None);
+    }
+
+    #[test]
+    fn mob_on_mob_resolution_damages_selected_actor() {
+        let mut c = canonical_combat();
+        let deer_sheet = c.mob_sheet("deer");
+        c.add_hostile(WorldHostile::from_sheet(
+            1,
+            1.0,
+            0.0,
+            &deer_sheet,
+            "deer",
+            1.0,
+            0.0,
+        ));
+        let before = c.hostiles[1].hp();
+        let resolution = c
+            .execute_canonical(
+                1,
+                &ActionId::new("strike"),
+                TargetSelection::Single(2),
+                20.0,
+                0.0,
+            )
+            .expect("wolf attacks deer");
+        assert!(c.hostiles[1].hp() < before);
+        assert_eq!(resolution.effects[0].targets, vec![2]);
+        assert_eq!(c.hostiles[1].provoked_by, Some(c.hostiles[0].actor_id));
+    }
+
+    #[test]
+    fn canonical_mob_api_uses_gamedata_and_monotonic_actor_identity() {
+        let mut c = canonical_combat();
+        let first = c.hostiles[0].actor_id();
+        c.clear_hostiles();
+        let second = c.add_canonical_mob(&MobId::new("orc"), 0, 1.5, 0.0, 1.5, 0.0);
+        assert_eq!(c.hostiles[0].mob_id, "orc");
+        assert_eq!(c.hostiles[0].name, "Orc");
+        assert!(second > first);
+    }
+
+    #[test]
+    fn actor_identity_is_not_reused_with_runtime_slot() {
+        let mut c = canonical_combat();
+        let stale_id = c.hostiles[0].actor_id();
+        c.clear_hostiles();
+        c.add_hostile(dummy_wolf(1));
+        let replacement_id = c.hostiles[0].actor_id();
+
+        assert_eq!(c.hostiles[0].idx, 0);
+        assert_ne!(replacement_id, stale_id);
+    }
+
+    #[test]
+    fn stale_deactivation_cannot_remove_reused_runtime_slot() {
+        let mut c = canonical_combat();
+        let stale_id = c.hostiles[0].actor_id();
+        c.clear_hostiles();
+        c.add_hostile(dummy_wolf(1));
+        let replacement_id = c.hostiles[0].actor_id();
+        c.set_lock(Some(0));
+
+        c.deactivate_actors(&[stale_id]);
+
+        assert_eq!(c.hostiles.len(), 1);
+        assert_eq!(c.hostiles[0].actor_id(), replacement_id);
+        assert_eq!(c.lock_id(), Some(0));
+    }
+
+    #[test]
+    fn streaming_deactivation_is_not_death() {
+        let mut c = canonical_combat();
+        let actor_id = c.hostiles[0].actor_id;
+        c.deactivate_actors(&[actor_id]);
+        assert!(c.hostiles.is_empty());
+        assert!(c.pending_resolutions.is_empty());
+        assert!(!c.dead);
+    }
+
+    #[test]
+    fn perception_checks_use_staggered_one_second_cadence() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        c.add_hostile(dummy_wolf(1));
+        let mut second = dummy_wolf(1);
+        second.idx = 1;
+        c.add_hostile(second);
+        c.hostiles[0].detection_left_s = 0.25;
+        c.hostiles[1].detection_left_s = 0.75;
+        c.hostiles[0].aggro.sight_m = 0.0;
+        c.hostiles[0].aggro.hear_m = 0.0;
+        c.hostiles[1].aggro.sight_m = 0.0;
+        c.hostiles[1].aggro.hear_m = 0.0;
+
+        c.tick_hostile_ai(100.0, 100.0, 0.24);
+        assert_eq!(
+            (c.hostiles[0].detection_check, c.hostiles[1].detection_check),
+            (0, 0)
+        );
+        c.tick_hostile_ai(100.0, 100.0, 0.02);
+        assert_eq!(
+            (c.hostiles[0].detection_check, c.hostiles[1].detection_check),
+            (1, 0)
+        );
+        c.tick_hostile_ai(100.0, 100.0, 0.50);
+        assert_eq!(
+            (c.hostiles[0].detection_check, c.hostiles[1].detection_check),
+            (1, 1)
+        );
+        c.tick_hostile_ai(100.0, 100.0, 0.49);
+        assert_eq!(
+            (c.hostiles[0].detection_check, c.hostiles[1].detection_check),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn sight_probability_has_exact_front_side_and_rear_weights() {
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 0.0;
+        wolf.z = 0.0;
+        wolf.heading = CanonicalHeading::from_xz(1.0, 0.0);
+        wolf.aggro.sight_m = 20.0;
+        wolf.aggro.hear_m = 0.0;
+        assert_eq!(detection_probability(&wolf, 10.0, 0.0), 0.5);
+        assert_eq!(detection_probability(&wolf, 0.0, 10.0), 0.275);
+        assert_eq!(detection_probability(&wolf, -10.0, 0.0), 0.1);
+    }
+
+    #[test]
+    fn successful_perception_refreshes_awareness_then_expiry_ends_chase() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 10.0;
+        wolf.home_x = 10.0;
+        wolf.aggro.leash_m = 1_000.0;
+        c.add_hostile(wolf);
+        c.hostiles[0].heading = CanonicalHeading::from_xz(-1.0, 0.0);
+        c.hostiles[0].aggro.sight_m = 100.0;
+        c.hostiles[0].aggro.hear_m = 100.0;
+        c.hostiles[0].detection_left_s = 0.0;
+        c.tick_hostile_ai(10.0, 0.0, 0.1);
+        assert_eq!(c.hostiles[0].awareness_s, AWARENESS_PERSIST_S);
+        assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
+
+        c.hostiles[0].detection_left_s = 100.0;
+        c.tick_hostile_ai(100.0, 0.0, AWARENESS_PERSIST_S - 0.1);
+        assert_ne!(c.hostiles[0].state, HostileState::Idle);
+        c.tick_hostile_ai(100.0, 0.0, 0.11);
         assert_eq!(c.hostiles[0].state, HostileState::Idle);
-        assert!((c.hostiles[0].x - 10.0).abs() < 1e-9);
+        assert_eq!(c.hostiles[0].target, None);
+    }
+
+    #[test]
+    fn speed_multiplier_is_same_seed_stable_different_seed_varied_and_bounded() {
+        fn multiplier(seed: u64) -> (f64, f64) {
+            let mut c = canonical_combat();
+            c.clear_hostiles();
+            let sheet = c.mob_sheet("wolf");
+            c.register_hostile(
+                WorldHostile::from_sheet(0, 0.0, 0.0, &sheet, "wolf", 0.0, 0.0),
+                SpawnSeed::new(seed),
+                CanonicalHeading::from_xz(1.0, 0.0),
+            );
+            let variance = c
+                .game_data
+                .as_ref()
+                .unwrap()
+                .mob(&MobId::new("wolf"))
+                .unwrap()
+                .speed_variance_ratio()
+                .as_ratio();
+            (c.hostiles[0].speed_multiplier(), variance)
+        }
+        let (same_a, variance) = multiplier(42);
+        let (same_b, _) = multiplier(42);
+        assert_eq!(same_a, same_b);
+        assert!((1.0 - variance..=1.0 + variance).contains(&same_a));
+        let different: Vec<f64> = (43..51).map(|seed| multiplier(seed).0).collect();
+        assert!(different
+            .iter()
+            .all(|value| (1.0 - variance..=1.0 + variance).contains(value)));
+        assert!(different.iter().any(|value| *value != same_a));
+    }
+
+    #[test]
+    fn endurance_drains_only_for_actual_pursuit_or_flight_movement_and_recovers_otherwise() {
+        fn configured(state: HostileState, passive: bool) -> WorldCombat {
+            let mut c = WorldCombat::specialist(1, Discipline::Martial);
+            let mut wolf = dummy_wolf(1);
+            wolf.x = 10.0;
+            wolf.home_x = 10.0;
+            wolf.aggro.leash_m = 1_000.0;
+            wolf.state = state;
+            wolf.awareness_s = 10.0;
+            wolf.endurance_s = 4.0;
+            wolf.endurance_max_s = 5.0;
+            wolf.target = (!passive).then_some(ActorId::PLAYER);
+            wolf.flee_threat = passive.then_some(ActorId::PLAYER);
+            c.add_hostile(wolf);
+            c.hostiles[0].detection_left_s = 100.0;
+            c
+        }
+        let mut pursuing = configured(HostileState::Pursuing, false);
+        pursuing.tick_hostile_ai(0.0, 0.0, 1.0);
+        assert_eq!(pursuing.hostiles[0].endurance_s, 3.0);
+
+        let mut fleeing = configured(HostileState::Fleeing, true);
+        fleeing.tick_hostile_ai(0.0, 0.0, 1.0);
+        assert_eq!(fleeing.hostiles[0].endurance_s, 3.0);
+
+        let mut rooted = configured(HostileState::Pursuing, false);
+        rooted.hostiles[0].root_s = 2.0;
+        rooted.tick_hostile_ai(0.0, 0.0, 1.0);
+        assert_eq!(rooted.hostiles[0].endurance_s, 5.0);
+
+        let mut attacking = configured(HostileState::Attacking, false);
+        attacking.hostiles[0].x = 1.0;
+        attacking.tick_hostile_ai(0.0, 0.0, 1.0);
+        assert_eq!(attacking.hostiles[0].endurance_s, 5.0);
+    }
+
+    #[test]
+    fn exhausted_flight_continues_at_reduced_speed() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 1.0;
+        wolf.home_x = 1.0;
+        wolf.aggro.leash_m = 1_000.0;
+        wolf.state = HostileState::Fleeing;
+        wolf.flee_threat = Some(ActorId::PLAYER);
+        wolf.awareness_s = 10.0;
+        wolf.endurance_s = 0.0;
+        wolf.endurance_max_s = 5.0;
+        c.add_hostile(wolf);
+        c.hostiles[0].detection_left_s = 100.0;
+        let before = c.hostiles[0].x;
+        let expected = c.hostiles[0].movement_speed_mps * EXHAUSTED_SPEED_RATIO;
+        c.tick_hostile_ai(0.0, 0.0, 1.0);
+        assert!((c.hostiles[0].x - before - expected).abs() < 1e-12);
+        assert_eq!(c.hostiles[0].endurance_s, 0.0);
+    }
+
+    #[test]
+    fn passive_flight_excludes_passive_same_faction_neutral_and_dead_candidates() {
+        let mut c = canonical_combat();
+        c.clear_hostiles();
+        let deer_sheet = c.mob_sheet("deer");
+        c.add_hostile(WorldHostile::from_sheet(
+            0,
+            0.0,
+            0.0,
+            &deer_sheet,
+            "deer",
+            0.0,
+            0.0,
+        ));
+        let wolf_sheet = c.mob_sheet("wolf");
+        for (idx, x) in [(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0)] {
+            c.add_hostile(WorldHostile::from_sheet(
+                idx,
+                x,
+                0.0,
+                &wolf_sheet,
+                "wolf",
+                x,
+                0.0,
+            ));
+        }
+        c.player.faction = FactionId::new("prey");
+        c.hostiles[0].heading = CanonicalHeading::from_xz(1.0, 0.0);
+        c.hostiles[0].aggro.sight_m = 100.0;
+        c.hostiles[0].aggro.hear_m = 100.0;
+        c.hostiles[0].detection_left_s = 0.0;
+        c.hostiles[1].mode = MobMode::Passive;
+        c.hostiles[1].faction = FactionId::new("predator");
+        c.hostiles[2].mode = MobMode::Active;
+        c.hostiles[2].faction = FactionId::new("prey");
+        c.hostiles[3].mode = MobMode::Active;
+        c.hostiles[3].faction = FactionId::new("neutral");
+        c.hostiles[4].mode = MobMode::Active;
+        c.hostiles[4].faction = FactionId::new("predator");
+        c.hostiles[4].alive = false;
+        c.tick_hostile_ai(1_000.0, 0.0, 0.1);
+        assert_eq!(c.hostiles[0].state, HostileState::Idle);
+        assert_eq!(c.hostiles[0].flee_threat, None);
+
+        c.hostiles[4].alive = true;
+        c.hostiles[0].detection_left_s = 0.0;
+        c.tick_hostile_ai(1_000.0, 0.0, 0.1);
+        assert_eq!(c.hostiles[0].state, HostileState::Fleeing);
+        assert_eq!(c.hostiles[0].flee_threat, Some(c.hostiles[4].actor_id));
     }
 
     #[test]
@@ -1119,7 +2438,7 @@ mod tests {
         let mut c = WorldCombat::specialist(1, Discipline::Martial);
         let mut wolf = dummy_wolf(80);
         wolf.state = HostileState::Attacking;
-        c.hostiles.push(wolf);
+        c.add_hostile(wolf);
         c.player.resources.hp = 10.0;
         let hit = c.tick_incoming(0.0, 0.0, 0.1).expect("hit");
         assert!(hit.killed);
@@ -1133,7 +2452,7 @@ mod tests {
     #[test]
     fn shaken_ticks_and_multiplies_outgoing_after_clear_dead() {
         let mut c = WorldCombat::specialist(1, Discipline::Martial);
-        c.hostiles.push(dummy_wolf(10));
+        c.add_hostile(dummy_wolf(10));
         c.finish_death_respawn();
         c.lock = Some(0);
         assert!(!c.dead);

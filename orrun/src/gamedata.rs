@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::combat::sheets::MobSheet;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum GameDataError {
@@ -94,6 +94,10 @@ typed_id! {
 typed_id! {
     /// Identifies a movement specification.
     MovementId
+}
+typed_id! {
+    /// Identifies an animal species presentation/spawn record.
+    SpeciesId
 }
 
 /// The finite categories an effect can belong to.
@@ -398,6 +402,8 @@ struct RawMobDefinition {
     mode: String,
     #[serde(rename = "@movement_id", default = "default_movement")]
     movement_id: String,
+    #[serde(rename = "@species_id", default)]
+    species_id: String,
     #[serde(rename = "@hp")]
     hp: i32,
     #[serde(rename = "@armor", default)]
@@ -408,6 +414,10 @@ struct RawMobDefinition {
     swing_s: f64,
     #[serde(rename = "@reach_m", default = "default_reach")]
     reach_m: f64,
+    #[serde(rename = "@speed_variance_ratio")]
+    speed_variance_ratio: f64,
+    #[serde(rename = "@endurance_s")]
+    endurance_s: f64,
     #[serde(rename = "action", default)]
     actions: Vec<RawMobActionRef>,
 }
@@ -684,6 +694,40 @@ impl PlayerProfile {
     }
 }
 
+/// Validated, dimensionless randomization ratio applied to a mob's base speed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeedVarianceRatio(f64);
+impl SpeedVarianceRatio {
+    fn new(value: f64, mob_id: &MobId) -> Result<Self, GameDataError> {
+        if !value.is_finite() || !(0.0..=0.20).contains(&value) {
+            return Err(validation(format!(
+                "mob {mob_id} speed_variance_ratio must be finite and in 0..=0.20"
+            )));
+        }
+        Ok(Self(value))
+    }
+    pub fn as_ratio(self) -> f64 {
+        self.0
+    }
+}
+
+/// Validated mob endurance duration in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnduranceSeconds(f64);
+impl EnduranceSeconds {
+    fn new(value: f64, mob_id: &MobId) -> Result<Self, GameDataError> {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(validation(format!(
+                "mob {mob_id} endurance_s must be finite and positive"
+            )));
+        }
+        Ok(Self(value))
+    }
+    pub fn seconds(self) -> f64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MobDefinition {
     id: MobId,
@@ -691,11 +735,14 @@ pub struct MobDefinition {
     faction: FactionId,
     mode: MobMode,
     movement_id: MovementId,
+    species_id: Option<SpeciesId>,
     hp: i32,
     armor: i32,
     damage: i32,
     swing_s: f64,
     reach_m: f64,
+    speed_variance_ratio: SpeedVarianceRatio,
+    endurance_s: EnduranceSeconds,
     actions: Vec<ActionId>,
 }
 
@@ -715,6 +762,9 @@ impl MobDefinition {
     pub fn movement_id(&self) -> &MovementId {
         &self.movement_id
     }
+    pub fn species_id(&self) -> Option<&SpeciesId> {
+        self.species_id.as_ref()
+    }
     pub fn hp(&self) -> i32 {
         self.hp
     }
@@ -729,6 +779,12 @@ impl MobDefinition {
     }
     pub fn reach_m(&self) -> f64 {
         self.reach_m
+    }
+    pub fn speed_variance_ratio(&self) -> SpeedVarianceRatio {
+        self.speed_variance_ratio
+    }
+    pub fn endurance_s(&self) -> EnduranceSeconds {
+        self.endurance_s
     }
     pub fn actions(&self) -> &[ActionId] {
         &self.actions
@@ -873,15 +929,9 @@ impl GameData {
         validate_ids("faction", raw.factions.items.iter().map(|f| f.id.as_str()))?;
         validate_ids("effect", raw.effects.items.iter().map(|e| e.id.as_str()))?;
         validate_ids("action", raw.actions.items.iter().map(|a| a.id.as_str()))?;
-        validate_ids(
-            "profile",
-            raw.players.items.iter().map(|p| p.id.as_str()),
-        )?;
+        validate_ids("profile", raw.players.items.iter().map(|p| p.id.as_str()))?;
         validate_ids("mob", raw.mobs.items.iter().map(|m| m.id.as_str()))?;
-        validate_ids(
-            "movement",
-            raw.movement.items.iter().map(|m| m.id.as_str()),
-        )?;
+        validate_ids("movement", raw.movement.items.iter().map(|m| m.id.as_str()))?;
 
         let skills: Vec<Skill> = raw
             .skills
@@ -972,17 +1022,23 @@ impl GameData {
             .items
             .into_iter()
             .map(|m| {
+                let id = MobId::new(m.id);
+                let speed_variance_ratio = SpeedVarianceRatio::new(m.speed_variance_ratio, &id)?;
+                let endurance_s = EnduranceSeconds::new(m.endurance_s, &id)?;
                 Ok(MobDefinition {
-                    id: MobId::new(m.id),
+                    id,
                     name: m.name,
                     faction: FactionId::new(m.faction),
                     mode: MobMode::from_str(&m.mode)?,
                     movement_id: MovementId::new(m.movement_id),
+                    species_id: (!m.species_id.is_empty()).then(|| SpeciesId::new(m.species_id)),
                     hp: m.hp,
                     armor: m.armor,
                     damage: m.damage,
                     swing_s: m.swing_s,
                     reach_m: m.reach_m,
+                    speed_variance_ratio,
+                    endurance_s,
                     actions: m.actions.into_iter().map(|a| ActionId::new(a.id)).collect(),
                 })
             })
@@ -1110,7 +1166,16 @@ impl GameData {
             }
         }
 
+        let mut species_links = std::collections::BTreeSet::new();
         for mob in &self.mobs {
+            if let Some(species_id) = mob.species_id() {
+                if !species_links.insert(species_id.clone()) {
+                    return Err(validation(format!(
+                        "species {} is linked by more than one mob",
+                        species_id
+                    )));
+                }
+            }
             if !self.factions_by_id.contains_key(mob.faction()) {
                 return Err(validation(format!(
                     "mob {} references unknown faction {}",
@@ -1190,6 +1255,17 @@ impl GameData {
     pub fn faction(&self, id: &FactionId) -> Option<&Faction> {
         self.factions_by_id.get(id).map(|&i| &self.factions[i])
     }
+    pub fn factions_are_hostile(&self, first: &FactionId, second: &FactionId) -> bool {
+        assert!(
+            self.factions_by_id.contains_key(first),
+            "unknown faction {first}"
+        );
+        assert!(
+            self.factions_by_id.contains_key(second),
+            "unknown faction {second}"
+        );
+        first != second
+    }
     pub fn effect(&self, id: &EffectId) -> Option<&Effect> {
         self.effects_by_id.get(id).map(|&i| &self.effects[i])
     }
@@ -1197,7 +1273,9 @@ impl GameData {
         self.actions_by_id.get(id).map(|&i| &self.actions[i])
     }
     pub fn profile(&self, id: &ProfileId) -> Option<&PlayerProfile> {
-        self.profiles_by_id.get(id).map(|&i| &self.player_profiles[i])
+        self.profiles_by_id
+            .get(id)
+            .map(|&i| &self.player_profiles[i])
     }
     pub fn mob(&self, id: &MobId) -> Option<&MobDefinition> {
         self.mobs_by_id.get(id).map(|&i| &self.mobs[i])
@@ -1208,6 +1286,29 @@ impl GameData {
 
     pub fn hamlet_enabled(&self) -> bool {
         self.hamlet.enabled
+    }
+
+    /// Look up a `<defaults>` value by key.
+    pub fn default_value(&self, key: &str) -> Option<&str> {
+        self.defaults
+            .iter()
+            .find(|d| d.key() == key)
+            .map(|d| d.value())
+    }
+
+    /// The authored default player profile, from the `default_player_profile`
+    /// defaults entry. Loud if the entry is missing or names an unknown profile.
+    pub fn default_player_profile_id(&self) -> Result<ProfileId, GameDataError> {
+        let key = self
+            .default_value("default_player_profile")
+            .ok_or_else(|| validation("missing defaults entry `default_player_profile`"))?;
+        let id = ProfileId::new(key);
+        if !self.profiles_by_id.contains_key(&id) {
+            return Err(validation(format!(
+                "default_player_profile `{key}` is not a known profile"
+            )));
+        }
+        Ok(id)
     }
 
     /// Legacy adapter for the combat POC: resolve a mob id to a bare sheet.
@@ -1222,7 +1323,10 @@ impl GameData {
             .iter()
             .find(|movement| movement.id() == mob.movement_id())
             .ok_or_else(|| {
-                validation(format!("mob {id:?} references missing movement {:?}", mob.movement_id()))
+                validation(format!(
+                    "mob {id:?} references missing movement {:?}",
+                    mob.movement_id()
+                ))
             })?;
         let mut sheet = mob.to_mob_sheet(movement);
         sheet.sight_m = crate::combat::math::SIGHT_AGGRO_M;
@@ -1244,10 +1348,7 @@ where
         .collect()
 }
 
-fn validate_ids<'a>(
-    label: &str,
-    ids: impl Iterator<Item = &'a str>,
-) -> Result<(), GameDataError> {
+fn validate_ids<'a>(label: &str, ids: impl Iterator<Item = &'a str>) -> Result<(), GameDataError> {
     let mut seen = std::collections::HashSet::new();
     for value in ids {
         if value.is_empty()
@@ -1264,7 +1365,10 @@ fn validate_ids<'a>(
     Ok(())
 }
 
-fn validate_application(action_id: &ActionId, assignment: &ActionEffect) -> Result<(), GameDataError> {
+fn validate_application(
+    action_id: &ActionId,
+    assignment: &ActionEffect,
+) -> Result<(), GameDataError> {
     if assignment.range_m() < 0.0 || assignment.radius_m() < 0.0 {
         return Err(validation(format!(
             "action {} effect {} range and radius must be non-negative",
@@ -1339,12 +1443,12 @@ mod tests {
     use super::*;
 
     fn minimal_valid_xml() -> String {
-        r#"<OrrunGameData schema_version="1"><skills><skill id="slashing_damage" name="Slashing Damage" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing Damage" kind="damage" skill_id="slashing_damage" progression="skill_level"/></effects><actions><action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="1" application="single_target" range_m="1.8"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/></profile></players><mobs><mob id="crawler_spider_wolf" name="Wolf-spider" faction="citizen" mode="active" hp="70" armor="0" damage="10" movement_id="walk"><action id="strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#.to_string()
+        r#"<OrrunGameData schema_version="2"><skills><skill id="slashing_damage" name="Slashing Damage" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing Damage" kind="damage" skill_id="slashing_damage" progression="skill_level"/></effects><actions><action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="1" application="single_target" range_m="1.8"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/></profile></players><mobs><mob id="wolf" name="Wolf-spider" faction="citizen" mode="active" hp="70" armor="0" damage="10" movement_id="walk" speed_variance_ratio="0.05" endurance_s="30"><action id="strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#.to_string()
     }
 
     #[test]
     fn rejects_duplicate_and_invalid_data() {
-        let xml = r#"<OrrunGameData schema_version="1"><skills/><factions><faction id="neutral" neutral="true"/><faction id="neutral" neutral="false"/></factions><actions/><players/><mobs/><movement/></OrrunGameData>"#;
+        let xml = r#"<OrrunGameData schema_version="2"><skills/><factions><faction id="neutral" neutral="true"/><faction id="neutral" neutral="false"/></factions><actions/><players/><mobs/><movement/></OrrunGameData>"#;
         let raw: RawGameData = from_str(xml).unwrap();
         assert!(GameData::from_raw(raw).is_err());
     }
@@ -1360,10 +1464,13 @@ mod tests {
 
     #[test]
     fn exposes_previously_dropped_fields() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
         let data = GameData::load(path).expect("canonical data loads");
 
-        let fire = data.skill(&SkillId::new("fire_damage")).expect("fire skill");
+        let fire = data
+            .skill(&SkillId::new("fire_damage"))
+            .expect("fire skill");
         assert_eq!(fire.level_scale(), 1.0);
 
         let profile = data
@@ -1374,13 +1481,40 @@ mod tests {
             assert!(known.level() > 0, "starting level is positive");
         }
 
-        let strike = data.action(&ActionId::new("strike")).expect("strike action");
-        assert!(!strike.effects().is_empty(), "strike has effect assignments");
+        let strike = data
+            .action(&ActionId::new("strike"))
+            .expect("strike action");
+        assert!(
+            !strike.effects().is_empty(),
+            "strike has effect assignments"
+        );
 
-        let wolf = data
-            .mob(&MobId::new("crawler_spider_wolf"))
-            .expect("wolf mob");
+        let wolf = data.mob(&MobId::new("wolf")).expect("wolf mob");
         assert!(wolf.actions().contains(&ActionId::new("strike")));
+    }
+
+    #[test]
+    fn exposes_action_timings_and_default_profile() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
+        let data = GameData::load(path).expect("canonical data loads");
+
+        let strike = data
+            .action(&ActionId::new("strike"))
+            .expect("strike action");
+        assert_eq!(strike.cast_s(), 0.0);
+        assert_eq!(strike.cooldown_s(), 6.0);
+        let fire_bolt = data
+            .action(&ActionId::new("fire_bolt"))
+            .expect("fire bolt action");
+        assert_eq!(fire_bolt.cast_s(), 1.2);
+        assert_eq!(fire_bolt.cooldown_s(), 0.0);
+        let mend = data.action(&ActionId::new("mend")).expect("mend action");
+        assert_eq!(mend.cast_s(), 2.5);
+        assert_eq!(
+            data.default_player_profile_id().expect("default profile"),
+            ProfileId::new("default_player")
+        );
     }
 
     #[test]
@@ -1394,8 +1528,67 @@ mod tests {
     }
 
     #[test]
+    fn accepts_mob_speed_variance_bounds_and_positive_endurance() {
+        for ratio in ["0", "0.20"] {
+            let xml = minimal_valid_xml().replace(
+                r#"speed_variance_ratio="0.05""#,
+                &format!(r#"speed_variance_ratio="{ratio}""#),
+            );
+            let data = GameData::from_xml_str(&xml).expect("ratio bound should load");
+            let wolf = data.mob(&MobId::new("wolf")).expect("wolf");
+            assert_eq!(
+                wolf.speed_variance_ratio().as_ratio(),
+                ratio.parse::<f64>().unwrap()
+            );
+            assert_eq!(wolf.endurance_s().seconds(), 30.0);
+        }
+    }
+
+    #[test]
+    fn rejects_missing_required_mob_motion_attributes() {
+        for attribute in [r#" speed_variance_ratio="0.05""#, r#" endurance_s="30""#] {
+            let xml = minimal_valid_xml().replace(attribute, "");
+            let error = GameData::from_xml_str(&xml).expect_err("missing attribute must fail");
+            assert!(error
+                .to_string()
+                .contains(attribute.split('=').next().unwrap().trim()));
+        }
+    }
+
+    #[test]
+    fn rejects_non_finite_and_out_of_range_mob_motion_values() {
+        for (attribute, invalid, expected) in [
+            ("speed_variance_ratio", "NaN", "speed_variance_ratio"),
+            ("speed_variance_ratio", "inf", "speed_variance_ratio"),
+            ("speed_variance_ratio", "-0.01", "speed_variance_ratio"),
+            ("speed_variance_ratio", "0.200001", "speed_variance_ratio"),
+            ("endurance_s", "NaN", "endurance_s"),
+            ("endurance_s", "inf", "endurance_s"),
+            ("endurance_s", "0", "endurance_s"),
+        ] {
+            let original = if attribute == "speed_variance_ratio" {
+                "0.05"
+            } else {
+                "30"
+            };
+            let xml = minimal_valid_xml().replace(
+                &format!(r#"{attribute}="{original}""#),
+                &format!(r#"{attribute}="{invalid}""#),
+            );
+            let error = GameData::from_xml_str(&xml).expect_err("invalid value must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unknown_mob_action() {
-        let xml = minimal_valid_xml().replace(r#"<action id="strike"/></mob>"#, r#"<action id="missing"/></mob>"#);
+        let xml = minimal_valid_xml().replace(
+            r#"<action id="strike"/></mob>"#,
+            r#"<action id="missing"/></mob>"#,
+        );
         let raw: RawGameData = from_str(&xml).unwrap();
         assert!(GameData::from_raw(raw).is_err());
     }

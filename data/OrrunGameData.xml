@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<OrrunGameData schema_version="1">
+<OrrunGameData schema_version="2">
   <skills>
     <skill id="slashing_damage" name="Slashing Damage" level_scale="1.0" />
     <skill id="fire_damage" name="Fire Damage" level_scale="1.0" />
@@ -18,6 +18,8 @@
   <factions>
     <faction id="neutral" name="Neutral" neutral="true" />
     <faction id="citizen" name="Citizen" neutral="false" />
+    <faction id="predator" name="Predator" neutral="false" />
+    <faction id="prey" name="Prey" neutral="false" />
     <faction id="wild" name="Wild" neutral="false" />
     <faction id="robber" name="Robber" neutral="false" />
   </factions>
@@ -36,31 +38,42 @@
     <effect id="healing" name="Healing" kind="heal" skill_id="healing" progression="skill_level" />
   </effects>
   <actions>
-    <action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="8" application="single_target" range_m="1.8" /></effects></action>
-    <action id="fire_bolt" name="Fire Bolt" target="hostile" mana_cost="3"><effects><effect effect_id="fire_damage" magnitude="14" application="single_target" range_m="18" /></effects></action>
-    <action id="mend" name="Mend" target="friendly" mana_cost="20"><effects><effect effect_id="healing" magnitude="25" application="single_target" range_m="18" /></effects></action>
+    <action id="strike" name="Strike" target="hostile" cast_s="0" cooldown_s="6.0"><effects><effect effect_id="slashing_damage" magnitude="8" application="single_target" range_m="1.8" /></effects></action>
+    <action id="fire_bolt" name="Fire Bolt" target="hostile" mana_cost="3" cast_s="1.2" cooldown_s="0"><effects><effect effect_id="fire_damage" magnitude="14" application="single_target" range_m="18" /></effects></action>
+    <action id="mend" name="Mend" target="friendly" mana_cost="20" cast_s="2.5" cooldown_s="0"><effects><effect effect_id="healing" magnitude="25" application="single_target" range_m="18" /></effects></action>
   </actions>
   <players>
     <profile id="default_player" name="Orrun Adventurer" faction="citizen"><skill id="slashing_damage" /><skill id="fire_damage" /><skill id="healing" /></profile>
   </players>
   <mobs>
-    <mob id="crawler_spider_wolf" name="Wolf-spider" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk"><action id="strike" /></mob>
-    <mob id="crawler_scorpion" name="Scorpion" faction="wild" mode="active" hp="110" armor="2" damage="14" movement_id="walk"><action id="strike" /></mob>
-    <mob id="line_mother" name="Line-Mother" faction="wild" mode="active" hp="600" armor="8" damage="35" movement_id="walk"><action id="strike" /></mob>
-    <mob id="green_blob" name="Green Blob" faction="wild" mode="passive" hp="90" armor="1" damage="8" movement_id="walk"><action id="strike" /></mob>
-    <mob id="orc" name="Orc" faction="wild" mode="active" hp="150" armor="4" damage="20" movement_id="walk"><action id="strike" /></mob>
-    <mob id="tribal" name="Tribal" faction="wild" mode="active" hp="130" armor="3" damage="18" movement_id="walk"><action id="strike" /></mob>
-    <mob id="bandit" name="Bandit" faction="robber" mode="active" hp="120" armor="3" damage="17" movement_id="walk"><action id="strike" /></mob>
-    <mob id="orc_skull" name="Orc Skull" faction="wild" mode="active" hp="220" armor="6" damage="27" movement_id="walk"><action id="strike" /><action id="fire_bolt" /></mob>
-    <mob id="skeleton_warrior" name="Skeleton Warrior" faction="wild" mode="active" hp="160" armor="5" damage="22" movement_id="walk"><action id="strike" /></mob>
-    <mob id="skeleton_minion" name="Skeleton Minion" faction="wild" mode="active" hp="100" armor="3" damage="15" movement_id="walk"><action id="strike" /></mob>
-    <mob id="skeleton_mage" name="Skeleton Mage" faction="wild" mode="active" hp="130" armor="3" damage="20" movement_id="walk"><action id="strike" /><action id="fire_bolt" /></mob>
-    <mob id="yeti" name="Yeti" faction="wild" mode="active" hp="350" armor="8" damage="32" movement_id="walk"><action id="strike" /></mob>
-    <mob id="demon" name="Demon" faction="wild" mode="active" hp="480" armor="10" damage="40" movement_id="walk"><action id="strike" /></mob>
-    <mob id="blue_demon" name="Blue Demon" faction="wild" mode="active" hp="450" armor="9" damage="38" movement_id="walk"><action id="strike" /></mob>
-    <mob id="tribal_veteran" name="Tribal Veteran" faction="wild" mode="active" hp="250" armor="6" damage="30" movement_id="walk"><action id="strike" /></mob>
+    <mob id="wolf" name="Wolf" faction="predator" mode="active" hp="70" armor="0" damage="10" movement_id="animal_run" species_id="wolf" speed_variance_ratio="0.08" endurance_s="28"><action id="strike" /></mob>
+    <mob id="deer" name="Deer" faction="prey" mode="passive" hp="55" armor="0" damage="7" movement_id="animal_run" species_id="deer" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
+    <mob id="stag" name="Stag" faction="prey" mode="passive" hp="80" armor="1" damage="12" movement_id="animal_run" species_id="stag" speed_variance_ratio="0.04" endurance_s="60"><action id="strike" /></mob>
+    <mob id="fox" name="Fox" faction="predator" mode="active" hp="40" armor="0" damage="6" movement_id="animal_run" species_id="fox" speed_variance_ratio="0.08" endurance_s="24"><action id="strike" /></mob>
+    <mob id="horse" name="Horse" faction="prey" mode="passive" hp="100" armor="1" damage="10" movement_id="animal_run" species_id="horse" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
+    <mob id="horse_white" name="White Horse" faction="prey" mode="passive" hp="100" armor="1" damage="10" movement_id="animal_run" species_id="horse_white" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
+    <mob id="cow" name="Cow" faction="citizen" mode="passive" hp="110" armor="1" damage="8" movement_id="animal_walk" species_id="cow" speed_variance_ratio="0.03" endurance_s="65"><action id="strike" /></mob>
+    <mob id="bull" name="Bull" faction="citizen" mode="passive" hp="145" armor="2" damage="15" movement_id="animal_run" species_id="bull" speed_variance_ratio="0.05" endurance_s="50"><action id="strike" /></mob>
+    <mob id="donkey" name="Donkey" faction="citizen" mode="passive" hp="90" armor="1" damage="9" movement_id="animal_run" species_id="donkey" speed_variance_ratio="0.04" endurance_s="60"><action id="strike" /></mob>
+    <mob id="alpaca" name="Alpaca" faction="citizen" mode="passive" hp="70" armor="0" damage="6" movement_id="animal_run" species_id="alpaca" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
+    <mob id="husky" name="Husky" faction="citizen" mode="passive" hp="65" armor="0" damage="9" movement_id="animal_run" species_id="husky" speed_variance_ratio="0.06" endurance_s="45"><action id="strike" /></mob>
+    <mob id="shiba" name="Shiba" faction="citizen" mode="passive" hp="50" armor="0" damage="7" movement_id="animal_run" species_id="shiba" speed_variance_ratio="0.06" endurance_s="40"><action id="strike" /></mob>
+    <mob id="crawler_scorpion" name="Scorpion" faction="wild" mode="active" hp="110" armor="2" damage="14" movement_id="walk" speed_variance_ratio="0.05" endurance_s="35"><action id="strike" /></mob>
+    <mob id="line_mother" name="Line-Mother" faction="wild" mode="active" hp="600" armor="8" damage="35" movement_id="walk" speed_variance_ratio="0.02" endurance_s="90"><action id="strike" /></mob>
+    <mob id="green_blob" name="Green Blob" faction="wild" mode="passive" hp="90" armor="1" damage="8" movement_id="walk" speed_variance_ratio="0.02" endurance_s="80"><action id="strike" /></mob>
+    <mob id="orc" name="Orc" faction="wild" mode="active" hp="150" armor="4" damage="20" movement_id="walk" speed_variance_ratio="0.05" endurance_s="45"><action id="strike" /></mob>
+    <mob id="tribal" name="Tribal" faction="wild" mode="active" hp="130" armor="3" damage="18" movement_id="walk" speed_variance_ratio="0.06" endurance_s="42"><action id="strike" /></mob>
+    <mob id="bandit" name="Bandit" faction="robber" mode="active" hp="120" armor="3" damage="17" movement_id="walk" speed_variance_ratio="0.06" endurance_s="40"><action id="strike" /></mob>
+    <mob id="orc_skull" name="Orc Skull" faction="wild" mode="active" hp="220" armor="6" damage="27" movement_id="walk" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /><action id="fire_bolt" /></mob>
+    <mob id="skeleton_warrior" name="Skeleton Warrior" faction="wild" mode="active" hp="160" armor="5" damage="22" movement_id="walk" speed_variance_ratio="0.03" endurance_s="60"><action id="strike" /></mob>
+    <mob id="skeleton_minion" name="Skeleton Minion" faction="wild" mode="active" hp="100" armor="3" damage="15" movement_id="walk" speed_variance_ratio="0.05" endurance_s="45"><action id="strike" /></mob>
+    <mob id="skeleton_mage" name="Skeleton Mage" faction="wild" mode="active" hp="130" armor="3" damage="20" movement_id="walk" speed_variance_ratio="0.04" endurance_s="40"><action id="strike" /><action id="fire_bolt" /></mob>
+    <mob id="yeti" name="Yeti" faction="wild" mode="active" hp="350" armor="8" damage="32" movement_id="walk" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
+    <mob id="demon" name="Demon" faction="wild" mode="active" hp="480" armor="10" damage="40" movement_id="walk" speed_variance_ratio="0.05" endurance_s="65"><action id="strike" /></mob>
+    <mob id="blue_demon" name="Blue Demon" faction="wild" mode="active" hp="450" armor="9" damage="38" movement_id="walk" speed_variance_ratio="0.05" endurance_s="60"><action id="strike" /></mob>
+    <mob id="tribal_veteran" name="Tribal Veteran" faction="wild" mode="active" hp="250" armor="6" damage="30" movement_id="walk" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
   </mobs>
-  <movement><spec id="walk" speed_mps="2.5" /></movement>
+  <movement><spec id="walk" speed_mps="2.5" /><spec id="animal_walk" speed_mps="2.0" /><spec id="animal_run" speed_mps="6.5" /></movement>
   <hamlet enabled="true" width="32" depth="32" kit_catalog="catalogs/medieval.json"><layer id="terrain" /><layer id="roads" /><layer id="dwellings" /></hamlet>
   <defaults><value key="player_faction" value="citizen" /><value key="neutral_faction" value="neutral" /><value key="default_player_profile" value="default_player" /><value key="mob_sight_m" value="24" /><value key="mob_hear_m" value="12" /><value key="mob_leash_m" value="48" /><value key="mob_social_m" value="10" /></defaults>
 </OrrunGameData>

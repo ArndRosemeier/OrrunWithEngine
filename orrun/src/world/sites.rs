@@ -350,14 +350,14 @@ pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {
     for site in sites {
         for (x, z) in site.bandit_xz() {
             let hostile = hostile_from_sheet(combat, idx, x, z);
-            combat.hostiles_mut().push(hostile);
+            combat.add_hostile(hostile);
             idx += 1;
         }
     }
 }
 
 pub fn clear_overland_sites(combat: &mut WorldCombat) {
-    combat.hostiles_mut().retain(|h| !is_bandit_id(&h.mob_id));
+    combat.retain_hostiles(|h| !is_bandit_id(&h.mob_id));
     if let Some(lock) = combat.lock_id() {
         if !combat.hostiles().iter().any(|h| h.idx == lock) {
             combat.set_lock(None);

@@ -25,6 +25,13 @@ DISPLAY_NAMES = {
     "profile": "Player Profile", "spec": "Movement Specification", "value": "Default Value",
     "effect": "Effect", "action": "Action", "mob": "Mob", "skill": "Skill", "faction": "Faction",
 }
+RECORD_DEFAULTS: dict[str, dict[str, str]] = {
+    "mob": {
+        "name": "New Mob", "faction": "wild", "mode": "active", "hp": "1",
+        "armor": "0", "damage": "1", "movement_id": "walk", "swing_s": "1",
+        "reach_m": "1.8", "speed_variance_ratio": "0", "endurance_s": "30",
+    },
+}
 
 
 class GameDataEditor:
@@ -154,7 +161,7 @@ class GameDataEditor:
             "effect": frozenset({"name", "kind", "skill_id"}),
             "action": frozenset({"name"}),
             "profile": frozenset({"name", "faction"}),
-            "mob": frozenset({"name", "faction", "mode", "movement_id"}),
+            "mob": frozenset({"name", "faction", "mode", "hp", "damage", "movement_id", "speed_variance_ratio", "endurance_s"}),
             "spec": frozenset({"speed_mps"}),
             "hamlet": frozenset({"enabled", "width", "depth", "kit_catalog"}),
             "value": frozenset({"key", "value"}),
@@ -235,6 +242,7 @@ class GameDataEditor:
                 suffix += 1
                 candidate = f"new_{tag}_{suffix}"
             element.set("id", candidate)
+        element.attrib.update(RECORD_DEFAULTS.get(tag, {}))
         self._refresh_tree()
         self.status.configure(text=f"Added {DISPLAY_NAMES.get(tag, tag)}; edit its fields and apply")
 

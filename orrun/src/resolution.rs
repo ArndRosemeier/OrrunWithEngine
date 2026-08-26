@@ -35,7 +35,13 @@ pub enum ResolutionError {
     #[error("target out of range for action {0}")]
     OutOfRange(ActionId),
     #[error("action {action} needs {need} mana, actor has {have}")]
-    InsufficientMana { action: ActionId, need: f64, have: f64 },
+    InsufficientMana {
+        action: ActionId,
+        need: f64,
+        have: f64,
+    },
+    #[error("actor index {0} is out of bounds")]
+    InvalidActorIndex(usize),
     #[error("actor {0} is dead")]
     DeadActor(u32),
     #[error("single_target action requires an explicit target")]
@@ -185,11 +191,14 @@ impl<'a> Resolver<'a> {
             .data
             .action(action_id)
             .ok_or_else(|| ResolutionError::UnknownAction(action_id.clone()))?;
+        if caster >= actors.len() {
+            return Err(ResolutionError::InvalidActorIndex(caster));
+        }
         if !actors[caster].alive {
             return Err(ResolutionError::DeadActor(actors[caster].id));
         }
 
-        // Phase 1 — plan: resolve every assignment to concrete commands without
+        // Phase 1 â€” plan: resolve every assignment to concrete commands without
         // mutating actor state, so a failed action never half-applies.
         let mut planned = Vec::with_capacity(action.effects().len());
         for assignment in action.effects() {
@@ -207,17 +216,22 @@ impl<'a> Resolver<'a> {
                 }
             }
             let skill_id = effect.skill_id();
-            let level = actors[caster]
-                .skill_level(skill_id)
-                .ok_or_else(|| ResolutionError::UnknownSkill(actors[caster].id, skill_id.clone()))?;
+            let level = actors[caster].skill_level(skill_id).ok_or_else(|| {
+                ResolutionError::UnknownSkill(actors[caster].id, skill_id.clone())
+            })?;
             let level_scale = self
                 .data
                 .skill(skill_id)
                 .map(|s| s.level_scale())
                 .unwrap_or(1.0);
-            let magnitude =
-                balance::effect_magnitude(assignment.magnitude(), level, level_scale, effect.progression());
+            let magnitude = balance::effect_magnitude(
+                assignment.magnitude(),
+                level,
+                level_scale,
+                effect.progression(),
+            );
             let targets = select_targets(
+                self.data,
                 actors,
                 caster,
                 action_id,
@@ -241,7 +255,7 @@ impl<'a> Resolver<'a> {
             });
         }
 
-        // Phase 2 — spend resources once per action.
+        // Phase 2 â€” spend resources once per action.
         let mut mana_spent = 0.0;
         if action.mana_cost() > 0.0 {
             if !actors[caster].spend_mana(action.mana_cost()) {
@@ -259,7 +273,7 @@ impl<'a> Resolver<'a> {
             level_ups.extend(actors[caster].progression.record_mana_spent(mana_spent));
         }
 
-        // Phase 3 — apply and record.
+        // Phase 3 â€” apply and record.
         let mut effects = Vec::with_capacity(planned.len());
         let mut deaths = Vec::new();
         for p in planned {
@@ -267,7 +281,9 @@ impl<'a> Resolver<'a> {
                 actors[caster]
                     .progression
                     .record_effect_use(&p.skill_id)
-                    .map_err(|_| ResolutionError::UnknownSkill(actors[caster].id, p.skill_id.clone()))?,
+                    .map_err(|_| {
+                        ResolutionError::UnknownSkill(actors[caster].id, p.skill_id.clone())
+                    })?,
             );
             let mut applied = Vec::with_capacity(p.targets.len());
             for &target in &p.targets {
@@ -278,7 +294,7 @@ impl<'a> Resolver<'a> {
                         if dealt > 0.0 {
                             level_ups.extend(actors[target].progression.record_damage_taken(dealt));
                         }
-                        if !actors[target].alive {
+                        if !actors[target].alive && !deaths.contains(&target) {
                             deaths.push(target);
                         }
                         dealt
@@ -311,14 +327,15 @@ impl<'a> Resolver<'a> {
 }
 
 fn class_matches(
+    data: &GameData,
     target_class: ActionTarget,
     caster_faction: &crate::gamedata::FactionId,
     target_faction: &crate::gamedata::FactionId,
     is_self: bool,
 ) -> bool {
     match target_class {
-        ActionTarget::Hostile => target_faction != caster_faction,
-        ActionTarget::Friendly => target_faction == caster_faction,
+        ActionTarget::Hostile => data.factions_are_hostile(caster_faction, target_faction),
+        ActionTarget::Friendly => !data.factions_are_hostile(caster_faction, target_faction),
         ActionTarget::ActorSelf => is_self,
         ActionTarget::Any => true,
         ActionTarget::None => false,
@@ -349,6 +366,7 @@ fn in_cone(cx: f64, cz: f64, fx: f64, fz: f64, px: f64, pz: f64, half_rad: f64) 
 /// Resolve application geometry into a list of target indices, filtered by the
 /// action's target class and living state.
 fn select_targets(
+    data: &GameData,
     actors: &[Actor],
     caster: usize,
     action_id: &ActionId,
@@ -370,7 +388,7 @@ fn select_targets(
             let Some(t) = actors.get(idx).filter(|t| t.alive) else {
                 return Ok(out);
             };
-            if !class_matches(target_class, &c.faction, &t.faction, idx == caster) {
+            if !class_matches(data, target_class, &c.faction, &t.faction, idx == caster) {
                 return Ok(out);
             }
             if dist(c.x, c.z, t.x, t.z) > range_m {
@@ -394,7 +412,7 @@ fn select_targets(
                 if !in_cone(c.x, c.z, fx, fz, t.x, t.z, half) {
                     continue;
                 }
-                if class_matches(target_class, &c.faction, &t.faction, i == caster) {
+                if class_matches(data, target_class, &c.faction, &t.faction, i == caster) {
                     out.push(i);
                 }
             }
@@ -413,7 +431,7 @@ fn select_targets(
                 if dist(cx, cz, t.x, t.z) > radius_m {
                     continue;
                 }
-                if class_matches(target_class, &c.faction, &t.faction, i == caster) {
+                if class_matches(data, target_class, &c.faction, &t.faction, i == caster) {
                     out.push(i);
                 }
             }
@@ -426,7 +444,7 @@ fn select_targets(
                 if dist(c.x, c.z, t.x, t.z) > radius_m {
                     continue;
                 }
-                if class_matches(target_class, &c.faction, &t.faction, i == caster) {
+                if class_matches(data, target_class, &c.faction, &t.faction, i == caster) {
                     out.push(i);
                 }
             }
@@ -468,9 +486,7 @@ mod tests {
     }
 
     fn wolf(data: &GameData, x: f64, z: f64) -> Actor {
-        let mob = data
-            .mob(&MobId::new("crawler_spider_wolf"))
-            .expect("wolf mob");
+        let mob = data.mob(&MobId::new("wolf")).expect("wolf mob");
         let progression = ActorProgression::from_mob(mob, data);
         Actor {
             id: 1,
@@ -507,7 +523,10 @@ mod tests {
                 .skill_xp(&SkillId::new("slashing_damage")),
             Some(10)
         );
-        assert!(res.level_ups.is_empty(), "no level-up at skill 1 from one use");
+        assert!(
+            res.level_ups.is_empty(),
+            "no level-up at skill 1 from one use"
+        );
     }
 
     #[test]
@@ -527,9 +546,7 @@ mod tests {
         assert_eq!(actors[0].mana, mana_before - 3.0);
         assert_eq!(res.effects[0].applied, vec![14.0]);
         assert_eq!(
-            actors[0]
-                .progression
-                .skill_xp(&SkillId::new("fire_damage")),
+            actors[0].progression.skill_xp(&SkillId::new("fire_damage")),
             Some(10)
         );
         assert_eq!(actors[0].progression.mana_xp(), 3);
@@ -551,9 +568,7 @@ mod tests {
         assert_eq!(res.effects[0].applied, vec![25.0]);
         assert_eq!(actors[0].hp, 75.0);
         assert_eq!(
-            actors[0]
-                .progression
-                .skill_xp(&SkillId::new("healing")),
+            actors[0].progression.skill_xp(&SkillId::new("healing")),
             Some(10)
         );
         assert_eq!(actors[0].progression.mana_xp(), 20);
@@ -587,13 +602,13 @@ mod tests {
 
     #[test]
     fn multi_effect_action_resolves_every_assignment_and_trains_each_skill() {
-        let xml = r#"<OrrunGameData schema_version="1"><skills><skill id="slashing_damage" name="Slashing" level_scale="1"/><skill id="fire_damage" name="Fire" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/><faction id="wild" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing" kind="damage" skill_id="slashing_damage" progression="skill_level"/><effect id="fire_damage" name="Fire" kind="damage" skill_id="fire_damage" progression="skill_level"/></effects><actions><action id="flame_strike" name="Flame Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="5" application="single_target" range_m="2"/><effect effect_id="fire_damage" magnitude="7" application="single_target" range_m="2"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/><skill id="fire_damage" level="1"/></profile></players><mobs><mob id="crawler_spider_wolf" name="Wolf" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk"><action id="flame_strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#;
+        let xml = r#"<OrrunGameData schema_version="2"><skills><skill id="slashing_damage" name="Slashing" level_scale="1"/><skill id="fire_damage" name="Fire" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/><faction id="wild" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing" kind="damage" skill_id="slashing_damage" progression="skill_level"/><effect id="fire_damage" name="Fire" kind="damage" skill_id="fire_damage" progression="skill_level"/></effects><actions><action id="flame_strike" name="Flame Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="5" application="single_target" range_m="2"/><effect effect_id="fire_damage" magnitude="7" application="single_target" range_m="2"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/><skill id="fire_damage" level="1"/></profile></players><mobs><mob id="wolf" name="Wolf" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk" speed_variance_ratio="0.05" endurance_s="30"><action id="flame_strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#;
         let data = GameData::from_xml_str(xml).expect("fixture data");
         let profile = data
             .profile(&ProfileId::new("default_player"))
             .expect("profile");
         let progression = ActorProgression::from_profile(profile);
-        let mob = data.mob(&MobId::new("crawler_spider_wolf")).expect("mob");
+        let mob = data.mob(&MobId::new("wolf")).expect("mob");
         let target_progression = ActorProgression::from_mob(mob, &data);
         let mut actors = vec![
             Actor {
@@ -646,8 +661,30 @@ mod tests {
     }
 
     #[test]
+    fn authored_action_magnitude_ab_changes_resolution_without_code_changes() {
+        let base = r#"<OrrunGameData schema_version="2"><skills><skill id="slashing_damage" name="Slashing" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/><faction id="wild" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing" kind="damage" skill_id="slashing_damage" progression="skill_level"/></effects><actions><action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="MAGNITUDE" application="single_target" range_m="2"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/></profile></players><mobs><mob id="wolf" name="Wolf" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk" speed_variance_ratio="0.05" endurance_s="30"><action id="strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#;
+        let resolve = |magnitude: &str| {
+            let data = GameData::from_xml_str(&base.replace("MAGNITUDE", magnitude))
+                .expect("temporary authored variant");
+            let mut actors = vec![player(&data), wolf(&data, 1.5, 0.0)];
+            Resolver::new(&data)
+                .execute(
+                    &mut actors,
+                    0,
+                    &ActionId::new("strike"),
+                    TargetSelection::Single(1),
+                )
+                .expect("variant resolves")
+                .effects[0]
+                .applied[0]
+        };
+        assert_eq!(resolve("8"), 8.0);
+        assert_eq!(resolve("19"), 19.0);
+    }
+
+    #[test]
     fn unsupported_effect_kind_is_a_loud_error() {
-        let xml = r#"<OrrunGameData schema_version="1"><skills><skill id="root" name="Root" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/><faction id="wild" neutral="false"/></factions><effects><effect id="root" name="Root" kind="control" skill_id="root" progression="skill_level"/></effects><actions><action id="bind" name="Bind" target="hostile"><effects><effect effect_id="root" magnitude="1" application="single_target" range_m="24"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="root" level="1"/></profile></players><mobs><mob id="crawler_spider_wolf" name="Wolf" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk"><action id="bind"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#;
+        let xml = r#"<OrrunGameData schema_version="2"><skills><skill id="root" name="Root" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/><faction id="wild" neutral="false"/></factions><effects><effect id="root" name="Root" kind="control" skill_id="root" progression="skill_level"/></effects><actions><action id="bind" name="Bind" target="hostile"><effects><effect effect_id="root" magnitude="1" application="single_target" range_m="24"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="root" level="1"/></profile></players><mobs><mob id="wolf" name="Wolf" faction="wild" mode="active" hp="70" armor="0" damage="10" movement_id="walk" speed_variance_ratio="0.05" endurance_s="30"><action id="bind"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#;
         let data = GameData::from_xml_str(xml).expect("fixture data");
         let profile = data
             .profile(&ProfileId::new("default_player"))
@@ -750,11 +787,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_caster_index_is_a_typed_error() {
+        let data = data();
+        let mut actors = vec![player(&data)];
+        let err = Resolver::new(&data)
+            .execute(
+                &mut actors,
+                99,
+                &ActionId::new("strike"),
+                TargetSelection::Single(0),
+            )
+            .unwrap_err();
+        assert_eq!(err, ResolutionError::InvalidActorIndex(99));
+    }
+
+    #[test]
     fn cone_geometry_selects_facing_targets_only() {
         let data = data();
         let mut actors = vec![player(&data)];
         let mut add = |id, x, z| {
-            let mob = data.mob(&MobId::new("crawler_spider_wolf")).unwrap();
+            let mob = data.mob(&MobId::new("wolf")).unwrap();
             let progression = ActorProgression::from_mob(mob, &data);
             actors.push(Actor {
                 id,
@@ -770,8 +822,9 @@ mod tests {
             });
         };
         add(1, 2.0, 0.0); // straight ahead, in cone
-        add(2, 0.0, 2.0); // 90° off, out of cone
+        add(2, 0.0, 2.0); // 90Â° off, out of cone
         let got = select_targets(
+            &data,
             &actors,
             0,
             &ActionId::new("strike"),
@@ -793,7 +846,7 @@ mod tests {
     fn pbaoe_geometry_uses_caster_radius() {
         let data = data();
         let mut actors = vec![player(&data)];
-        let mob = data.mob(&MobId::new("crawler_spider_wolf")).unwrap();
+        let mob = data.mob(&MobId::new("wolf")).unwrap();
         let progression = ActorProgression::from_mob(mob, &data);
         for (id, x, z) in [(1, 1.0, 0.0), (2, 5.0, 0.0)] {
             actors.push(Actor {
@@ -810,6 +863,7 @@ mod tests {
             });
         }
         let got = select_targets(
+            &data,
             &actors,
             0,
             &ActionId::new("strike"),

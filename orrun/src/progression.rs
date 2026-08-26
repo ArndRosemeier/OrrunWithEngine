@@ -187,12 +187,7 @@ impl ActorProgression {
     /// Initialize from an authored player profile: each known skill starts at
     /// its authored level; HP and mana start at level 1.
     pub fn from_profile(profile: &PlayerProfile) -> Self {
-        Self::from_levels(
-            profile
-                .skills()
-                .iter()
-                .map(|s| (s.id().clone(), s.level())),
-        )
+        Self::from_levels(profile.skills().iter().map(|s| (s.id().clone(), s.level())))
     }
 
     /// Initialize from an authored mob definition: every skill reachable from
@@ -283,7 +278,9 @@ impl ActorProgression {
         self.skills.get(id).map(|t| t.xp)
     }
     pub fn skill_xp_to_next(&self, id: &SkillId) -> Option<u64> {
-        self.skills.get(id).map(|t| balance::xp_to_next(t.level) - t.xp)
+        self.skills
+            .get(id)
+            .map(|t| balance::xp_to_next(t.level) - t.xp)
     }
 
     pub fn hp_level(&self) -> i32 {
@@ -333,7 +330,10 @@ mod tests {
         let mut prev = 0;
         for level in 1..30 {
             let cost = balance::xp_to_next(level);
-            assert!(cost > prev, "cost at {level} ({cost}) not greater than {prev}");
+            assert!(
+                cost > prev,
+                "cost at {level} ({cost}) not greater than {prev}"
+            );
             prev = cost;
         }
     }
@@ -467,9 +467,7 @@ mod tests {
         assert_eq!(p.skill_level(&SkillId::new("slashing_damage")), Some(1));
         assert_eq!(p.skill_level(&SkillId::new("healing")), Some(1));
 
-        let wolf = data
-            .mob(&MobId::new("crawler_spider_wolf"))
-            .expect("wolf mob");
+        let wolf = data.mob(&MobId::new("wolf")).expect("wolf mob");
         let m = ActorProgression::from_mob(wolf, &data);
         assert!(m.skill_level(&SkillId::new("slashing_damage")).is_some());
         assert_eq!(m.hp_level(), 1);

@@ -17,13 +17,15 @@ use engine::prelude::*;
 use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
 use orrun::atlas::ContinentAtlas;
+use orrun::combat::HostileState;
 use orrun::controls::{self, Action, PressedActions};
+use orrun::gamedata::{MobId, SkillId};
 use orrun::hud;
 use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, plan_overland_sites, resolve_spawn, Ambience, DungeonPin,
-    Heading, HousePlot, Locomotion, MapPoint, OverlandSite, SessionState, SiteKind, WalkInput,
-    WorldEntryRequest, WorldSession, LIVE_OPEN_M,
+    Heading, HeldMobFixture, HousePlot, Locomotion, MapPoint, OverlandSite, SessionState, SiteKind,
+    WalkInput, WorldEntryRequest, WorldSession, LIVE_OPEN_M,
 };
 use serde_json::{json, Value};
 
@@ -31,6 +33,7 @@ const WALK_SPEED: f32 = 10.0;
 const FLY_SPEED: f32 = 40.0;
 const YAW_EPS: f32 = 1e-3;
 const STAND_TIMEOUT_S: f32 = 90.0;
+const M3_HOOK_TIMEOUT_S: f32 = 45.0;
 const DUNGEON_TIMEOUT_S: f32 = 180.0;
 const EYE_HEIGHT_M: f32 = 1.7;
 /// Standing camera: land + sky horizon. Not look-down floor (-70).
@@ -42,6 +45,10 @@ const PITCH_EPS: f32 = 2.5;
 const LOOK_DELTA_YAW: f32 = -24.0;
 const HATCH_IN_VIEW_DEG: f32 = 30.0;
 const MIN_FREEBOARD_M: f32 = 0.75;
+
+fn pressed(action: Action) -> PressedActions {
+    PressedActions::from_actions(&[action])
+}
 
 fn main() {
     let args = parse_args();
@@ -63,6 +70,8 @@ fn main() {
         "dungeon_fill.json",
         "combat.json",
         "combat.png",
+        "m3_wolf.json",
+        "m3_animals.json",
         "hurt.png",
         "slain.png",
         "controls.json",
@@ -162,6 +171,8 @@ fn main() {
         request,
         sea,
         combat_tab_sent: false,
+        m3_wolf: M3WolfRun::default(),
+        m3_animals: M3AnimalsRun::default(),
         combat_shot_sent: false,
         combat_hurt_sent: false,
         combat_cd_sweep_at: None,
@@ -372,6 +383,8 @@ enum Phase {
     BindForceWalk,
     BindWrite,
     CombatLive,
+    M3WolfLive,
+    M3AnimalsLive,
     CombatOrcLive,
     CombatDeathLive,
     LootSparkleLive,
@@ -434,6 +447,8 @@ struct Driver {
     request: WorldEntryRequest,
     sea: f32,
     combat_tab_sent: bool,
+    m3_wolf: M3WolfRun,
+    m3_animals: M3AnimalsRun,
     combat_shot_sent: bool,
     combat_hurt_sent: bool,
     combat_cd_sweep_at: Option<f32>,
@@ -465,6 +480,66 @@ struct Driver {
     pending_interact: bool,
     door_interact_sent: bool,
     door_stand: Option<GlobalXZ>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum M3WolfStage {
+    #[default]
+    Ready,
+    Activate,
+    Tab,
+    Incoming,
+    Mend,
+    Strike,
+    FireBolt,
+    Death,
+    LootOpen,
+    LootTaken,
+}
+
+#[derive(Clone, Debug, Default)]
+struct M3WolfRun {
+    stage: M3WolfStage,
+    action_sent: bool,
+    hp_before: f64,
+    mana_before: f64,
+    target_hp_before: f64,
+    hp_xp_before: u64,
+    mana_xp_before: u64,
+    healing_xp_before: u64,
+    slashing_xp_before: u64,
+    fire_xp_before: u64,
+    incoming_damage: f64,
+    mend_healed: f64,
+    strike_damage: f64,
+    fire_damage: f64,
+    corpse_idx: Option<i32>,
+    loot_items: usize,
+    loot_coin: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum M3AnimalsStage {
+    #[default]
+    FrontReady,
+    FrontObserve,
+    RearReady,
+    RearObserve,
+    TabDeer,
+    DamageDeer,
+    Retaliation,
+}
+
+#[derive(Clone, Debug, Default)]
+struct M3AnimalsRun {
+    stage: M3AnimalsStage,
+    action_sent: bool,
+    front_heading_ok: bool,
+    front_locomotion_ok: bool,
+    rear_heading_ok: bool,
+    rear_locomotion_ok: bool,
+    deer_hp_before: f64,
+    observe_from: Vec<(String, f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -636,13 +711,48 @@ impl Driver {
                 }
                 input.toggle_fly = self.session.locomotion() == Some(Locomotion::Fly);
             }
+            Phase::M3WolfLive => {
+                if self.m3_wolf.stage == M3WolfStage::Tab && !self.m3_wolf.action_sent {
+                    input.tab = true;
+                    self.m3_wolf.action_sent = true;
+                }
+                let action = match self.m3_wolf.stage {
+                    M3WolfStage::Mend => Some(Action::Mend),
+                    M3WolfStage::Strike => Some(Action::Strike),
+                    M3WolfStage::FireBolt | M3WolfStage::Death => Some(Action::Ember),
+                    _ => None,
+                };
+                if let Some(action) = action.filter(|_| !self.m3_wolf.action_sent) {
+                    input.actions = pressed(action);
+                    self.m3_wolf.action_sent = true;
+                }
+            }
+            Phase::M3AnimalsLive => {
+                if self.m3_animals.stage == M3AnimalsStage::TabDeer && !self.m3_animals.action_sent
+                {
+                    input.tab = true;
+                    self.m3_animals.action_sent = true;
+                } else if self.m3_animals.stage == M3AnimalsStage::DamageDeer
+                    && !self.m3_animals.action_sent
+                {
+                    input.actions = pressed(Action::Ember);
+                    self.m3_animals.action_sent = true;
+                }
+            }
             Phase::CombatLive => {
                 // Stay in melee until wolves finish the kill. Do not walk to
                 // the side vantage (that is outside 1.8 m reach).
-                if !self.combat_tab_sent {
-                    // look only; fixture wolves spawn in melee in front of the player
-                } else if self.session.slain_line().is_none() && self.session.lock_id().is_none() {
+                if !self.session.fixture_encounter_held()
+                    && self.session.lock_id().is_none()
+                    && self.session.slain_line().is_none()
+                    && self.session.fixture_mesh_visible_from_session()
+                    && self
+                        .session
+                        .player_position()
+                        .is_some_and(|pos| self.session.stream().required_ready(pos.horizontal()))
+                {
                     input.tab = true;
+                    self.combat_tab_sent = true;
                 } else if self.current_hook() == Some("cast_bar") {
                     // Ember 28 m reaches the wolf line; stay put for the bar shot.
                 } else if self.combat_hurt_sent && !self.combat_fail_sent {
@@ -1026,6 +1136,8 @@ impl Driver {
             Phase::BindForceWalk => self.tick_force_walk(world, frame),
             Phase::BindWrite => self.tick_bind_write(world, frame),
             Phase::CombatLive => self.tick_combat_live(world, frame),
+            Phase::M3WolfLive => self.tick_m3_wolf(world, frame),
+            Phase::M3AnimalsLive => self.tick_m3_animals(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatDeathLive => self.tick_combat_death(world, frame),
             Phase::LootSparkleLive => self.tick_loot_sparkle(world, frame),
@@ -1071,7 +1183,15 @@ impl Driver {
             }
             "dungeon_fill" => self.start_dungeon_fill(world, frame),
             "bind" => self.start_bind(world, frame),
-            "combat" | "cd_sweep" | "cast_bar" | "incoming" | "status" | "pip" | "con"
+            "combat" | "m3_wolf" => self.start_m3_wolf(world, frame),
+            "m3_animals" => self.start_m3_animals(world, frame),
+            "combat_presentation"
+            | "cd_sweep"
+            | "cast_bar"
+            | "incoming"
+            | "status"
+            | "pip"
+            | "con"
             | "nameplate" => self.start_combat(world, frame),
             "con_hard" => self.start_combat_yeti(world, frame),
             "combat_orc" => self.start_combat_orc(world, frame),
@@ -1808,9 +1928,6 @@ impl Driver {
                 return;
             }
         }
-        if !self.combat_tab_sent {
-            self.combat_tab_sent = true;
-        }
         self.aim_at_wolf_body();
         let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
         if !self.looking_at_wolf_body() {
@@ -1822,6 +1939,19 @@ impl Driver {
             }
             return;
         }
+        if self.session.fixture_encounter_held() {
+            if !self.session.fixture_mesh_visible(world) {
+                return;
+            }
+            self.session.start_fixture_encounter();
+            return;
+        }
+        if !self.combat_tab_sent {
+            if self.session.lock_id().is_none() {
+                return;
+            }
+            self.combat_tab_sent = true;
+        }
         let Some((lock_name, lock_hp)) =
             self.session.lock_name_hp().map(|(n, h)| (n.to_string(), h))
         else {
@@ -1831,9 +1961,9 @@ impl Driver {
             }
             return;
         };
-        if lock_name != "wolf-spider" || lock_hp <= 0.0 {
+        if lock_name != "Wolf" || lock_hp <= 0.0 {
             self.fail_current(&format!(
-                "combat_body: lock want name wolf-spider + HP>0, got {lock_name} hp={lock_hp}"
+                "combat_body: lock want name Wolf + HP>0, got {lock_name} hp={lock_hp}"
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -2320,7 +2450,12 @@ impl Driver {
                 return;
             }
         }
-        self.combat_tab_sent = true;
+        if !self.combat_tab_sent {
+            // Arm exactly one Tab for the next input frame, after this frame's
+            // readiness-driven look has been applied by WorldSession.
+            self.combat_tab_sent = true;
+            return;
+        }
         if self.session.lock_id().is_none() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat_orc: lock unset after Tab");
@@ -3378,8 +3513,12 @@ impl Driver {
                 facing.z as f64,
             );
             let t = self.session.combat().cast_time();
-            let kind = self.session.combat().cast_kind();
-            if !started || kind != Some("ember") || t <= 0.0 {
+            let kind = self
+                .session
+                .combat()
+                .casting_action_id()
+                .map(|id| id.as_str());
+            if !started || kind != Some("fire_bolt") || t <= 0.0 {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                     self.fail_current(&format!(
                         "cast_bar: Ember never started (started={started} kind={kind:?} t={t})"
@@ -3395,8 +3534,12 @@ impl Driver {
             return;
         }
         let t = self.session.combat().cast_time();
-        let kind = self.session.combat().cast_kind();
-        if kind != Some("ember") || t <= 0.0 {
+        let kind = self
+            .session
+            .combat()
+            .casting_action_id()
+            .map(|id| id.as_str().to_string());
+        if kind.as_deref() != Some("fire_bolt") || t <= 0.0 {
             self.fail_current(&format!(
                 "cast_bar: Ember finished before mid-cast shot (kind={kind:?} t={t})"
             ));
@@ -3427,6 +3570,393 @@ impl Driver {
         );
         self.ok_hook("cast_bar");
         self.phase = Phase::NextHook;
+    }
+
+    fn start_m3_wolf(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_held_mob_fixture(
+            world,
+            vec![HeldMobFixture::new(MobId::new("wolf"), 1.5, 0.0)],
+        );
+        self.m3_wolf = M3WolfRun::default();
+        self.phase = Phase::M3WolfLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn m3_progression(&self, skill: &str) -> u64 {
+        self.session
+            .player_progression()
+            .skill_xp(&SkillId::new(skill))
+            .unwrap_or_else(|| panic!("M3 player missing skill {skill}"))
+    }
+
+    fn tick_m3_wolf(&mut self, world: &mut World, frame: &Frame) {
+        if frame.time - self.phase_t0 > M3_HOOK_TIMEOUT_S {
+            self.fail_current(&format!("m3_wolf timed out in {:?}", self.m3_wolf.stage));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        match self.m3_wolf.stage {
+            M3WolfStage::Ready => {
+                let Some(pos) = self.session.player_position() else {
+                    return;
+                };
+                if self.session.state() != SessionState::World
+                    || !self.session.stream().required_ready(pos.horizontal())
+                    || !self.session.fixture_mesh_visible(world)
+                {
+                    return;
+                }
+                self.aim_at_wolf_line();
+                let yaw = self.session.player_yaw_degrees().unwrap_or(0.0);
+                let pitch = self.session.player_pitch_degrees().unwrap_or(0.0);
+                if let Some((eye, target)) = wolf_line_look(&self.session) {
+                    if view_angle_degrees(eye, yaw, pitch, target) > 12.0 {
+                        return;
+                    }
+                }
+                self.m3_wolf.stage = M3WolfStage::Activate;
+            }
+            M3WolfStage::Activate => {
+                if !self.session.fixture_encounter_held() {
+                    self.fail_current("m3_wolf fixture was not held before activation");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.session.start_fixture_encounter();
+                self.m3_wolf.hp_before = self.session.player_hp();
+                self.m3_wolf.hp_xp_before = self.session.player_progression().hp_xp();
+                self.m3_wolf.stage = M3WolfStage::Tab;
+                self.m3_wolf.action_sent = false;
+            }
+            M3WolfStage::Tab => {
+                if !self.m3_wolf.action_sent || self.session.lock_id().is_none() {
+                    return;
+                }
+                self.m3_wolf.stage = M3WolfStage::Incoming;
+                self.m3_wolf.action_sent = false;
+            }
+            M3WolfStage::Incoming => {
+                if !self.session.incoming_hit()
+                    || self.session.player_hp() >= self.m3_wolf.hp_before
+                {
+                    return;
+                }
+                let hp_xp = self.session.player_progression().hp_xp();
+                if hp_xp <= self.m3_wolf.hp_xp_before {
+                    self.fail_current("m3_wolf incoming damage did not train HP");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.m3_wolf.incoming_damage = self.m3_wolf.hp_before - self.session.player_hp();
+                self.m3_wolf.hp_before = self.session.player_hp();
+                self.m3_wolf.mana_before = self.session.player_mana();
+                self.m3_wolf.mana_xp_before = self.session.player_progression().mana_xp();
+                self.m3_wolf.healing_xp_before = self.m3_progression("healing");
+                self.m3_wolf.stage = M3WolfStage::Mend;
+                self.m3_wolf.action_sent = false;
+            }
+            M3WolfStage::Mend => {
+                if !self.m3_wolf.action_sent || self.session.combat().casting_action_id().is_some()
+                {
+                    return;
+                }
+                let healing_xp = self.m3_progression("healing");
+                let mana_xp = self.session.player_progression().mana_xp();
+                if healing_xp <= self.m3_wolf.healing_xp_before
+                    || mana_xp <= self.m3_wolf.mana_xp_before
+                    || self.session.player_mana() >= self.m3_wolf.mana_before
+                    || self.session.player_hp() <= self.m3_wolf.hp_before
+                {
+                    return;
+                }
+                self.m3_wolf.mend_healed = self.session.player_hp() - self.m3_wolf.hp_before;
+                self.m3_wolf.target_hp_before = self.session.lock_name_hp().expect("wolf lock").1;
+                self.m3_wolf.slashing_xp_before = self.m3_progression("slashing_damage");
+                self.m3_wolf.stage = M3WolfStage::Strike;
+                self.m3_wolf.action_sent = false;
+            }
+            M3WolfStage::Strike => {
+                if !self.m3_wolf.action_sent {
+                    return;
+                }
+                let Some((_, hp)) = self.session.lock_name_hp() else {
+                    return;
+                };
+                if hp >= self.m3_wolf.target_hp_before {
+                    return;
+                }
+                if self.m3_progression("slashing_damage") <= self.m3_wolf.slashing_xp_before {
+                    self.fail_current("m3_wolf Strike did not train slashing damage");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.m3_wolf.strike_damage = self.m3_wolf.target_hp_before - hp;
+                self.m3_wolf.target_hp_before = hp;
+                self.m3_wolf.fire_xp_before = self.m3_progression("fire_damage");
+                self.m3_wolf.mana_xp_before = self.session.player_progression().mana_xp();
+                self.m3_wolf.stage = M3WolfStage::FireBolt;
+                self.m3_wolf.action_sent = false;
+            }
+            M3WolfStage::FireBolt => {
+                if !self.m3_wolf.action_sent || self.session.combat().casting_action_id().is_some()
+                {
+                    return;
+                }
+                let alive_hp = self
+                    .session
+                    .combat()
+                    .hostiles()
+                    .iter()
+                    .find(|h| h.is_alive())
+                    .map(|h| h.hp());
+                let hp = alive_hp.unwrap_or(0.0);
+                if hp >= self.m3_wolf.target_hp_before {
+                    return;
+                }
+                if self.m3_wolf.fire_damage == 0.0 {
+                    if self.m3_progression("fire_damage") <= self.m3_wolf.fire_xp_before
+                        || self.session.player_progression().mana_xp()
+                            <= self.m3_wolf.mana_xp_before
+                    {
+                        self.fail_current("m3_wolf Fire Bolt did not train fire and mana");
+                        self.advance_after_fail(world, frame);
+                        return;
+                    }
+                    self.m3_wolf.fire_damage = self.m3_wolf.target_hp_before - hp;
+                }
+                self.m3_wolf.target_hp_before = hp;
+                if alive_hp.is_some() {
+                    self.m3_wolf.action_sent = false;
+                    if self.session.lock_id().is_none() {
+                        self.fail_current("m3_wolf live wolf lost lock before death");
+                        self.advance_after_fail(world, frame);
+                    }
+                    return;
+                }
+                self.m3_wolf.corpse_idx = self
+                    .session
+                    .combat()
+                    .hostiles()
+                    .iter()
+                    .find(|h| !h.is_alive())
+                    .map(|h| h.idx);
+                self.m3_wolf.stage = M3WolfStage::Death;
+                self.m3_wolf.action_sent = true;
+            }
+            M3WolfStage::Death => {
+                let Some(idx) = self.m3_wolf.corpse_idx else {
+                    return;
+                };
+                if !self.session.hostile_death_posed(idx) || !self.session.sparkle_visible(world) {
+                    return;
+                }
+                self.m3_wolf.stage = M3WolfStage::LootOpen;
+            }
+            M3WolfStage::LootOpen => {
+                if !self.session.open_first_loot() {
+                    return;
+                }
+                let pile = self.session.ground_pile().expect("opened M3 wolf pile");
+                self.m3_wolf.loot_items = pile.items.len();
+                self.m3_wolf.loot_coin = pile.coin;
+                self.session.take_all_loot(world);
+                self.m3_wolf.stage = M3WolfStage::LootTaken;
+            }
+            M3WolfStage::LootTaken => {
+                if self.session.loot_open()
+                    || self.session.ground_loot_count() != 0
+                    || self.session.sparkle_visible(world)
+                {
+                    return;
+                }
+                self.session.take_all_loot(world);
+                if self.session.ground_loot_count() != 0 {
+                    self.fail_current("m3_wolf loot transferred more than once");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                let hook = self.current_hook().unwrap_or("m3_wolf").to_string();
+                self.write_json(&hook, json!({
+                    "status":"ok", "incoming_damage":self.m3_wolf.incoming_damage,
+                    "mend_healed":self.m3_wolf.mend_healed, "strike_damage":self.m3_wolf.strike_damage,
+                    "fire_bolt_damage":self.m3_wolf.fire_damage, "loot_items":self.m3_wolf.loot_items,
+                    "loot_coin":self.m3_wolf.loot_coin, "one_time_loot_transfer":true
+                }));
+                self.ok_hook(&hook);
+                self.phase = Phase::NextHook;
+            }
+        }
+    }
+
+    fn start_m3_animals(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_held_mob_fixture(
+            world,
+            vec![
+                HeldMobFixture::new(MobId::new("wolf"), 7.0, 0.0),
+                HeldMobFixture::new(MobId::new("deer"), 11.0, 0.0),
+            ],
+        );
+        self.m3_animals = M3AnimalsRun::default();
+        self.phase = Phase::M3AnimalsLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn animal_observation(&self) -> Vec<(String, f64, f64)> {
+        self.session
+            .combat()
+            .hostiles()
+            .iter()
+            .map(|h| (h.mob_id.clone(), h.x, h.z))
+            .collect()
+    }
+
+    fn moving_heading_evidence(&self, from: &[(String, f64, f64)]) -> (bool, bool) {
+        let mut heading_ok = false;
+        let mut locomotion_ok = false;
+        for hostile in self.session.combat().hostiles() {
+            let Some((_, x, z)) = from.iter().find(|(id, _, _)| id == &hostile.mob_id) else {
+                continue;
+            };
+            let dx = hostile.x - x;
+            let dz = hostile.z - z;
+            if dx.hypot(dz) > 0.05 {
+                locomotion_ok = matches!(
+                    hostile.state,
+                    HostileState::Pursuing | HostileState::Fleeing | HostileState::Leashing
+                );
+                let heading = hostile.heading();
+                heading_ok = dx * heading.x() + dz * heading.z() > 0.0;
+            }
+        }
+        (heading_ok, locomotion_ok)
+    }
+
+    fn tick_m3_animals(&mut self, world: &mut World, frame: &Frame) {
+        if frame.time - self.phase_t0 > M3_HOOK_TIMEOUT_S {
+            self.fail_current(&format!(
+                "m3_animals timed out in {:?}",
+                self.m3_animals.stage
+            ));
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        match self.m3_animals.stage {
+            M3AnimalsStage::FrontReady | M3AnimalsStage::RearReady => {
+                let Some(pos) = self.session.player_position() else {
+                    return;
+                };
+                if !self.session.stream().required_ready(pos.horizontal())
+                    || !self.session.fixture_mesh_visible(world)
+                {
+                    return;
+                }
+                if self.session.fixture_encounter_held() {
+                    self.session.start_fixture_encounter();
+                }
+                self.m3_animals.observe_from = self.animal_observation();
+                self.m3_animals.stage = if self.m3_animals.stage == M3AnimalsStage::FrontReady {
+                    M3AnimalsStage::FrontObserve
+                } else {
+                    M3AnimalsStage::RearObserve
+                };
+            }
+            M3AnimalsStage::FrontObserve | M3AnimalsStage::RearObserve => {
+                let (heading, locomotion) =
+                    self.moving_heading_evidence(&self.m3_animals.observe_from);
+                if !heading || !locomotion {
+                    return;
+                }
+                if self.m3_animals.stage == M3AnimalsStage::FrontObserve {
+                    self.m3_animals.front_heading_ok = heading;
+                    self.m3_animals.front_locomotion_ok = locomotion;
+                    self.session.rearm_held_mob_fixture(
+                        world,
+                        vec![
+                            HeldMobFixture::new(MobId::new("wolf"), -7.0, 0.0),
+                            HeldMobFixture::new(MobId::new("deer"), -11.0, 0.0),
+                        ],
+                    );
+                    self.m3_animals.stage = M3AnimalsStage::RearReady;
+                } else {
+                    self.m3_animals.rear_heading_ok = heading;
+                    self.m3_animals.rear_locomotion_ok = locomotion;
+                    self.session.rearm_held_mob_fixture(
+                        world,
+                        vec![HeldMobFixture::new(MobId::new("deer"), 8.0, 0.0)],
+                    );
+                    self.m3_animals.stage = M3AnimalsStage::TabDeer;
+                    self.m3_animals.action_sent = false;
+                }
+            }
+            M3AnimalsStage::TabDeer => {
+                if self.session.fixture_encounter_held() {
+                    self.session.start_fixture_encounter();
+                    self.m3_animals.action_sent = false;
+                    return;
+                }
+                if !self.m3_animals.action_sent || self.session.lock_id().is_none() {
+                    return;
+                }
+                let hostile = self
+                    .session
+                    .combat()
+                    .hostiles()
+                    .iter()
+                    .find(|h| Some(h.idx) == self.session.lock_id())
+                    .expect("M3 deer lock");
+                if hostile.mob_id != "deer" {
+                    self.fail_current("m3_animals Tab did not lock deer");
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                self.m3_animals.deer_hp_before = hostile.hp();
+                self.m3_animals.stage = M3AnimalsStage::DamageDeer;
+                self.m3_animals.action_sent = false;
+            }
+            M3AnimalsStage::DamageDeer => {
+                if !self.m3_animals.action_sent
+                    || self.session.combat().casting_action_id().is_some()
+                {
+                    return;
+                }
+                let deer = self
+                    .session
+                    .combat()
+                    .hostiles()
+                    .iter()
+                    .find(|h| h.mob_id == "deer")
+                    .expect("M3 deer");
+                if deer.hp() >= self.m3_animals.deer_hp_before {
+                    return;
+                }
+                if deer.state != HostileState::Alerted
+                    && deer.state != HostileState::Pursuing
+                    && deer.state != HostileState::Attacking
+                {
+                    return;
+                }
+                self.m3_animals.stage = M3AnimalsStage::Retaliation;
+            }
+            M3AnimalsStage::Retaliation => {
+                let deer = self
+                    .session
+                    .combat()
+                    .hostiles()
+                    .iter()
+                    .find(|h| h.mob_id == "deer")
+                    .expect("M3 deer");
+                if deer.flee_threat().is_some() || deer.target().is_none() {
+                    return;
+                }
+                self.write_json("m3_animals", json!({
+                    "status":"ok", "front":{"heading":self.m3_animals.front_heading_ok,"locomotion":self.m3_animals.front_locomotion_ok},
+                    "rear":{"heading":self.m3_animals.rear_heading_ok,"locomotion":self.m3_animals.rear_locomotion_ok},
+                    "deer_damage":self.m3_animals.deer_hp_before-deer.hp(), "immediate_retaliation":true
+                }));
+                self.ok_hook("m3_animals");
+                self.phase = Phase::NextHook;
+            }
+        }
     }
 
     fn start_combat(&mut self, world: &mut World, frame: &Frame) {
@@ -3671,13 +4201,41 @@ impl Driver {
                 return;
             }
         }
-        self.combat_tab_sent = true;
+        if self.session.fixture_encounter_held() {
+            self.session.start_fixture_encounter();
+            let Some(pos) = self.session.player_position() else {
+                return;
+            };
+            let target = self
+                .session
+                .combat()
+                .hostiles()
+                .iter()
+                .map(|hostile| (hostile.x, hostile.z))
+                .min_by(|a, b| {
+                    let da = (a.0 - pos.x).hypot(a.1 - pos.z);
+                    let db = (b.0 - pos.x).hypot(b.1 - pos.z);
+                    da.total_cmp(&db)
+                });
+            let Some((target_x, target_z)) = target else {
+                return;
+            };
+            let dx = target_x - pos.x;
+            let dz = target_z - pos.z;
+            self.session.combat_mut().press_tab(pos.x, pos.z, dx, dz);
+            self.combat_tab_sent = true;
+        }
         if self.session.lock_id().is_none() {
             if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                 self.fail_current("combat: lock unset after Tab");
                 self.advance_after_fail(world, frame);
             }
             return;
+        }
+        self.combat_tab_sent = true;
+        if self.session.player_hp() > self.session.player_hp_max() {
+            let hp_max = self.session.player_hp_max();
+            self.session.combat_mut().set_player_hp(hp_max);
         }
         if self.current_hook() == Some("cast_bar") {
             self.tick_cast_bar(world, frame);
@@ -3752,9 +4310,9 @@ impl Driver {
             .find(|h| Some(h.idx) == self.session.lock_id())
             .map(|h| h.max_hp())
             .unwrap_or(hp);
-        if name != "wolf-spider" {
+        if name != "Wolf" {
             self.fail_current(&format!(
-                "combat: want wolf-spider after auto, got {name} {hp}/{hp_max}"
+                "combat: want Wolf after auto, got {name} {hp}/{hp_max}"
             ));
             self.advance_after_fail(world, frame);
             return;
@@ -3779,7 +4337,9 @@ impl Driver {
                 return;
             }
             let log = self.session.combat_log();
-            let has_out = log.iter().any(|l| l.starts_with("You hit "));
+            let has_out = log
+                .iter()
+                .any(|l| l.starts_with("You ") && l.contains(" for "));
             let has_in = log.iter().any(|l| l.contains(" hits you for "));
             if !has_out || !has_in {
                 if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
@@ -3820,7 +4380,10 @@ impl Driver {
                     facing.x as f64,
                     facing.z as f64,
                 );
-                let frac = self.session.combat().verb_cd_frac(Action::Strike);
+                let frac = self
+                    .session
+                    .combat()
+                    .action_cd_frac(&orrun::gamedata::ActionId::new("strike"));
                 if !armed || frac <= 0.0 {
                     if frame.time - self.phase_t0 > STAND_TIMEOUT_S {
                         self.fail_current("combat: in-range Strike never started CD");
@@ -3833,7 +4396,10 @@ impl Driver {
             }
             if !self.combat_cd_sweep_sent {
                 let since = frame.time - self.combat_cd_sweep_at.unwrap();
-                let frac = self.session.combat().verb_cd_frac(Action::Strike);
+                let frac = self
+                    .session
+                    .combat()
+                    .action_cd_frac(&orrun::gamedata::ActionId::new("strike"));
                 if since < 2.0 {
                     return;
                 }
@@ -4028,6 +4594,17 @@ impl Driver {
     }
 
     fn tick_controls(&mut self, world: &mut World, frame: &Frame) {
+        if self.session.fixture_encounter_held()
+            && self.session.state() == SessionState::World
+            && self
+                .session
+                .player_position()
+                .is_some_and(|pos| self.session.stream().required_ready(pos.horizontal()))
+            && self.session.fixture_mesh_visible(world)
+        {
+            self.session.start_fixture_encounter();
+            return;
+        }
         if frame.time - self.phase_t0 > 8.0 {
             self.fail_current(&format!(
                 "controls timed out in {:?} lock={:?} auto={:?} strike_armed={}",
@@ -4046,21 +4623,24 @@ impl Driver {
                 }
             }
             ControlsStage::Strike => {
-                if !self.session.combat().strike_is_armed() {
-                    self.fail_current("controls: key 1 on L1 Martial did not arm Strike");
+                if self
+                    .session
+                    .combat()
+                    .action_cd_frac(&orrun::gamedata::ActionId::new("strike"))
+                    <= 0.0
+                {
+                    self.fail_current("controls: key 1 did not execute GameData strike");
                     self.advance_after_fail(world, frame);
                     return;
                 }
                 self.controls_stage = ControlsStage::WaitHit;
             }
             ControlsStage::WaitHit => match self.session.first_auto_hit() {
-                Some(16) => {
+                Some(8) => {
                     self.controls_stage = ControlsStage::Bash;
                 }
                 Some(got) => {
-                    self.fail_current(&format!(
-                        "controls: Strike next swing want mitigated 16, got {got}"
-                    ));
+                    self.fail_current(&format!("controls: GameData strike want 8, got {got}"));
                     self.advance_after_fail(world, frame);
                 }
                 None => {}
@@ -4091,9 +4671,14 @@ impl Driver {
                 self.controls_stage = ControlsStage::Ember;
             }
             ControlsStage::Ember => {
-                if !self.session.combat().ember_is_started() {
+                if self
+                    .session
+                    .combat()
+                    .casting_action_id()
+                    .is_none_or(|id| id.as_str() != "fire_bolt")
+                {
                     self.fail_current(
-                        "controls: L1 Martial key 5 must start Ember without padding Arcane",
+                        "controls: key 5 must start GameData fire_bolt without rank gating",
                     );
                     self.advance_after_fail(world, frame);
                     return;

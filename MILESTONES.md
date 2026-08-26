@@ -58,7 +58,7 @@ Exit criteria:
 - Training three equal starting skills for the same total number of uses produces more total level gains than training one skill alone.
 - No live combat integration is required yet; the progression domain can be exercised headlessly.
 
-## M2 — Canonical action resolution — NEXT
+## M2 — Canonical action resolution — DONE (headless)
 
 Build the new combat heart as a headless, typed pipeline before connecting controls or presentation.
 
@@ -80,9 +80,11 @@ Exit criteria:
 - Player and mob actions use the same resolver.
 - No damage or healing formula is duplicated in presentation or actor-specific code.
 
-## M3 — First live vertical replacement
+## M3 — First live vertical replacement — DONE
 
 Replace the smallest complete live combat path while preserving targeting, hostile AI movement, animation hooks, HUD shells, death presentation, and loot.
+
+Verified complete: the combined release report passed `m3_wolf` and `m3_animals` with no failures or skips, alongside full deterministic headless coverage and GameData A/B validation. The original death/respawn exit behavior remains separately verified; this combined report did not add a new death/respawn hook.
 
 Deliverables:
 
@@ -93,6 +95,13 @@ Deliverables:
 - Connect typed result events to existing hit/hurt/death animation, combat log, sound, hit flash, corpse, and loot presentation.
 - Remove discipline/rank gating from the migrated path.
 - Keep tab/click targeting and existing hostile locomotion/leash behavior unless a concrete bug requires a focused correction.
+- Unify ambient animals with canonical mobs: fauna owns deterministic habitat spawning and presentation entities; canonical actors own faction/mode policy, combat movement, retaliation, death, and loot.
+- Author predator/active, prey/passive, and citizen/passive animals in GameData and remove fauna-local hunt/catch deletion.
+- Add fixed, deterministic, staggered perception rolls: front/side/rear visual likelihood, angle-independent hearing likelihood, and brief refreshed awareness.
+- Make active actors pursue detected hostiles and passive actors flee only from detected active, hostile, non-neutral actors; damage must immediately cancel flight and establish retaliation against the attacker.
+- Author required per-mob speed variance (maximum ±20%) and endurance; sample one stable deterministic speed multiplier per actor instance, with predators slightly faster and lower-endurance than prey.
+- Drain endurance only during actual pursuit/flight movement; keep both behaviors moving at a centralized slower exhausted speed and recover endurance outside sprint movement.
+- Keep perception, threat, heading, movement, endurance, and behavior in canonical actor ownership; fauna remains presentation-only while canonical AI is engaged.
 
 Exit criteria:
 
@@ -100,8 +109,11 @@ Exit criteria:
 - Headless/live inspection proves the three migrated actions train their effect skills, incoming damage trains HP, and mana spend trains mana. Player-facing progression feedback belongs to M4.
 - Editing an action magnitude or assignment in GameData changes live behavior without a Rust action-specific edit.
 - The migrated path contains no read of player level, XP, attributes, disciplines, or ranks.
+- Deterministic tests cover staggered cadence, front/side/rear vision, hearing, awareness expiry/refresh, active pursuit, passive-flight exclusions, immediate retaliation, and stable bounded per-instance speed variance.
+- Tests prove endurance drains only on actual pursuit/flight movement, exhausted actors continue more slowly, recovery occurs outside sprint movement, and existing leash/awareness loss ends chases.
+- Live inspection confirms predator/prey approaches from front and rear, correct pursuit/flight/retaliation transitions, heading and locomotion synchronization, and no fauna-side gameplay decisions.
 
-## M4 — Skill progression becomes visible and persistent
+## M4 — Skill progression becomes visible and persistent — NEXT
 
 Turn the invisible domain model into a player reward loop.
 

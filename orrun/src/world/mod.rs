@@ -40,14 +40,14 @@ pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use cave::{CaveError, CaveLayer, CAVE_LIVE_OPEN_M};
 pub use chunk_mesh::TerrainChunkBuilder;
-pub use combat_layer::{first_fixture_auto_hit, CombatLayer, CombatSfx};
+pub use combat_layer::{first_fixture_auto_hit, CombatLayer, CombatSfx, HeldMobFixture};
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,
 };
 pub use dungeon::{DungeonError, DungeonLayer, LIVE_OPEN_M};
 pub use entry::{best_settlement_entry, resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
-pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaRole, FaunaSpec};
+pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaSpec};
 pub use footprint::{BuildingIndex, BuildingPlot, CastlePlot, CavePlot, DungeonPlot, HousePlot};
 pub use look::{install_daylight, install_materials};
 pub use paths::PathLayer;
@@ -55,7 +55,9 @@ pub use ponds::{Pond, PondField, PondWindow, SharedPonds, COVERS_M, REBUILD_M, S
 pub use scatter::{
     Fall, GroundCover, PropClass, ScatterCatalog, ScatterError, ScatterLayer, PROP_CLASSES,
 };
-pub use session::{Locomotion, SessionError, SessionState, WalkInput, WorldSession};
+pub use session::{
+    HeldFixtureRequest, Locomotion, SessionError, SessionState, WalkInput, WorldSession,
+};
 pub use settlement::{HamletStand, HouseDoor, SettlementError, SettlementLayer};
 pub use sites::{
     expected_overland_prop_count, plan_overland_sites, OverlandSite, SiteKind,

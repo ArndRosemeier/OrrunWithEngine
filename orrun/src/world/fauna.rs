@@ -45,12 +45,9 @@ const REFRESH_S: f32 = 0.5;
 const SLOPE_STEP_M: f64 = 4.0;
 const MOVE_ALIGN_DEG: f32 = 40.0;
 const TURN_GRAZE_DEG: f32 = 60.0;
-const TURN_FLEE_DEG: f32 = 160.0;
-const TURN_CHASE_DEG: f32 = 126.0;
 const ANIM_IDLE: f32 = 0.65;
 const ANIM_EAT: f32 = 0.55;
 const ANIM_WALK: f32 = 0.48;
-const ANIM_RUN: f32 = 0.62;
 const FAUNA_SALT: u64 = 0xF4A1_A001;
 /// Wildlife stays this far past the packed-house disk.
 const HAMLET_CLEAR_M: f32 = 24.0;
@@ -85,39 +82,11 @@ pub enum FaunaError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FaunaRole {
-    Grazer,
-    Predator,
-    Livestock,
-    Domestic,
-}
-
-impl FaunaRole {
-    fn parse(raw: &str) -> Result<Self, FaunaError> {
-        match raw {
-            "grazer" => Ok(Self::Grazer),
-            "predator" => Ok(Self::Predator),
-            "livestock" => Ok(Self::Livestock),
-            "domestic" => Ok(Self::Domestic),
-            other => Err(FaunaError::Catalog(format!("unknown role '{other}'"))),
-        }
-    }
-
-    fn is_prey(self) -> bool {
-        matches!(self, Self::Grazer | Self::Livestock)
-    }
-
-    fn is_predator(self) -> bool {
-        matches!(self, Self::Predator)
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct FaunaSpec {
     pub id: String,
     pub source: String,
-    pub role: FaunaRole,
+    pub mob_id: crate::gamedata::MobId,
     pub wilderness_spawn: bool,
     pub footprint: f32,
     pub scale: f32,
@@ -127,26 +96,17 @@ pub struct FaunaSpec {
     pub biome_weight: [f32; BIOME_COUNT],
     pub flock_min: u32,
     pub flock_max: u32,
-    pub walk_speed: f32,
-    pub run_speed: f32,
-    pub flee_radius: f32,
-    pub hunt_range: f32,
-    pub catch_radius: f32,
+    /// Ambient presentation speed used only while an unengaged animal roams.
+    pub roam_speed: f32,
     pub anim_idle: String,
     pub anim_walk: String,
     pub anim_run: String,
     pub anim_eat: String,
+    pub anim_attack: String,
+    pub anim_death: String,
 }
 
 impl FaunaSpec {
-    pub fn is_prey(&self) -> bool {
-        self.role.is_prey()
-    }
-
-    pub fn is_predator(&self) -> bool {
-        self.role.is_predator()
-    }
-
     fn biome_weight(&self, biome: Biome) -> f32 {
         self.biome_weight[biome as u8 as usize]
     }
@@ -205,15 +165,15 @@ impl FaunaCatalog {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Graze,
-    Flee,
-    Patrol,
-    Chase,
-    Cooldown,
     Eat,
+    Engaged,
+    Attack,
+    Dead,
 }
 
 struct Agent {
-    id: u32,
+    actor_id: Option<crate::combat::ActorId>,
+    spawn_seed: crate::combat::SpawnSeed,
     entity: EntityId,
     spec_i: usize,
     cell: (i32, i32),
@@ -225,9 +185,6 @@ struct Agent {
     waypoint: GlobalXZ,
     hold_left: f32,
     eat_left: f32,
-    cooldown_left: f32,
-    flee_left: f32,
-    flee_retarget: f32,
     walk_deadline: f32,
     state_time: f32,
     clip: String,
@@ -268,8 +225,43 @@ impl std::fmt::Debug for FaunaLayer {
 }
 
 impl FaunaLayer {
-    pub fn install(world_seed: i32) -> Result<Self, FaunaError> {
+    pub fn install(
+        world_seed: i32,
+        game_data: &crate::gamedata::GameData,
+    ) -> Result<Self, FaunaError> {
         let catalog = FaunaCatalog::load()?;
+        for spec in catalog.specs() {
+            let mob = game_data.mob(&spec.mob_id).ok_or_else(|| {
+                FaunaError::Catalog(format!(
+                    "species '{}' references unknown mob {}",
+                    spec.id, spec.mob_id
+                ))
+            })?;
+            if mob.species_id().map(|id| id.as_str()) != Some(spec.id.as_str()) {
+                return Err(FaunaError::Catalog(format!(
+                    "species '{}' and mob {} do not link to each other",
+                    spec.id, spec.mob_id
+                )));
+            }
+        }
+        for mob in game_data
+            .mobs()
+            .iter()
+            .filter(|mob| mob.species_id().is_some())
+        {
+            let species_id = mob.species_id().expect("filtered species");
+            if !catalog
+                .specs()
+                .iter()
+                .any(|spec| spec.id == species_id.as_str())
+            {
+                return Err(FaunaError::Catalog(format!(
+                    "animal mob {} references missing species {}",
+                    mob.id(),
+                    species_id
+                )));
+            }
+        }
         let models = (0..catalog.specs.len()).map(|_| ModelSlot::Idle).collect();
         let mut layer = Self {
             catalog,
@@ -323,6 +315,8 @@ impl FaunaLayer {
             spec.anim_walk.clone(),
             spec.anim_run.clone(),
             spec.anim_eat.clone(),
+            spec.anim_attack.clone(),
+            spec.anim_death.clone(),
         ];
         let root = root.to_path_buf();
         let job = std::thread::Builder::new()
@@ -367,14 +361,84 @@ impl FaunaLayer {
         self.last_died
     }
 
-    pub fn clear(&mut self, world: &mut World) -> EngineResult<()> {
+    pub fn register_canonical_actors(&mut self, combat: &mut crate::combat::WorldCombat) {
+        for agent in &mut self.agents {
+            if agent.actor_id.is_some() {
+                continue;
+            }
+            let spec = &self.catalog.specs[agent.spec_i];
+            let mob = combat.mob_sheet(spec.mob_id.as_str());
+            let idx = combat.next_actor_runtime_index();
+            let mut actor = crate::combat::WorldHostile::from_sheet(
+                idx,
+                agent.pos.x,
+                agent.pos.z,
+                &mob,
+                spec.mob_id.as_str(),
+                agent.pos.x,
+                agent.pos.z,
+            );
+            actor.entity = Some(agent.entity);
+            let actor_id = combat.register_hostile(
+                actor,
+                agent.spawn_seed,
+                crate::combat::CanonicalHeading::from_degrees(agent.yaw),
+            );
+            agent.actor_id = Some(actor_id);
+        }
+    }
+
+    pub fn sync_canonical_actors(&mut self, combat: &crate::combat::WorldCombat) {
+        for agent in &mut self.agents {
+            let Some(actor_id) = agent.actor_id else {
+                continue;
+            };
+            let actor = combat
+                .hostiles()
+                .iter()
+                .find(|actor| actor.actor_id() == actor_id)
+                .unwrap_or_else(|| panic!("fauna actor {actor_id:?} missing from canonical arena"));
+            match actor.state {
+                crate::combat::types::HostileState::Idle
+                | crate::combat::types::HostileState::Alerted => {
+                    if matches!(agent.state, State::Engaged | State::Attack) {
+                        agent.state = State::Graze;
+                        agent.walking = false;
+                    }
+                }
+                crate::combat::types::HostileState::Pursuing
+                | crate::combat::types::HostileState::Fleeing
+                | crate::combat::types::HostileState::Leashing => {
+                    sync_canonical_pose(agent, actor);
+                    agent.state = State::Engaged;
+                    agent.walking = true;
+                }
+                crate::combat::types::HostileState::Attacking => {
+                    sync_canonical_pose(agent, actor);
+                    agent.state = State::Attack;
+                    agent.walking = false;
+                }
+                crate::combat::types::HostileState::Dead => {
+                    sync_canonical_pose(agent, actor);
+                    agent.state = State::Dead;
+                    agent.walking = false;
+                }
+            }
+        }
+    }
+
+    pub fn clear(&mut self, world: &mut World) -> Result<Vec<crate::combat::ActorId>, FaunaError> {
+        let mut deactivated = Vec::new();
         for agent in self.agents.drain(..) {
+            if let Some(actor_id) = agent.actor_id {
+                deactivated.push(actor_id);
+            }
             world.despawn(agent.entity);
         }
         self.occupied.clear();
         self.refresh = 0.0;
         self.spawn_backlog = true;
-        Ok(())
+        Ok(deactivated)
     }
 
     /// Spawn, despawn, and step animals. Never blocks.
@@ -389,6 +453,7 @@ impl FaunaLayer {
         focus: GlobalXZ,
         player: GlobalXZ,
         dt: f32,
+        combat: &mut crate::combat::WorldCombat,
     ) -> Result<(), FaunaError> {
         self.last_born = 0;
         self.last_died = 0;
@@ -397,11 +462,28 @@ impl FaunaLayer {
         self.refresh += dt;
         if self.spawn_backlog || self.refresh >= REFRESH_S || self.agents.is_empty() {
             self.refresh = 0.0;
-            self.spawn_backlog = self
-                .refresh_population(world, surface, ponds, plots, hamlets, &ground, focus)?
-                || self.busy();
+            self.spawn_backlog = self.refresh_population(
+                world, surface, ponds, plots, hamlets, &ground, focus, combat,
+            )? || self.busy();
         }
-        self.tick(world, surface, ponds, plots, hamlets, &ground, player, dt)?;
+        self.register_canonical_actors(combat);
+        self.sync_canonical_actors(combat);
+        self.tick(
+            world, surface, ponds, plots, hamlets, &ground, player, dt, combat,
+        )?;
+        for agent in &self.agents {
+            if let Some(actor_id) = agent.actor_id {
+                let engaged = combat
+                    .hostiles()
+                    .iter()
+                    .find(|actor| actor.actor_id() == actor_id)
+                    .expect("registered fauna actor")
+                    .is_engaged();
+                if !engaged {
+                    combat.update_idle_actor_position(actor_id, agent.pos.x, agent.pos.z);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -414,13 +496,16 @@ impl FaunaLayer {
         hamlets: &[HamletStand],
         ground: &ContactSnapshot,
         focus: GlobalXZ,
+        combat: &mut crate::combat::WorldCombat,
     ) -> Result<bool, FaunaError> {
         let drop_r = DESPAWN_M;
         let mut i = 0;
         while i < self.agents.len() {
             let at = self.agents[i].pos.horizontal();
             if xz_dist(at, focus) > drop_r || in_hamlet(hamlets, at) {
-                self.despawn_at(world, i);
+                if let Some(actor_id) = self.despawn_at(world, i) {
+                    combat.deactivate_actors(&[actor_id]);
+                }
             } else {
                 i += 1;
             }
@@ -587,20 +672,16 @@ impl FaunaLayer {
             .expect("spawn_agent requires a ready mesh");
         let scale = self.catalog.specs[spec_i].scale;
         let idle = self.catalog.specs[spec_i].anim_idle.clone();
-        let predator = self.catalog.specs[spec_i].is_predator();
         let place = place_of(world, pos, yaw, scale)?;
         let entity = world.spawn_animated_shared(model, place)?;
         world.play_animation(entity, &idle)?;
         world.set_animation_speed(entity, ANIM_IDLE)?;
         let id = self.next_id;
         self.next_id += 1;
-        let state = if predator {
-            State::Patrol
-        } else {
-            State::Graze
-        };
+        let state = State::Graze;
         self.agents.push(Agent {
-            id,
+            actor_id: None,
+            spawn_seed: crate::combat::SpawnSeed::new(self.seed ^ FAUNA_SALT ^ u64::from(id)),
             entity,
             spec_i,
             cell,
@@ -610,15 +691,8 @@ impl FaunaLayer {
             state,
             walking: false,
             waypoint: pos.horizontal(),
-            hold_left: if predator {
-                2.0
-            } else {
-                6.0 + rng_unit_hint(id) * 10.0
-            },
+            hold_left: 6.0 + rng_unit_hint(id) * 10.0,
             eat_left: 0.0,
-            cooldown_left: 0.0,
-            flee_left: 0.0,
-            flee_retarget: 0.0,
             walk_deadline: 20.0,
             state_time: 0.0,
             clip: idle,
@@ -628,7 +702,7 @@ impl FaunaLayer {
         Ok(())
     }
 
-    fn despawn_at(&mut self, world: &mut World, index: usize) {
+    fn despawn_at(&mut self, world: &mut World, index: usize) -> Option<crate::combat::ActorId> {
         let agent = self.agents.swap_remove(index);
         world.despawn(agent.entity);
         self.last_died += 1;
@@ -638,12 +712,7 @@ impl FaunaLayer {
                 self.occupied.remove(&agent.cell);
             }
         }
-    }
-
-    fn despawn_id(&mut self, world: &mut World, id: u32) {
-        if let Some(i) = self.agents.iter().position(|a| a.id == id) {
-            self.despawn_at(world, i);
-        }
+        agent.actor_id
     }
 
     fn tick(
@@ -656,6 +725,7 @@ impl FaunaLayer {
         ground: &ContactSnapshot,
         player: GlobalXZ,
         dt: f32,
+        combat: &crate::combat::WorldCombat,
     ) -> EngineResult<()> {
         if dt <= 0.0 {
             for i in 0..self.agents.len() {
@@ -664,7 +734,6 @@ impl FaunaLayer {
             return Ok(());
         }
 
-        let mut caught: Vec<u32> = Vec::new();
         let n = self.agents.len();
         for i in 0..n {
             let catch = self.step_agent(
@@ -677,13 +746,12 @@ impl FaunaLayer {
                 player,
                 world.collision(),
                 dt,
+                combat,
             );
-            if let Some(id) = catch {
-                caught.push(id);
-            }
-        }
-        for id in caught {
-            self.despawn_id(world, id);
+            assert!(
+                catch.is_none(),
+                "fauna presentation cannot catch or kill actors"
+            );
         }
 
         for i in 0..self.agents.len() {
@@ -704,134 +772,62 @@ impl FaunaLayer {
         player: GlobalXZ,
         collision: &CollisionWorld,
         dt: f32,
+        combat: &crate::combat::WorldCombat,
     ) -> Option<u32> {
         self.agents[i].state_time += dt;
-        let spec_i = self.agents[i].spec_i;
-        let predator = self.catalog.specs[spec_i].is_predator();
-        let catch = if predator {
-            self.tick_predator(i, dt)
-        } else {
-            self.tick_prey(i, player, dt);
-            None
-        };
+        if self.agents[i].state == State::Dead {
+            return None;
+        }
+        let _ = player;
+        if let Some(actor_id) = self.agents[i].actor_id {
+            let engaged = combat
+                .hostiles()
+                .iter()
+                .find(|actor| actor.actor_id() == actor_id)
+                .expect("registered fauna actor")
+                .is_engaged();
+            if engaged {
+                return None;
+            }
+        }
+        self.tick_roam(i, dt);
         self.integrate(i, surface, ponds, plots, hamlets, ground, collision, dt);
-        catch
+        None
     }
 
-    fn tick_prey(&mut self, i: usize, player: GlobalXZ, dt: f32) {
-        let flee_r = self.catalog.specs[self.agents[i].spec_i].flee_radius;
-        let threat = self.nearest_threat(i, player, flee_r);
-        if let Some(at) = threat {
-            if self.agents[i].state != State::Flee {
-                self.agents[i].state = State::Flee;
-                self.agents[i].state_time = 0.0;
-                self.agents[i].flee_left = self.agents[i].rng.range(5.0, 9.0);
-                self.agents[i].flee_retarget = 0.0;
-                self.agents[i].walking = true;
-                self.agents[i].hold_left = 0.0;
-            }
-            self.agents[i].flee_retarget -= dt;
-            if self.agents[i].flee_retarget <= 0.0 {
-                self.retarget_flee(i, at);
-                self.agents[i].flee_retarget = self.agents[i].rng.range(1.2, 2.4);
-            }
-            return;
-        }
-
-        if self.agents[i].state == State::Flee {
-            if self.agents[i].state_time > self.agents[i].flee_left
-                || (self.agents[i].state_time > 3.0 && self.near_waypoint(i, 3.0))
-            {
-                self.agents[i].state = State::Graze;
-                self.idle_range(i, 8.0, 18.0);
-            }
-            return;
-        }
-
+    fn tick_roam(&mut self, i: usize, dt: f32) {
         if self.agents[i].state == State::Eat {
             self.agents[i].eat_left -= dt;
-            self.agents[i].walking = false;
             if self.agents[i].eat_left <= 0.0 {
                 self.agents[i].state = State::Graze;
-                self.idle_range(i, 5.0, 14.0);
+                self.idle_range(i, 4.0, 10.0);
             }
             return;
         }
-
-        if self.agents[i].state != State::Graze {
-            self.agents[i].state = State::Graze;
-            self.idle_range(i, 4.0, 10.0);
-            return;
-        }
-
         if self.agents[i].walking {
-            if self.near_waypoint(i, 2.2) {
-                self.finish_walk(i);
-            }
-            return;
-        }
-
-        self.agents[i].hold_left -= dt;
-        if self.agents[i].hold_left > 0.0 {
-            return;
-        }
-        self.roll_graze(i);
-    }
-
-    fn tick_predator(&mut self, i: usize, dt: f32) -> Option<u32> {
-        if self.agents[i].cooldown_left > 0.0 {
-            self.agents[i].state = State::Cooldown;
-            self.agents[i].cooldown_left -= dt;
-            self.agents[i].walking = false;
-            return None;
-        }
-
-        let hunt = self.catalog.specs[self.agents[i].spec_i].hunt_range;
-        let catch_r = self.catalog.specs[self.agents[i].spec_i].catch_radius;
-        if let Some((prey_id, at, dist)) = self.nearest_prey(i, hunt) {
-            if dist <= catch_r {
-                self.agents[i].cooldown_left = self.agents[i].rng.range(6.0, 12.0);
-                self.agents[i].state = State::Cooldown;
-                self.agents[i].walking = false;
-                return Some(prey_id);
-            }
-            self.agents[i].state = State::Chase;
-            self.agents[i].walking = true;
-            self.agents[i].waypoint = at;
-            self.face_waypoint(i);
-            return None;
-        }
-
-        if self.agents[i].state == State::Chase {
-            self.agents[i].state = State::Patrol;
-            self.idle_range(i, 3.0, 8.0);
-            return None;
-        }
-
-        if self.agents[i].state != State::Patrol && self.agents[i].state != State::Graze {
-            self.agents[i].state = State::Patrol;
-        }
-
-        if self.agents[i].walking {
-            if self.near_waypoint(i, 2.5)
+            if self.near_waypoint(i, 1.0)
                 || self.agents[i].state_time > self.agents[i].walk_deadline
             {
                 self.agents[i].walking = false;
-                self.idle_range(i, 5.0, 14.0);
                 self.agents[i].state_time = 0.0;
+                if self.agents[i].rng.unit() < 0.25 {
+                    self.agents[i].state = State::Eat;
+                    self.agents[i].eat_left = self.agents[i].rng.range(3.0, 8.0);
+                } else {
+                    self.idle_range(i, 4.0, 10.0);
+                }
             }
-            return None;
+            return;
         }
-
         self.agents[i].hold_left -= dt;
         if self.agents[i].hold_left <= 0.0 {
-            if self.agents[i].rng.unit() < 0.4 {
-                self.idle_range(i, 4.0, 12.0);
-            } else {
-                self.begin_patrol(i);
-            }
+            self.agents[i].state = State::Graze;
+            self.agents[i].walking = true;
+            self.agents[i].waypoint = offset_xz(&mut self.agents[i], 18.0);
+            self.agents[i].walk_deadline = self.agents[i].rng.range(10.0, 20.0);
+            self.agents[i].state_time = 0.0;
+            self.face_waypoint(i);
         }
-        None
     }
 
     fn integrate(
@@ -846,17 +842,9 @@ impl FaunaLayer {
         dt: f32,
     ) {
         let spec_i = self.agents[i].spec_i;
-        let walk_speed = self.catalog.specs[spec_i].walk_speed;
-        let run_speed = self.catalog.specs[spec_i].run_speed;
-        let idle = self.agents[i].state == State::Eat
-            || (!self.agents[i].walking
-                && self.agents[i].state != State::Flee
-                && self.agents[i].state != State::Chase);
-        let turn = match self.agents[i].state {
-            State::Flee => TURN_FLEE_DEG,
-            State::Chase => TURN_CHASE_DEG,
-            _ => TURN_GRAZE_DEG,
-        };
+        let roam_speed = self.catalog.specs[spec_i].roam_speed;
+        let idle = self.agents[i].state == State::Eat || !self.agents[i].walking;
+        let turn = TURN_GRAZE_DEG;
         if !idle {
             self.face_waypoint(i);
         }
@@ -873,11 +861,7 @@ impl FaunaLayer {
             return;
         }
 
-        let speed = if self.agents[i].state == State::Flee || self.agents[i].state == State::Chase {
-            run_speed
-        } else {
-            walk_speed
-        };
+        let speed = roam_speed;
         let heading = Heading::from_degrees(self.agents[i].yaw)
             .map(|h| h.direction())
             .unwrap_or(Vec2::Y);
@@ -926,72 +910,6 @@ impl FaunaLayer {
         self.agents[i].desired_yaw = wrap_deg(self.agents[i].yaw + fidget);
     }
 
-    fn begin_eat(&mut self, i: usize) {
-        self.agents[i].state = State::Eat;
-        self.agents[i].walking = false;
-        self.agents[i].eat_left = self.agents[i].rng.range(12.0, 28.0);
-    }
-
-    fn begin_walk(&mut self, i: usize) {
-        self.agents[i].walking = true;
-        self.agents[i].hold_left = 0.0;
-        let radius = self.agents[i].rng.range(5.0, 12.0);
-        self.agents[i].waypoint = offset_xz(&mut self.agents[i], radius);
-        self.face_waypoint(i);
-    }
-
-    fn begin_patrol(&mut self, i: usize) {
-        self.agents[i].state = State::Patrol;
-        self.agents[i].walking = true;
-        self.agents[i].hold_left = 0.0;
-        self.agents[i].state_time = 0.0;
-        self.agents[i].walk_deadline = self.agents[i].rng.range(14.0, 28.0);
-        let radius = self.agents[i].rng.range(10.0, 22.0);
-        self.agents[i].waypoint = offset_xz(&mut self.agents[i], radius);
-        self.face_waypoint(i);
-    }
-
-    fn finish_walk(&mut self, i: usize) {
-        self.agents[i].walking = false;
-        let roll = self.agents[i].rng.unit();
-        if roll < 0.62 {
-            self.begin_eat(i);
-        } else if roll < 0.92 {
-            self.idle_range(i, 8.0, 22.0);
-        } else {
-            self.begin_walk(i);
-        }
-    }
-
-    fn roll_graze(&mut self, i: usize) {
-        let roll = self.agents[i].rng.unit();
-        if roll < 0.55 {
-            self.begin_eat(i);
-        } else if roll < 0.82 {
-            self.idle_range(i, 6.0, 16.0);
-        } else {
-            self.begin_walk(i);
-        }
-    }
-
-    fn retarget_flee(&mut self, i: usize, threat: GlobalXZ) {
-        let here = self.agents[i].pos.horizontal();
-        let mut away = Vec2::new((here.x - threat.x) as f32, (here.z - threat.z) as f32);
-        if away.length_squared() < 0.01 {
-            away = Vec2::new(
-                self.agents[i].rng.range(-1.0, 1.0),
-                self.agents[i].rng.range(-1.0, 1.0),
-            );
-        }
-        let dir = away.normalize_or_zero();
-        let dist = self.agents[i].rng.range(16.0, 28.0) as f64;
-        self.agents[i].waypoint = GlobalXZ::at(
-            here.x + f64::from(dir.x) * dist,
-            here.z + f64::from(dir.y) * dist,
-        );
-        self.face_waypoint(i);
-    }
-
     fn face_waypoint(&mut self, i: usize) {
         let here = self.agents[i].pos.horizontal();
         let to = Vec2::new(
@@ -1010,61 +928,28 @@ impl FaunaLayer {
         xz_dist(self.agents[i].pos.horizontal(), self.agents[i].waypoint) <= f64::from(radius)
     }
 
-    fn nearest_threat(&self, i: usize, player: GlobalXZ, radius: f32) -> Option<GlobalXZ> {
-        if radius <= 0.0 {
-            return None;
-        }
-        let here = self.agents[i].pos.horizontal();
-        let mut best: Option<(f64, GlobalXZ)> = None;
-        let player_d = xz_dist(here, player);
-        if player_d <= f64::from(radius) {
-            best = Some((player_d, player));
-        }
-        for (j, other) in self.agents.iter().enumerate() {
-            if j == i || !self.catalog.specs[other.spec_i].is_predator() {
-                continue;
-            }
-            let d = xz_dist(here, other.pos.horizontal());
-            if d <= f64::from(radius) && best.map(|(b, _)| d < b).unwrap_or(true) {
-                best = Some((d, other.pos.horizontal()));
-            }
-        }
-        best.map(|(_, at)| at)
-    }
-
-    fn nearest_prey(&self, i: usize, range: f32) -> Option<(u32, GlobalXZ, f32)> {
-        if range <= 0.0 {
-            return None;
-        }
-        let here = self.agents[i].pos.horizontal();
-        let mut best: Option<(u32, GlobalXZ, f32)> = None;
-        for (j, other) in self.agents.iter().enumerate() {
-            if j == i || !self.catalog.specs[other.spec_i].is_prey() {
-                continue;
-            }
-            let d = xz_dist(here, other.pos.horizontal()) as f32;
-            if d <= range && best.map(|(_, _, b)| d < b).unwrap_or(true) {
-                best = Some((other.id, other.pos.horizontal(), d));
-            }
-        }
-        best
-    }
-
     fn sync_anim(&mut self, world: &mut World, i: usize) -> EngineResult<()> {
         let spec_i = self.agents[i].spec_i;
         let (clip, speed) = match self.agents[i].state {
             State::Eat => (self.catalog.specs[spec_i].anim_eat.clone(), ANIM_EAT),
-            State::Flee | State::Chase => (self.catalog.specs[spec_i].anim_run.clone(), ANIM_RUN),
+            State::Engaged => (self.catalog.specs[spec_i].anim_run.clone(), ANIM_WALK),
+            State::Attack => (self.catalog.specs[spec_i].anim_attack.clone(), 1.0),
+            State::Dead => (self.catalog.specs[spec_i].anim_death.clone(), 1.0),
             _ if self.agents[i].walking => {
                 (self.catalog.specs[spec_i].anim_walk.clone(), ANIM_WALK)
             }
             _ => (self.catalog.specs[spec_i].anim_idle.clone(), ANIM_IDLE),
         };
         if self.agents[i].clip != clip {
-            world.play_animation(self.agents[i].entity, &clip)?;
-            world.set_animation_speed(self.agents[i].entity, speed)?;
+            if self.agents[i].state == State::Dead {
+                world.play_animation_once(self.agents[i].entity, &clip)?;
+            } else {
+                world.play_animation(self.agents[i].entity, &clip)?;
+            }
             self.agents[i].clip = clip;
         }
+        // Canonical endurance can change locomotion rate while the run clip remains selected.
+        world.set_animation_speed(self.agents[i].entity, speed)?;
         Ok(())
     }
 
@@ -1128,14 +1013,8 @@ pub fn suitability(
         surface
             .fields()
             .sample_smooth(&surface.fields().relief01, at.x as f32, at.z as f32);
-    let mut score = weight;
-    if spec.is_prey() {
-        score *= (0.45 + humidity * 0.7).clamp(0.2, 1.15);
-        score *= (1.1 - relief * 0.35).clamp(0.35, 1.15);
-    } else if spec.is_predator() {
-        score *= (0.55 + (1.0 - humidity) * 0.35 + relief * 0.25).clamp(0.25, 1.2);
-    }
-    (score * spec.density).clamp(0.0, 1.0)
+    let climate = (0.55 + humidity * 0.35 + (1.0 - relief) * 0.2).clamp(0.25, 1.2);
+    (weight * climate * spec.density).clamp(0.0, 1.0)
 }
 
 fn in_hamlet(hamlets: &[HamletStand], p: GlobalXZ) -> bool {
@@ -1179,6 +1058,13 @@ fn xz_dist(a: GlobalXZ, b: GlobalXZ) -> f64 {
     (dx * dx + dz * dz).sqrt()
 }
 
+fn sync_canonical_pose(agent: &mut Agent, actor: &crate::combat::WorldHostile) {
+    agent.pos.x = actor.x;
+    agent.pos.z = actor.z;
+    let heading = actor.heading();
+    agent.yaw = heading.x().atan2(heading.z()).to_degrees() as f32;
+    agent.desired_yaw = agent.yaw;
+}
 fn wrap_deg(degrees: f32) -> f32 {
     let wrapped = degrees.rem_euclid(360.0);
     if wrapped >= 360.0 {
@@ -1214,7 +1100,7 @@ fn load_species_model(
     path: PathBuf,
     root: PathBuf,
     id: String,
-    clips: [String; 4],
+    clips: [String; 6],
 ) -> Result<Arc<AnimatedModel>, FaunaError> {
     let model = AnimatedModel::load_with(&path, &root, &EngineLimits::default())?;
     for clip in &clips {
@@ -1286,10 +1172,11 @@ struct CatalogFile {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogEntry {
     id: String,
     source: String,
-    role: String,
+    mob_id: String,
     wilderness_spawn: bool,
     footprint: f32,
     scale: f32,
@@ -1300,11 +1187,7 @@ struct CatalogEntry {
     density: f32,
     flock_min: u32,
     flock_max: u32,
-    walk_speed: f32,
-    run_speed: f32,
-    flee_radius: f32,
-    hunt_range: f32,
-    catch_radius: f32,
+    roam_speed: f32,
     anims: CatalogAnims,
 }
 
@@ -1332,6 +1215,8 @@ struct CatalogAnims {
     walk: String,
     run: String,
     eat: String,
+    attack: String,
+    death: String,
 }
 
 fn spec_from_entry(entry: CatalogEntry) -> Result<FaunaSpec, FaunaError> {
@@ -1350,6 +1235,12 @@ fn spec_from_entry(entry: CatalogEntry) -> Result<FaunaSpec, FaunaError> {
             entry.id
         )));
     }
+    if entry.roam_speed <= 0.0 || !entry.roam_speed.is_finite() {
+        return Err(FaunaError::Catalog(format!(
+            "'{}' roam_speed must be finite and > 0; it controls ambient presentation only",
+            entry.id
+        )));
+    }
     let mut biome_weight = [0.0f32; BIOME_COUNT];
     biome_weight[Biome::Plains as u8 as usize] = entry.biomes.plains;
     biome_weight[Biome::Forest as u8 as usize] = entry.biomes.forest;
@@ -1361,7 +1252,7 @@ fn spec_from_entry(entry: CatalogEntry) -> Result<FaunaSpec, FaunaError> {
     Ok(FaunaSpec {
         id: entry.id,
         source: entry.source,
-        role: FaunaRole::parse(&entry.role)?,
+        mob_id: crate::gamedata::MobId::new(entry.mob_id),
         wilderness_spawn: entry.wilderness_spawn,
         footprint: entry.footprint,
         scale: entry.scale,
@@ -1371,15 +1262,13 @@ fn spec_from_entry(entry: CatalogEntry) -> Result<FaunaSpec, FaunaError> {
         biome_weight,
         flock_min: entry.flock_min,
         flock_max: entry.flock_max,
-        walk_speed: entry.walk_speed,
-        run_speed: entry.run_speed,
-        flee_radius: entry.flee_radius,
-        hunt_range: entry.hunt_range,
-        catch_radius: entry.catch_radius,
+        roam_speed: entry.roam_speed,
         anim_idle: entry.anims.idle,
         anim_walk: entry.anims.walk,
         anim_run: entry.anims.run,
         anim_eat: entry.anims.eat,
+        anim_attack: entry.anims.attack,
+        anim_death: entry.anims.death,
     })
 }
 
@@ -1420,8 +1309,8 @@ mod tests {
                 "{id} is settlement-only"
             );
         }
-        assert!(catalog.spec("deer").is_prey());
-        assert!(catalog.spec("wolf").is_predator());
+        assert_eq!(catalog.spec("deer").mob_id.as_str(), "deer");
+        assert_eq!(catalog.spec("wolf").mob_id.as_str(), "wolf");
         assert_eq!(catalog.spec("deer").biome_weight(Biome::Ocean), 0.0);
         assert!(catalog.spec("deer").biome_weight(Biome::Forest) > 0.5);
     }
@@ -1430,8 +1319,8 @@ mod tests {
     fn wilderness_meshes_carry_the_clips_the_catalog_names() {
         let catalog = catalog();
         let root = fauna_dir().expect("fauna dir");
-        for id in ["deer", "stag", "wolf", "fox", "horse"] {
-            let spec = catalog.spec(id);
+        for spec in catalog.specs() {
+            let id = spec.id.as_str();
             let path = root.join(spec.source.replace('/', std::path::MAIN_SEPARATOR_STR));
             let model = AnimatedModel::load_with(&path, &root, &EngineLimits::default())
                 .unwrap_or_else(|e| panic!("load {id}: {e}"));
@@ -1440,6 +1329,8 @@ mod tests {
                 &spec.anim_walk,
                 &spec.anim_run,
                 &spec.anim_eat,
+                &spec.anim_attack,
+                &spec.anim_death,
             ] {
                 assert!(model.find_clip(clip).is_some(), "{id} missing clip {clip}");
             }

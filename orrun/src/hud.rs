@@ -7,24 +7,19 @@ use glam::{Vec3, Vec4};
 
 use crate::combat::WorldCombat;
 use crate::controls::{Action, KeyBinds};
+use crate::gamedata::ActionId;
 
-const HOTBAR: [Action; 9] = [
-    Action::Strike,
-    Action::Bash,
-    Action::AimedShot,
-    Action::Pin,
-    Action::Ember,
-    Action::Bind,
-    Action::Mend,
-    Action::Ward,
-    Action::Potion,
+const MIGRATED_HOTBAR: [(Action, &str); 3] = [
+    (Action::Strike, "strike"),
+    (Action::Ember, "fire_bolt"),
+    (Action::Mend, "mend"),
 ];
 
 pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
     let screen = ctx.screen_rect();
     let slot = 64.0;
     let gap = 6.0;
-    let n = HOTBAR.len() as f32;
+    let n = MIGRATED_HOTBAR.len() as f32;
     let bar_w = n * slot + (n - 1.0) * gap;
     let bar_x = ((screen.width() - bar_w) * 0.5).max(12.0);
     let bar_y = screen.height() - slot - 18.0;
@@ -36,11 +31,16 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                let ranks = combat.player().stats.ranks;
-                for action in HOTBAR {
-                    let gated = !action.rank_ok(ranks.martial, ranks.hunt, ranks.arcane)
-                        || binds.get(action).is_none();
-                    let cd = combat.verb_cd_frac(action);
+                let data = combat
+                    .game_data()
+                    .expect("live migrated hotbar requires GameData");
+                for (binding, id) in MIGRATED_HOTBAR {
+                    let action_id = ActionId::new(id);
+                    let action = data
+                        .action(&action_id)
+                        .unwrap_or_else(|| panic!("hotbar references unknown action {action_id}"));
+                    let gated = binds.get(binding).is_none();
+                    let cd = combat.action_cd_frac(&action_id);
                     let fill = if gated {
                         Color32::from_rgb(48, 48, 48)
                     } else {
@@ -87,14 +87,14 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
                     ui.painter().text(
                         rect.center() + egui::vec2(0.0, -8.0),
                         egui::Align2::CENTER_CENTER,
-                        binds.display(action),
+                        binds.display(binding),
                         egui::FontId::proportional(18.0),
                         key_col,
                     );
                     ui.painter().text(
                         rect.center() + egui::vec2(0.0, 12.0),
                         egui::Align2::CENTER_CENTER,
-                        action.label(),
+                        action.name(),
                         egui::FontId::proportional(10.0),
                         key_col,
                     );
@@ -165,7 +165,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(format!("{}", h.name))
+                        egui::RichText::new(h.name.to_string())
                             .size(16.0)
                             .color(name_color),
                     );
@@ -539,6 +539,58 @@ pub fn draw_loot_windows(session: &mut WorldSession, world: &mut World, frame: &
     if !loot_open {
         session.close_loot();
     }
+}
+
+pub fn draw_summon_window(session: &mut WorldSession, world: &mut World, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    if ctx.input(|input| input.key_pressed(egui::Key::O)) {
+        let open = !session.summon_open();
+        session.set_summon_open(open);
+        world.set_pointer_lock(false);
+    }
+    if !session.summon_open() {
+        return;
+    }
+
+    let mobs = session.summonable_mobs();
+    let mut open = true;
+    let mut summon = None;
+    frame
+        .ui
+        .modal("Summon combat mob", &mut open, |panel, modal_open| {
+            let ui = panel.ui();
+            ui.label(
+                egui::RichText::new("Spawns one combat-backed mob 30 m ahead.")
+                    .size(14.0)
+                    .color(INK),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Tab acquires targets within 20 m, so approach after summoning.",
+                )
+                .size(13.0)
+                .color(MUTED),
+            );
+            ui.add_space(8.0);
+            for (id, name) in &mobs {
+                if ui.button(format!("{name}  ({id})")).clicked() {
+                    summon = Some(id.clone());
+                    *modal_open = false;
+                }
+            }
+            ui.add_space(6.0);
+            if ui.button("Close").clicked() {
+                *modal_open = false;
+            }
+        });
+
+    let summoned = summon.is_some();
+    if let Some(mob_id) = summon {
+        session
+            .summon_mob(world, &mob_id)
+            .unwrap_or_else(|err| panic!("summon {mob_id} failed: {err}"));
+    }
+    session.set_summon_open(open && !summoned);
 }
 
 pub fn draw_world_loot(session: &mut WorldSession, world: &mut World, frame: &Frame) {

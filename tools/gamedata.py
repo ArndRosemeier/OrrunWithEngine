@@ -1,11 +1,12 @@
 """Typed, strict, canonical XML authoring model for Orrun game data."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _ID_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 def _id(value: str, label: str) -> str:
@@ -16,8 +17,19 @@ def _text(node: ET.Element, name: str, default: str = "") -> str:
     return node.get(name, default)
 
 def _float(node: ET.Element, name: str, default: float) -> float:
-    try: return float(node.get(name, str(default)))
-    except ValueError as exc: raise ValueError(f"{node.tag} @{name} must be numeric") from exc
+    try:
+        value = float(node.get(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{node.tag} @{name} must be numeric") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{node.tag} @{name} must be finite")
+    return value
+
+
+def _required_float(node: ET.Element, name: str) -> float:
+    if name not in node.attrib:
+        raise ValueError(f"{node.tag}: missing attributes: {name}")
+    return _float(node, name, 0.0)
 
 def _int(node: ET.Element, name: str, default: int) -> int:
     try: return int(node.get(name, str(default)))
@@ -59,10 +71,12 @@ class ActionEffect:
 
 @dataclass(frozen=True)
 class Action:
-    id: str; name: str; target: str = "hostile"; effects: tuple[ActionEffect, ...] = (); description: str = ""; mana_cost: float = 0.0
+    id: str; name: str; target: str = "hostile"; effects: tuple[ActionEffect, ...] = (); description: str = ""; mana_cost: float = 0.0; cast_s: float = 0.0; cooldown_s: float = 0.0
     def xml(self, parent: ET.Element) -> None:
         attrs = {"id": self.id, "name": self.name, "target": self.target, "description": self.description}
         if self.mana_cost: attrs["mana_cost"] = _num(self.mana_cost)
+        if self.cast_s: attrs["cast_s"] = _num(self.cast_s)
+        if self.cooldown_s: attrs["cooldown_s"] = _num(self.cooldown_s)
         node = ET.SubElement(parent, "action", attrs)
         effects = ET.SubElement(node, "effects")
         for effect in self.effects: effect.xml(effects)
@@ -76,9 +90,11 @@ class PlayerProfile:
 
 @dataclass(frozen=True)
 class Mob:
-    id: str; name: str; faction: str = "wild"; mode: str = "active"; hp: int = 1; armor: int = 0; damage: int = 1; movement_id: str = "walk"; swing_s: float = 1.0; reach_m: float = 1.8; actions: tuple[str, ...] = ()
+    id: str; name: str; speed_variance_ratio: float; endurance_s: float; faction: str = "wild"; mode: str = "active"; hp: int = 1; armor: int = 0; damage: int = 1; movement_id: str = "walk"; species_id: str = ""; swing_s: float = 1.0; reach_m: float = 1.8; actions: tuple[str, ...] = ()
     def xml(self, parent: ET.Element) -> None:
-        node = ET.SubElement(parent, "mob", {"id": self.id, "name": self.name, "faction": self.faction, "mode": self.mode, "hp": str(self.hp), "armor": str(self.armor), "damage": str(self.damage), "movement_id": self.movement_id, "swing_s": _num(self.swing_s), "reach_m": _num(self.reach_m)})
+        attrs = {"id": self.id, "name": self.name, "faction": self.faction, "mode": self.mode, "hp": str(self.hp), "armor": str(self.armor), "damage": str(self.damage), "movement_id": self.movement_id, "swing_s": _num(self.swing_s), "reach_m": _num(self.reach_m), "speed_variance_ratio": _num(self.speed_variance_ratio), "endurance_s": _num(self.endurance_s)}
+        if self.species_id: attrs["species_id"] = self.species_id
+        node = ET.SubElement(parent, "mob", attrs)
         for action in self.actions: ET.SubElement(node, "action", {"id": action})
 
 @dataclass(frozen=True)
@@ -147,7 +163,10 @@ class GameData:
         for action in self.actions:
             if action.target not in {"hostile", "friendly", "self", "any", "none"}: errors.append(f"action {action.id}: unknown target {action.target!r}")
             if action.mana_cost < 0: errors.append(f"action {action.id}: mana_cost must be non-negative")
+            if action.cast_s < 0 or action.cooldown_s < 0: errors.append(f"action {action.id}: cast_s and cooldown_s must be non-negative")
         for mob in self.mobs:
+            if not math.isfinite(mob.speed_variance_ratio) or not 0.0 <= mob.speed_variance_ratio <= 0.20: errors.append(f"mob {mob.id}: speed_variance_ratio must be finite and in 0..=0.20")
+            if not math.isfinite(mob.endurance_s) or mob.endurance_s <= 0.0: errors.append(f"mob {mob.id}: endurance_s must be finite and positive")
             if mob.mode not in {"active", "passive"}: errors.append(f"mob {mob.id}: unknown mode {mob.mode!r}")
         for mob in self.mobs:
             for action in mob.actions:
@@ -195,11 +214,13 @@ class GameData:
         effects = tuple(EffectDefinition(_text(x,"id"), _text(x,"name"), _text(x,"kind"), _text(x,"skill_id"), _text(x,"progression","skill_level")) for x in _children(effects_node,"effect"))
         actions=[]
         for x in _children(actions_node,"action"):
-            e_node=x.find("effects"); actions.append(Action(_text(x,"id"),_text(x,"name"),_text(x,"target","hostile"),tuple(ActionEffect(_text(e,"effect_id"), _float(e,"magnitude",1.0), _text(e,"application","single_target"), _float(e,"range_m",1.8), _float(e,"radius_m",0.0), _float(e,"angle_deg",0.0)) for e in _children(e_node,"effect")),_text(x,"description"),_float(x,"mana_cost",0.0)))
+            e_node=x.find("effects"); actions.append(Action(_text(x,"id"),_text(x,"name"),_text(x,"target","hostile"),tuple(ActionEffect(_text(e,"effect_id"), _float(e,"magnitude",1.0), _text(e,"application","single_target"), _float(e,"range_m",1.8), _float(e,"radius_m",0.0), _float(e,"angle_deg",0.0)) for e in _children(e_node,"effect")),_text(x,"description"),_float(x,"mana_cost",0.0),_float(x,"cast_s",0.0),_float(x,"cooldown_s",0.0)))
         profiles=[]
         for x in _children(players_node,"profile"): profiles.append(PlayerProfile(_text(x,"id"),_text(x,"name"),_text(x,"faction","citizen"),tuple((_text(s,"id"),_int(s,"level",1)) for s in _children(x,"skill"))))
         mobs=[]
-        for x in _children(mobs_node,"mob"): mobs.append(Mob(_text(x,"id"),_text(x,"name"),_text(x,"faction","wild"),_text(x,"mode","active"),_int(x,"hp",1),_int(x,"armor",0),_int(x,"damage",1),_text(x,"movement_id","walk"),_float(x,"swing_s",1.0),_float(x,"reach_m",1.8),tuple(_text(a,"id") for a in _children(x,"action"))))
+        for x in _children(mobs_node,"mob"):
+            _require_attrs(x, {"id", "name", "faction", "mode", "hp", "armor", "damage", "movement_id", "species_id", "swing_s", "reach_m", "speed_variance_ratio", "endurance_s"}, {"id", "name", "faction", "mode", "hp", "damage", "movement_id", "speed_variance_ratio", "endurance_s"})
+            mobs.append(Mob(id=_text(x,"id"), name=_text(x,"name"), speed_variance_ratio=_required_float(x,"speed_variance_ratio"), endurance_s=_required_float(x,"endurance_s"), faction=_text(x,"faction"), mode=_text(x,"mode"), hp=_int(x,"hp",1), armor=_int(x,"armor",0), damage=_int(x,"damage",1), movement_id=_text(x,"movement_id"), species_id=_text(x,"species_id"), swing_s=_float(x,"swing_s",1.0), reach_m=_float(x,"reach_m",1.8), actions=tuple(_text(a,"id") for a in _children(x,"action"))))
         movement=tuple(MovementSpec(_text(x,"id"),_float(x,"speed_mps",1.0)) for x in _children(movement_node,"spec"))
         hamlet=Hamlet(_text(hamlet_node,"enabled","true")=="true",_int(hamlet_node,"width",32),_int(hamlet_node,"depth",32),_text(hamlet_node,"kit_catalog","catalogs/medieval.json"),tuple(_text(x,"id") for x in _children(hamlet_node,"layer")))
         defaults={_text(x,"key"):_text(x,"value") for x in _children(defaults_node,"value")}

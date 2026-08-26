@@ -11,6 +11,7 @@
 //! player. The mouse is captured only once they click in the world, and the
 //! window gives it back on Escape or when it loses focus.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -98,6 +99,22 @@ pub enum SessionError {
 
     #[error("spawn chunk at ({x:.0} m, {z:.0} m) is resident but carries no contact grid")]
     MissingContact { x: f64, z: f64 },
+}
+
+/// Request to seat one canonical GameData mob once world placement is available.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldFixtureRequest {
+    mob_id: crate::gamedata::MobId,
+}
+
+impl HeldFixtureRequest {
+    pub fn new(mob_id: crate::gamedata::MobId) -> Self {
+        Self { mob_id }
+    }
+
+    pub fn mob_id(&self) -> &crate::gamedata::MobId {
+        &self.mob_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,9 +366,12 @@ pub struct WorldSession {
     combat_layer: super::combat_layer::CombatLayer,
     inventory: crate::inventory::Inventory,
     ground_loot: Vec<crate::loot::GroundPile>,
+    looted_hostiles: HashSet<i32>,
     bag_open: bool,
     loot_open: bool,
     loot_target: Option<i32>,
+    summon_open: bool,
+    pending_held_fixture: Option<HeldFixtureRequest>,
     last_shrine: Option<GlobalPlace>,
     key_binds: KeyBinds,
     /// Overland SettlementPin roster mobs are seated once after the default L1 wolves.
@@ -414,9 +434,12 @@ impl WorldSession {
             combat_layer: super::combat_layer::CombatLayer::install(),
             inventory: crate::inventory::Inventory::create_kit(),
             ground_loot: Vec::new(),
+            looted_hostiles: HashSet::new(),
             bag_open: false,
             loot_open: false,
             loot_target: None,
+            summon_open: false,
+            pending_held_fixture: None,
             last_shrine: None,
             key_binds: KeyBinds::default(),
             roster_pins_seated: false,
@@ -492,9 +515,84 @@ impl WorldSession {
         self.loot_target.filter(|_| self.loot_open)
     }
 
+    pub fn summon_open(&self) -> bool {
+        self.summon_open
+    }
+
+    pub fn set_summon_open(&mut self, open: bool) {
+        self.summon_open = open;
+    }
+
+    pub fn summonable_mobs(&self) -> Vec<(crate::gamedata::MobId, String)> {
+        self.game_data
+            .mobs()
+            .iter()
+            .filter(|mob| crate::combat::catalog::mesh_spec(mob.id().as_str()).is_some())
+            .map(|mob| (mob.id().clone(), mob.name().to_string()))
+            .collect()
+    }
+
+    /// Queue one typed canonical mob for held fixture seating after world availability.
+    pub fn request_held_fixture(&mut self, request: HeldFixtureRequest) {
+        if self.pending_held_fixture.is_some() || self.combat_layer.fixture_encounter_held() {
+            panic!("held fixture request already pending or seated");
+        }
+        let mob_id = request.mob_id();
+        let definition = self
+            .game_data
+            .mob(mob_id)
+            .unwrap_or_else(|| panic!("held fixture requested unknown mob {mob_id}"));
+        if crate::combat::catalog::mesh_spec(definition.id().as_str()).is_none() {
+            panic!("held fixture requested mob without combat mesh {mob_id}");
+        }
+        self.pending_held_fixture = Some(request);
+    }
+
+    pub fn summon_mob(
+        &mut self,
+        world: &mut World,
+        mob_id: &crate::gamedata::MobId,
+    ) -> Result<i32, SessionError> {
+        let player = self.player.ok_or(SessionError::NoWorld)?;
+        let definition = self
+            .game_data
+            .mob(mob_id)
+            .unwrap_or_else(|| panic!("summon requested unknown mob {mob_id}"));
+        if crate::combat::catalog::mesh_spec(definition.id().as_str()).is_none() {
+            panic!("summon requested mob without combat mesh {mob_id}");
+        }
+        let facing = Camera::facing_xz(player.yaw_degrees);
+        let x = player.position.x + f64::from(facing.x) * 30.0;
+        let z = player.position.z + f64::from(facing.z) * 30.0;
+        let idx = self
+            .combat
+            .hostiles()
+            .iter()
+            .map(|hostile| hostile.idx)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        let sheet = self.combat.mob_sheet(definition.id().as_str());
+        self.combat
+            .add_hostile(crate::combat::WorldHostile::from_sheet(
+                idx,
+                x,
+                z,
+                &sheet,
+                definition.id().as_str(),
+                x,
+                z,
+            ));
+        self.combat_layer.hold_fixture();
+        self.respawn_hostile_meshes(world, &player)?;
+        Ok(idx)
+    }
+
     pub fn ground_pile(&self) -> Option<&crate::loot::GroundPile> {
         let idx = self.loot_target?;
-        self.ground_loot.iter().find(|p| p.hostile_idx == idx)
+        self.ground_loot
+            .iter()
+            .find(|p| p.actor_id.runtime_index() == Some(idx))
     }
 
     pub fn sparkle_visible(&self, world: &World) -> bool {
@@ -510,7 +608,11 @@ impl WorldSession {
         let Some(idx) = self.loot_target else {
             return;
         };
-        let Some(pos) = self.ground_loot.iter().position(|p| p.hostile_idx == idx) else {
+        let Some(pos) = self
+            .ground_loot
+            .iter()
+            .position(|p| p.actor_id.runtime_index() == Some(idx))
+        else {
             return;
         };
         let mut pile = self.ground_loot[pos].clone();
@@ -522,7 +624,11 @@ impl WorldSession {
         let Some(idx) = self.loot_target else {
             return;
         };
-        let Some(pos) = self.ground_loot.iter().position(|p| p.hostile_idx == idx) else {
+        let Some(pos) = self
+            .ground_loot
+            .iter()
+            .position(|p| p.actor_id.runtime_index() == Some(idx))
+        else {
             return;
         };
         let mut pile = self.ground_loot[pos].clone();
@@ -531,9 +637,10 @@ impl WorldSession {
     }
 
     fn finish_loot_take(&mut self, world: &mut World, pos: usize, pile: crate::loot::GroundPile) {
-        let idx = pile.hostile_idx;
+        let idx = pile.actor_id.runtime_index().expect("loot actor id");
         if pile.empty() {
             self.ground_loot.remove(pos);
+            self.looted_hostiles.insert(idx);
             self.combat_layer.strip_sparkle(world, idx);
             self.close_loot();
         } else {
@@ -543,7 +650,11 @@ impl WorldSession {
 
     /// Playtester: force a visible family so sparkle is not coin-only.
     pub fn open_first_loot(&mut self) -> bool {
-        let Some(idx) = self.ground_loot.first().map(|p| p.hostile_idx) else {
+        let Some(idx) = self
+            .ground_loot
+            .first()
+            .map(|p| p.actor_id.runtime_index().expect("loot actor id"))
+        else {
             return false;
         };
         self.loot_open = true;
@@ -554,8 +665,9 @@ impl WorldSession {
     pub fn force_visible_loot(&mut self, idx: i32) {
         if let Some(h) = self.combat.hostiles().iter().find(|h| h.idx == idx) {
             let site = self.loot_site_for(h.x, h.z);
-            let pile = crate::loot::force_visible_pile(&h.mob_id, h.idx, site);
-            self.ground_loot.retain(|p| p.hostile_idx != idx);
+            let pile = crate::loot::force_visible_pile(&h.mob_id, h.actor_id(), site);
+            self.ground_loot
+                .retain(|p| p.actor_id.runtime_index() != Some(idx));
             self.ground_loot.push(pile);
         }
     }
@@ -571,8 +683,16 @@ impl WorldSession {
         let sparkle_ids: Vec<i32> = self
             .ground_loot
             .iter()
-            .filter(|p| !p.empty() && self.combat_layer.has_sparkle(p.hostile_idx))
-            .map(|p| p.hostile_idx)
+            .filter(|p| {
+                !p.empty()
+                    && !self
+                        .looted_hostiles
+                        .contains(&p.actor_id.runtime_index().expect("loot actor id"))
+                    && self
+                        .combat_layer
+                        .has_sparkle(p.actor_id.runtime_index().expect("loot actor id"))
+            })
+            .map(|p| p.actor_id.runtime_index().expect("loot actor id"))
             .collect();
         let pairs: Vec<(i32, f64, f64)> = self
             .combat
@@ -626,14 +746,17 @@ impl WorldSession {
                 .contact_height(GlobalXZ::at(h.x, h.z))
                 .map(|g| (g + FOOT_CLEARANCE_M) as f64)
                 .unwrap_or(0.0);
-            if self.ground_loot.iter().any(|p| p.hostile_idx == h.idx) {
+            if self.looted_hostiles.contains(&h.idx) {
+                continue;
+            }
+            if self.ground_loot.iter().any(|p| p.actor_id == h.actor_id()) {
                 if !self.combat_layer.has_sparkle(h.idx) {
                     planned.push((h.idx, entity, h.x, y, h.z, None));
                 }
                 continue;
             }
             let site = self.loot_site_for(h.x, h.z);
-            let pile = crate::loot::roll_pile(&h.mob_id, h.idx, site);
+            let pile = crate::loot::roll_pile(&h.mob_id, h.actor_id(), site);
             planned.push((h.idx, entity, h.x, y, h.z, Some(pile)));
         }
         for (idx, entity, x, y, z, pile) in planned {
@@ -649,16 +772,37 @@ impl WorldSession {
     fn clear_ground_loot(&mut self, world: &mut World) {
         self.combat_layer.strip_all_sparkles(world);
         self.forget_ground_loot();
+        self.looted_hostiles.clear();
     }
 
     fn forget_ground_loot(&mut self) {
         self.ground_loot.clear();
+        self.looted_hostiles.clear();
         self.loot_open = false;
         self.loot_target = None;
     }
 
     pub fn fixture_mesh_visible(&self, world: &World) -> bool {
         self.combat_layer.mesh_visible(world)
+    }
+
+    /// Harness-side seating check that does not require borrowing the render world.
+    pub fn fixture_mesh_visible_from_session(&self) -> bool {
+        !self.combat.hostiles().is_empty()
+            && self
+                .combat
+                .hostiles()
+                .iter()
+                .all(|hostile| hostile.entity.is_some())
+    }
+
+    pub fn fixture_encounter_held(&self) -> bool {
+        self.combat_layer.fixture_encounter_held()
+    }
+
+    /// Start a presentation fixture only after its harness has verified readiness.
+    pub fn start_fixture_encounter(&mut self) {
+        self.combat_layer.start_fixture_encounter(&mut self.combat);
     }
 
     pub fn player_hp(&self) -> f64 {
@@ -769,6 +913,7 @@ impl WorldSession {
         }
         self.combat.finish_death_respawn();
         self.combat.clear_hostiles();
+        self.looted_hostiles.clear();
         self.combat_layer.despawn_meshes(world);
     }
 
@@ -786,6 +931,12 @@ impl WorldSession {
     /// spawn so packs do not seat inside a hamlet from a prior village hook.
     fn begin_fixture_rearm(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
+        if let Some(fauna) = self.fauna.as_mut() {
+            let actor_ids = fauna
+                .clear(world)
+                .unwrap_or_else(|err| panic!("fixture rearm failed to clear fauna: {err}"));
+            self.combat.deactivate_actors(&actor_ids);
+        }
         self.clear_ground_loot(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
@@ -824,6 +975,33 @@ impl WorldSession {
         self.begin_fixture_rearm(world);
         self.combat_layer.request_wolf_fixture();
         self.combat_layer.rearm();
+    }
+
+    pub fn rearm_held_mob_fixture(
+        &mut self,
+        world: &mut World,
+        mobs: Vec<super::combat_layer::HeldMobFixture>,
+    ) {
+        self.begin_fixture_rearm(world);
+        self.combat_layer.request_held_mobs(mobs);
+        self.combat_layer.rearm();
+    }
+
+    pub fn player_progression(&self) -> &crate::progression::ActorProgression {
+        self.combat.player_progression()
+    }
+
+    pub fn ground_loot_count(&self) -> usize {
+        self.ground_loot.len()
+    }
+
+    pub fn hostile_death_posed(&self, idx: i32) -> bool {
+        self.combat
+            .hostiles()
+            .iter()
+            .find(|hostile| hostile.idx == idx)
+            .and_then(|hostile| hostile.entity)
+            .is_some_and(|entity| self.combat_layer.is_death_posed(entity))
     }
 
     /// Reseats one published orc on the next world tick. Meshes despawn now.
@@ -1284,7 +1462,8 @@ impl WorldSession {
             paths.clear(world)?;
         }
         if let Some(fauna) = self.fauna.as_mut() {
-            fauna.clear(world)?;
+            let deactivated = fauna.clear(world)?;
+            self.combat.deactivate_actors(&deactivated);
         }
         if let Some(villagers) = self.villagers.as_mut() {
             villagers.clear(world)?;
@@ -1293,6 +1472,7 @@ impl WorldSession {
             dungeons.clear(world)?;
         }
 
+        self.combat_layer.reset_vfx(world)?;
         self.stream.reset(world);
         world.set_render_origin(RenderOrigin::snapped(approach.ground(), CHUNK_SPAN_M)?)?;
         self.spawn = None;
@@ -1475,7 +1655,10 @@ impl WorldSession {
                 self.settlements =
                     Some(SettlementLayer::install(world, self.surface.world_seed())?);
                 self.paths = Some(PathLayer::new());
-                self.fauna = Some(FaunaLayer::install(self.surface.world_seed())?);
+                self.fauna = Some(FaunaLayer::install(
+                    self.surface.world_seed(),
+                    &self.game_data,
+                )?);
                 self.villagers = Some(VillagerLayer::new());
                 self.dungeons = Some(DungeonLayer::install());
                 self.caves = super::cave::CaveLayer::install();
@@ -1607,6 +1790,7 @@ impl WorldSession {
                 focus,
                 focus,
                 0.0,
+                &mut self.combat,
             )?;
             world.hitch_span(
                 "fauna",
@@ -1799,7 +1983,27 @@ impl WorldSession {
         Ok(have < want)
     }
 
+    fn seat_pending_held_fixture(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let Some(request) = self.pending_held_fixture.take() else {
+            return Ok(());
+        };
+        self.begin_fixture_rearm(world);
+        let player = self.player.ok_or(SessionError::NoWorld)?;
+        let facing = Camera::facing_xz(player.yaw_degrees);
+        self.combat_layer.request_canonical_mob_fixture();
+        self.combat_layer.install_canonical_mob_fixture(
+            &mut self.combat,
+            request.mob_id(),
+            player.position.x,
+            player.position.z,
+            f64::from(facing.x),
+            f64::from(facing.z),
+        );
+        self.respawn_hostile_meshes(world, &player)
+    }
+
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
+        self.seat_pending_held_fixture(world)?;
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
         if input.toggle_fly {
@@ -1810,7 +2014,15 @@ impl WorldSession {
         {
             let facing = Camera::facing_xz(player.yaw_degrees);
             if !self.combat_layer.fixture_ready() {
-                if self.combat_layer.wants_orc() {
+                if self.combat_layer.wants_held_mobs() {
+                    self.combat_layer.install_held_mobs(
+                        &mut self.combat,
+                        player.position.x,
+                        player.position.z,
+                        facing.x as f64,
+                        facing.z as f64,
+                    );
+                } else if self.combat_layer.wants_orc() {
                     self.combat_layer.install_orc_fixture(
                         &mut self.combat,
                         player.position.x,
@@ -1900,7 +2112,10 @@ impl WorldSession {
                 }
             }
         }
-        if self.combat_layer.fixture_ready() && !self.combat_layer.roster_pins_skipped() {
+        if self.combat_layer.fixture_ready()
+            && !self.combat_layer.roster_pins_skipped()
+            && !self.combat_layer.canonical_mob_fixture()
+        {
             let restamped = self.ensure_overland_sites(world, player.position)?;
             if restamped {
                 self.respawn_hostile_meshes(world, &player)?;
@@ -2018,7 +2233,7 @@ impl WorldSession {
             self.combat_layer
                 .sync_hostile_transforms(world, &self.combat)?;
             self.combat_layer
-                .present(world, &self.combat, ground_y, input.dt)?;
+                .present(world, &self.combat, player.position, ground_y, input.dt)?;
             self.sync_ground_loot(world)?;
             if self.combat.is_dead()
                 && self.combat.player().resources.hp() <= 0.0
@@ -2041,6 +2256,9 @@ impl WorldSession {
 
         let t = Instant::now();
         let rebased = self.stream.maybe_rebase(world, foot)?;
+        if rebased {
+            self.combat_layer.reset_vfx(world)?;
+        }
         if rebased && self.combat_layer.fixture_ready() {
             if let Some(player) = self.player {
                 self.respawn_hostile_meshes(world, &player)?;
@@ -2168,6 +2386,7 @@ impl WorldSession {
                 foot,
                 foot,
                 input.dt,
+                &mut self.combat,
             )?;
             world.hitch_span(
                 "fauna",

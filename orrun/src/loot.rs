@@ -1,5 +1,6 @@
 //! loot-v1 corpse piles. Families on disk only. No 726-name catalog.
 
+use crate::combat::ActorId;
 use crate::inventory::{Inventory, Item, ItemKind};
 
 /// Cairn vs hut, mapped by the session from overland sites.
@@ -12,7 +13,7 @@ pub enum LootSite {
 /// One unlooted (or partly looted) corpse pile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroundPile {
-    pub hostile_idx: i32,
+    pub actor_id: ActorId,
     pub mob_id: String,
     pub items: Vec<Item>,
     pub coin: i32,
@@ -51,7 +52,7 @@ pub fn bandit_drop(site: Option<LootSite>, idx: i32) -> ItemKind {
 /// Family item for a catalog id. Skip ids with no family (coin only).
 pub fn family_drop(mob_id: &str, site: Option<LootSite>, idx: i32) -> Option<ItemKind> {
     match mob_id {
-        "crawler_spider_wolf" | "wolf" | "wolf-spider" => Some(ItemKind::HideWrap),
+        "wolf" => Some(ItemKind::HideWrap),
         "bandit" | "male_bandit" => Some(bandit_drop(site, idx)),
         "orc" => Some(ItemKind::OrcClub),
         "orc_skull" => Some(ItemKind::EmberChip),
@@ -63,13 +64,16 @@ pub fn family_drop(mob_id: &str, site: Option<LootSite>, idx: i32) -> Option<Ite
     }
 }
 
-pub fn roll_pile(mob_id: &str, idx: i32, site: Option<LootSite>) -> GroundPile {
+pub fn roll_pile(mob_id: &str, actor_id: ActorId, site: Option<LootSite>) -> GroundPile {
+    let idx = actor_id
+        .runtime_index()
+        .expect("loot cannot belong to player");
     let mut items = Vec::new();
     if let Some(kind) = family_drop(mob_id, site, idx) {
         items.push(Item::one(kind));
     }
     GroundPile {
-        hostile_idx: idx,
+        actor_id,
         mob_id: mob_id.to_string(),
         items,
         coin: roll_coin(mob_id, idx),
@@ -77,8 +81,11 @@ pub fn roll_pile(mob_id: &str, idx: i32, site: Option<LootSite>) -> GroundPile {
 }
 
 /// Playtester: guaranteed visible family + sparkle. Orc Club is the orc family.
-pub fn force_visible_pile(mob_id: &str, idx: i32, site: Option<LootSite>) -> GroundPile {
-    let mut pile = roll_pile(mob_id, idx, site);
+pub fn force_visible_pile(mob_id: &str, actor_id: ActorId, site: Option<LootSite>) -> GroundPile {
+    let idx = actor_id
+        .runtime_index()
+        .expect("loot cannot belong to player");
+    let mut pile = roll_pile(mob_id, actor_id, site);
     if pile.items.is_empty() {
         let kind = family_drop(mob_id, site, idx).unwrap_or(ItemKind::OrcClub);
         pile.items.push(Item::one(kind));
@@ -160,7 +167,7 @@ mod tests {
 
     #[test]
     fn force_visible_always_has_a_family_icon() {
-        let pile = force_visible_pile("orc", 1, None);
+        let pile = force_visible_pile("orc", ActorId::from_runtime_index(1), None);
         assert!(pile.has_visible_family());
         assert_eq!(pile.items[0].name(), "Orc Club");
         assert!((2..=8).contains(&pile.coin));

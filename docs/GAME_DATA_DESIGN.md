@@ -101,7 +101,9 @@ Players and mobs share these authored concepts:
 - skill levels
 - assigned actions
 
-Movement specifications contain stable parameters needed by the movement controller, such as movement speed, acceleration, deceleration, turn speed, and preferred distance where applicable. Current velocity, destinations, paths, and fleeing targets are runtime state.
+Each mob also explicitly authors a symmetric `speed_variance_ratio` and an `endurance_s` value. The speed variance is finite and constrained to `0.0..=0.20`; endurance is a finite positive duration. Missing or invalid values are data errors, not requests for runtime defaults. Movement specifications remain the source of base speed and controller parameters such as acceleration, deceleration, turn speed, and preferred distance. Predators are authored slightly faster with lower endurance than prey.
+
+At actor registration, the canonical runtime uses the actor's stable spawn seed to sample one movement multiplier inside the authored symmetric range. That multiplier remains stable for the actor instance's lifetime. Current endurance, velocity, destinations, paths, awareness, and flee threats are runtime state.
 
 Mob `mode` is either `active` or `passive`. It is a mob behavior setting, not a faction property. Mobs have no combat level; all progression is skill-specific.
 
@@ -133,22 +135,25 @@ A passive mob never initiates an attack. It may retaliate after taking damage. P
 
 The hostility decision is one centralized domain operation used by AI targeting, attack validation, retaliation, and presentation. It must not be reimplemented separately in each subsystem.
 
-## Passive mob fleeing
+## Deterministic perception, pursuit, and flight
 
-Passive mobs flee when they see an active, non-neutral threatening mob. They do not flee from passive or neutral actors.
+Perception is a canonical fixed-step operation. Every mob rolls on a deterministic, staggered one-second cadence so results do not depend on rendering frame rate or actor iteration order. Visual likelihood is based on distance and canonical facing: strongest in front, weaker at the sides, and substantially weaker behind. Close-range hearing contributes a separate angle-independent likelihood; it does not guarantee detection. Successful rolls establish brief awareness, and later successful rolls refresh it.
 
-Fleeing is deliberately finite to avoid permanently fleeing or exploitable mobs:
+Active mobs pursue actors they have detected and that the centralized hostility policy considers hostile. Passive mobs never initiate an attack. They flee only after detecting an actor that is simultaneously active, hostile to them, and non-neutral; passive or neutral actors cannot trigger passive flight. Flight threat is stored separately from an attack target.
 
 ```text
 Calm
-  -> sees active, non-neutral threat: Fleeing
+  -> detects active, hostile, non-neutral threat: Fleeing
 Fleeing
-  -> takes damage: Retaliating
+  -> awareness/leash ends: Calm
+  -> takes damage: Retaliating against attacker
 Retaliating
   -> combat ends: Calm
 ```
 
-After taking damage, the passive mob stops fleeing and can retaliate. The exact movement path and timing are runtime concerns; authored data selects the passive behavior and movement specification.
+Positive damage immediately cancels flight and establishes personal retaliation against the attacker without a detection roll. Perception cadence, awareness, flee threats, retaliation, movement, and transitions are private canonical actor state. Fauna entities only present canonical snapshots and never make these decisions.
+
+Pursuit and flight drain endurance only while the actor actually moves. At zero endurance, neither state stops: movement continues at one centralized slower exhausted multiplier. Endurance recovers outside sprint movement, while awareness loss and existing leash rules keep chases finite.
 
 ## Aggression and neutrality
 

@@ -131,7 +131,7 @@ fn parse_args() -> Result<Args, String> {
     let mut out = None;
     let mut player_level = None;
     let mut discipline = "Martial".to_string();
-    let mut mob = "crawler_spider_wolf".to_string();
+    let mut mob = "wolf".to_string();
     let mut count = 1i32;
     let mut seed = 1i32;
     let mut potions = None;
