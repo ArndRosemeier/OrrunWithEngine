@@ -113,9 +113,11 @@ Exit criteria:
 - Tests prove endurance drains only on actual pursuit/flight movement, exhausted actors continue more slowly, recovery occurs outside sprint movement, and existing leash/awareness loss ends chases.
 - Live inspection confirms predator/prey approaches from front and rear, correct pursuit/flight/retaliation transitions, heading and locomotion synchronization, and no fauna-side gameplay decisions.
 
-## M4 — Skill progression becomes visible and persistent — NEXT
+## M4 — Skill progression becomes visible and persistent — DONE
 
 Turn the invisible domain model into a player reward loop.
+
+Verified complete: all 411 Rust library tests and all 12 Python GameData tests pass, every Orrun binary compiles, and the live `m4_progression` hook verifies visible skill/HP/mana level-ups, exact save/apply round-trip, and clear format-3 rejection without hostile notices.
 
 Deliverables:
 
@@ -133,7 +135,7 @@ Exit criteria:
 - Old saves fail with a clear incompatible-format message.
 - There is still no global level or global XP display.
 
-## M5 — Complete effect and action migration
+## M5 — Complete effect and action migration — NEXT
 
 Move the rest of useful combat behavior to the canonical pipeline.
 

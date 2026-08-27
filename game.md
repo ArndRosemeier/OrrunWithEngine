@@ -49,7 +49,7 @@ Skills are the only progression axis. There is no player level.
 - **Canonical runtime data:** `data/OrrunGameData.xml` and `orrun/src/gamedata.rs` define skills, effect bundles, action assignments, factions, player profiles, mobs, movement, and starting skill levels. Python/Rust A/B loading and validation pass against the same canonical data.
 - **Progression owner:** `orrun/src/progression.rs` holds per-skill integer level + exact XP, HP and mana as trainable proficiencies, typed training operations (`record_effect_use`, `record_damage_taken`, `record_mana_spent`), typed level-up events, and a strictly increasing non-linear level-cost curve. Provisional balance values remain centralized in `progression::balance`.
 - **Live training:** canonical effect execution trains the referenced action skill; incoming applied damage trains HP; actual mana spend trains mana. The verified wolf slice exercises all three paths through Strike, Fire Bolt, Mend, and the wolf attack.
-- **Current boundary:** progression is live but invisible and not persisted by the canonical model yet. Player-facing progression feedback and canonical skill/resource save persistence belong to M4.
+- **Visible and persistent progression:** the Skills window reports every known skill plus HP and mana with exact level progress. Typed level-up events drive restrained notices. Save format 4 round-trips skill/resource progression and current resources through the canonical model; formats 1-3 are rejected as incompatible.
 - **Open decisions:** how mob difficulty is communicated without a player level to compare against.
 
 ## Shipped gameplay features
@@ -89,7 +89,7 @@ Implemented in `orrun/src/hud.rs`, `orrun/src/main.rs`, `orrun/src/controls.rs`.
 - Combat log, failure toast, corpse loot modal, inventory window, loot sparkle, hostile nameplate support.
 - Default combat bindings on 1-8, R, T, G; bindable actions with serialized custom keybindings; reserved movement/interact keys and duplicate-binding resolution.
 
-Limitation: no player-facing progression display of any kind (no skill levels, no resource growth feedback). This is expected — it waits for the progression rebuild.
+The Skills window shows known skills, HP, and mana with level and exact progress to the next level. Typed level-up events produce player-facing notices without inferring progression in the HUD.
 
 ### Gameplay audio
 
@@ -116,10 +116,6 @@ Fauna spawning and animated entities remain in `orrun/src/world/fauna.rs`; once 
 ## POC / experimental systems
 
 These run in the current app and make the loop playable, but they predate the GameData model and are considered outdated, buggy, or experimental. They will be rebuilt on GameData, not extended.
-
-### Legacy save persistence
-
-Save format 3 in `orrun/src/save.rs` persists world seed/size, position and facing, HP/mana, Shaken timer, last shrine, inventory, coin, and obsolete level/XP/attribute/discipline fields. Validation and world-identity failures are loud, but this format is POC: it does not persist canonical skill progression and will be replaced by M4 with an incompatible format bump.
 
 ### Combat core
 
@@ -165,4 +161,4 @@ No implementation exists for:
 - HUD and controls: `orrun/src/hud.rs`, `orrun/src/controls.rs`, `orrun/src/main.rs`
 - Audio: `orrun/src/world/ambience.rs`, `orrun/assets/audio/ATTRIBUTION.md`
 
-Last consolidated: 2026-08-26.
+Last consolidated: 2026-08-27.

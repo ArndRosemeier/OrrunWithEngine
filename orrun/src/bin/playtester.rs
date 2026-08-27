@@ -3965,9 +3965,9 @@ impl Driver {
                     return;
                 }
                 let expected = vec![
-                    ("HP".to_string(), 2),
                     ("Mana".to_string(), 2),
                     ("Fire Damage".to_string(), 2),
+                    ("HP".to_string(), 2),
                 ];
                 if self.m4_progression.notices != expected {
                     self.fail_current(&format!(
