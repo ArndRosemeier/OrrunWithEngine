@@ -287,5 +287,7 @@ mod tests {
         let back = Heading::towards(h.direction()).unwrap();
         assert!((back.degrees() - 215.0).abs() < 1e-2);
         assert!(Heading::from_degrees(f32::NAN).is_err());
+        assert!(Heading::from_degrees(f32::INFINITY).is_err());
+        assert!(Heading::from_degrees(f32::NEG_INFINITY).is_err());
     }
 }

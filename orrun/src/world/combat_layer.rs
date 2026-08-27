@@ -1,31 +1,19 @@
-//! Live combat layer. Not FaunaLayer ? fixture hostiles, combat clock, lock+auto.
-//!
-//! Uses `orrun::combat` types and the same melee_raw / mitigation as the sim.
-//! Frame dt is not 0.1; this accumulates to [`crate::combat::TICK`] before a
-//! live auto tick.
-//!
-//! Visible fixture bodies use catalog id `wolf` (`assets/fauna/wolf/wolf.gltf`).
-//! There is no spider in the fauna catalog; do not route these through FaunaLayer.
+//! Live combat presentation for canonical resolutions and actor animation.
 
 use crate::combat::catalog::mesh_spec;
-use crate::combat::math::{MAGE_TELE_S, SKULL_TELE_S, WALK_MPS};
-use crate::combat::sheets::{
-    blue_demon_sheet, demon_sheet, orc_sheet, orc_skull_sheet, skeleton_mage_sheet,
-    skeleton_minion_sheet, skeleton_warrior_sheet, tribal_veteran_sheet, wolf_sheet, yeti_sheet,
-    MobSheet,
-};
-use crate::combat::types::{SpecialAttackCue, SpecialAttackEvent, WorldCombat, WorldHostile};
-use crate::combat::Discipline;
-use crate::gamedata::EffectKind;
+use crate::combat::math::WALK_MPS;
+
+use crate::combat::types::{HostilePresentationSource, WorldCombat};
+use crate::gamedata::{Application, EffectOperation};
 use crate::progression::LevelUpEvent;
-use crate::resolution::Resolution;
+use crate::resolution::{Resolution, ResolutionActorId, TimedStatusKind};
 use engine::anim::{AnimatedModel, AnimationAction, AnimationProfile, Locomotion};
 use engine::color::Color;
 use engine::error::{EngineError, EngineResult};
 use engine::mesh::Mesh;
 use engine::place::{GlobalPlace, Place};
 use engine::space::{GlobalPosition, GlobalXZ};
-use engine::vfx::{Delivery, EffectSpec, VfxSystem, VisualKind};
+use engine::vfx::{Delivery, EffectHandle, EffectSpec, VfxSystem, VisualKind};
 use engine::world::{EntityId, World};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -60,7 +48,7 @@ const SPARKLE: Color = Color {
     a: 1.0,
 };
 
-/// One-shot combat voices queued on a live auto that deals.
+/// One-shot combat sounds queued from typed damage resolutions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CombatSfx {
     Swing,
@@ -124,11 +112,49 @@ struct Flinch {
     t: f32,
 }
 
+#[derive(Clone, Debug)]
+struct EffectPresentation {
+    operation: EffectOperation,
+    application: Application,
+    caster: ResolutionActorId,
+    target: ResolutionActorId,
+    duration_s: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct StatusVfxIdentity {
+    target: ResolutionActorId,
+    kind: TimedStatusKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatusVfxDecision {
+    Keep,
+    Spawn,
+    Replace,
+    Remove,
+}
+
+fn status_vfx_decision(
+    tracked: bool,
+    active: bool,
+    desired: bool,
+    refreshed: bool,
+) -> StatusVfxDecision {
+    match (tracked, active, desired, refreshed) {
+        (true, true, true, false) => StatusVfxDecision::Keep,
+        (true, true, true, true) => StatusVfxDecision::Replace,
+        (true, _, false, _) => StatusVfxDecision::Remove,
+        (true, false, true, _) => StatusVfxDecision::Replace,
+        (false, _, true, _) => StatusVfxDecision::Spawn,
+        (false, _, false, _) => StatusVfxDecision::Keep,
+    }
+}
+
 /// Live hostiles + 0.1 s combat clock in front of the player.
 pub struct CombatLayer {
     fixture: bool,
     skip_roster_pins: bool,
-    first_auto: Option<i32>,
     mesh_ids: Vec<EntityId>,
     mesh_anchors: Vec<MeshAnchor>,
     wolf_model: Option<Arc<AnimatedModel>>,
@@ -136,9 +162,8 @@ pub struct CombatLayer {
     fixture_kind: FixtureKind,
     fixture_activation: FixtureActivation,
     held_mobs: Vec<HeldMobFixture>,
-    pending_melee: Option<(Option<EntityId>, &'static str)>,
-    skull_tele: HashMap<i32, f64>,
-    mage_tele: HashMap<i32, f64>,
+    pending_actor_animations: Vec<(crate::combat::ActorId, AnimationAction)>,
+    pending_fauna_animations: Vec<(crate::combat::ActorId, AnimationAction)>,
     lock_ring: Option<EntityId>,
     ring_on: Option<i32>,
     attack_pip_s: f64,
@@ -146,8 +171,10 @@ pub struct CombatLayer {
     hit_flash: bool,
     pending_sfx: Vec<CombatSfx>,
     pending_level_ups: Vec<LevelUpEvent>,
-    pending_flinch: Option<i32>,
-    pending_fire_bolts: Vec<i32>,
+    pending_flinches: Vec<i32>,
+    pending_effect_vfx: Vec<EffectPresentation>,
+    refreshed_status_vfx: HashSet<StatusVfxIdentity>,
+    status_vfx: HashMap<StatusVfxIdentity, EffectHandle>,
     vfx: VfxSystem,
     vfx_seed: u32,
     flinch: Option<Flinch>,
@@ -164,7 +191,6 @@ impl CombatLayer {
         Self {
             fixture: false,
             skip_roster_pins: false,
-            first_auto: None,
             mesh_ids: Vec::new(),
             mesh_anchors: Vec::new(),
             wolf_model: None,
@@ -172,9 +198,8 @@ impl CombatLayer {
             fixture_kind: FixtureKind::None,
             fixture_activation: FixtureActivation::NormalWorld,
             held_mobs: Vec::new(),
-            pending_melee: None,
-            skull_tele: HashMap::new(),
-            mage_tele: HashMap::new(),
+            pending_actor_animations: Vec::new(),
+            pending_fauna_animations: Vec::new(),
             lock_ring: None,
             ring_on: None,
             attack_pip_s: 0.0,
@@ -182,8 +207,10 @@ impl CombatLayer {
             hit_flash: false,
             pending_sfx: Vec::new(),
             pending_level_ups: Vec::new(),
-            pending_flinch: None,
-            pending_fire_bolts: Vec::new(),
+            pending_flinches: Vec::new(),
+            pending_effect_vfx: Vec::new(),
+            refreshed_status_vfx: HashSet::new(),
+            status_vfx: HashMap::new(),
             vfx: VfxSystem::new(),
             vfx_seed: 1,
             flinch: None,
@@ -222,7 +249,6 @@ impl CombatLayer {
             panic!("fixture encounter start requires a held fixture");
         }
         combat.reset_for_fixture_start();
-        self.first_auto = None;
         self.incoming_hit = false;
         self.fixture_activation = FixtureActivation::Active;
     }
@@ -261,16 +287,14 @@ impl CombatLayer {
         let actor_id =
             combat.add_canonical_mob(mob_id, combat.next_actor_runtime_index(), x, z, x, z);
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
-        self.pending_fire_bolts.clear();
-        self.pending_melee = None;
-        self.skull_tele.clear();
-        self.mage_tele.clear();
+        self.pending_flinches.clear();
+        self.pending_effect_vfx.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
@@ -352,7 +376,9 @@ impl CombatLayer {
     /// despawn does not poke a recycled entity.
     pub fn forget_meshes(&mut self) {
         self.vfx = VfxSystem::new();
-        self.pending_fire_bolts.clear();
+        self.pending_effect_vfx.clear();
+        self.refreshed_status_vfx.clear();
+        self.status_vfx.clear();
         self.mesh_ids.clear();
         self.mesh_anchors.clear();
         self.lock_ring = None;
@@ -391,10 +417,6 @@ impl CombatLayer {
 
     pub fn wants_tribal_veteran(&self) -> bool {
         self.fixture_kind == FixtureKind::TribalVeteran
-    }
-
-    pub fn first_auto(&self) -> Option<i32> {
-        self.first_auto
     }
 
     pub fn attack_pip(&self) -> bool {
@@ -490,7 +512,7 @@ impl CombatLayer {
             sparkle_mesh()?,
             GlobalPlace::at(GlobalPosition::at(x, y + SPARKLE_LIFT_M, z)),
         )?;
-        let _ = world.set_casts_shadow(id, false);
+        disable_shadow(world, id, &format!("loot sparkle for hostile {idx}"))?;
         self.sparkles.insert(idx, id);
         Ok(())
     }
@@ -511,41 +533,30 @@ impl CombatLayer {
         std::mem::take(&mut self.pending_sfx)
     }
 
-    pub fn log_potion(&self, combat: &mut WorldCombat) {
-        let heal = combat.last_potion_heal();
-        combat
-            .log_mut()
-            .push(format!("You drink a potion for {heal}"));
-    }
-
-    pub fn log_ward(&self, combat: &mut WorldCombat) {
-        combat.log_mut().push("You Ward");
-    }
-
     pub fn rearm(&mut self) {
         self.fixture = false;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
-        self.pending_fire_bolts.clear();
+        self.pending_flinches.clear();
+        self.pending_effect_vfx.clear();
         self.flinch = None;
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
-        self.pending_melee = None;
-        self.skull_tele.clear();
-        self.mage_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.ring_on = None;
         self.death_posed.clear();
         self.sparkles.clear();
     }
 
     pub fn reset_vfx(&mut self, world: &mut World) -> EngineResult<()> {
-        self.pending_fire_bolts.clear();
+        self.pending_effect_vfx.clear();
+        self.refreshed_status_vfx.clear();
+        self.status_vfx.clear();
         self.vfx.reset(world)
     }
 
@@ -553,7 +564,9 @@ impl CombatLayer {
         self.vfx
             .reset(world)
             .unwrap_or_else(|err| panic!("combat VFX reset failed: {err}"));
-        self.pending_fire_bolts.clear();
+        self.pending_effect_vfx.clear();
+        self.refreshed_status_vfx.clear();
+        self.status_vfx.clear();
         for id in self.mesh_ids.drain(..) {
             world.despawn(id);
         }
@@ -590,7 +603,7 @@ impl CombatLayer {
     /// Each hostile uses `catalog::mesh_spec(mob_id)`. Wolf stays
     /// `fauna/wolf/wolf.gltf` with MESH_BEHIND 2.55. Orc/tribal/skull
     /// sit MESH_BEHIND 1.6 m behind combat XZ so the camera is not
-    /// inside the volume during the melee step. Not FaunaLayer.
+    /// inside the volume at close range. Not FaunaLayer.
     pub fn spawn_hostile_meshes(
         &mut self,
         world: &mut World,
@@ -598,6 +611,13 @@ impl CombatLayer {
         feet_y: &[f64],
         player_yaw_deg: f32,
     ) -> EngineResult<()> {
+        let hostile_count = combat.hostiles().len();
+        if feet_y.len() != hostile_count {
+            return Err(EngineError::InvalidValue(format!(
+                "combat hostile position/feet_y cardinality mismatch: {hostile_count} hostiles, {} feet heights",
+                feet_y.len()
+            )));
+        }
         self.despawn_meshes(world);
         let yaw = player_yaw_deg + 180.0;
         // wolf.gltf is ~5.5 m long. Origin at the combat point puts the
@@ -608,7 +628,7 @@ impl CombatLayer {
         const WOLF_MESH_BEHIND_M: f64 = 2.55;
         const ORC_MESH_BEHIND_M: f64 = 1.6;
         for (i, h) in combat.hostiles_mut().iter_mut().enumerate() {
-            if h.entity.is_some() {
+            if h.presentation_entity().is_some() {
                 continue;
             }
             let result = (|| -> EngineResult<()> {
@@ -616,7 +636,7 @@ impl CombatLayer {
                     EngineError::Model(format!("no combat mesh for '{}'", h.mob_id))
                 })?;
                 let model = self.model_for(&h.mob_id)?;
-                let y = feet_y.get(i).copied().unwrap_or(0.0);
+                let y = feet_y[i];
                 let behind = if is_wolf_mesh(&h.mob_id) {
                     WOLF_MESH_BEHIND_M
                 } else {
@@ -656,7 +676,7 @@ impl CombatLayer {
                 if is_wolf_mesh(&h.mob_id) {
                     world.set_animation_speed(id, 0.65)?;
                 }
-                h.entity = Some(id);
+                h.bind_presentation(HostilePresentationSource::CombatLayer, id);
                 self.mesh_ids.push(id);
                 self.mesh_anchors.push(MeshAnchor { id, pos, yaw });
                 Ok(())
@@ -708,10 +728,7 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = combat
-            .game_data()
-            .map(|_| combat.mob_sheet("wolf"))
-            .unwrap_or_else(wolf_sheet);
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
         // First at 1.5 m so wolf reach (1.8 m) connects. The other two sit
@@ -724,12 +741,11 @@ impl CombatLayer {
                 2 => STRAFE_M,
                 _ => 0.0,
             };
-            combat.add_hostile(WorldHostile::from_sheet(
+            combat.add_hostile(combat.canonical_hostile(
+                &crate::gamedata::MobId::new("wolf"),
                 i,
                 player_x + fx * dist + sx * strafe,
                 player_z + fz * dist + sz * strafe,
-                &sheet,
-                "wolf",
                 player_x + fx * 1.5,
                 player_z + fz * 1.5,
             ));
@@ -737,12 +753,11 @@ impl CombatLayer {
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
     }
@@ -766,23 +781,21 @@ impl CombatLayer {
         for (idx, fixture) in self.held_mobs.iter().enumerate() {
             let x = player_x + fx * fixture.forward_m + rx * fixture.right_m;
             let z = player_z + fz * fixture.forward_m + rz * fixture.right_m;
-            let sheet = combat.mob_sheet(fixture.mob_id.as_str());
-            combat.add_hostile(WorldHostile::from_sheet(
+
+            combat.add_hostile(combat.canonical_hostile(
+                &fixture.mob_id,
                 i32::try_from(idx).expect("held fixture mob index"),
                 x,
                 z,
-                &sheet,
-                fixture.mob_id.as_str(),
                 x,
                 z,
             ));
         }
         self.fixture = true;
-        self.first_auto = None;
         self.incoming_hit = false;
     }
 
-    /// One published orc 1.5 m in front of the player. First Punch after swing_s.
+    /// Seat one published orc 1.5 m in front of the player.
     pub fn install_orc_fixture(
         &mut self,
         combat: &mut WorldCombat,
@@ -797,15 +810,14 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = orc_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile::from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("orc"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "orc",
             player_x + fx * 1.5,
             player_z + fz * 1.5,
         ));
@@ -813,24 +825,22 @@ impl CombatLayer {
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Orc;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
     }
 
-    /// One published yeti 1.5 m in front of the player. First Punch after swing_s.
-    /// Live slam tell is HOLD. Melee clip is Punch.
+    /// Seat one published yeti 1.5 m in front of the player.
     pub fn install_yeti_fixture(
         &mut self,
         combat: &mut WorldCombat,
@@ -845,15 +855,14 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = yeti_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile::from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("yeti"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "yeti",
             player_x + fx * 1.5,
             player_z + fz * 1.5,
         ));
@@ -861,24 +870,22 @@ impl CombatLayer {
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Yeti;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
     }
 
-    /// One published demon 1.5 m in front of the player. First Punch after swing_s.
-    /// Live shout tell is HOLD (no clip, no API). Melee clip is Punch.
+    /// Seat one published demon 1.5 m in front of the player.
     pub fn install_demon_fixture(
         &mut self,
         combat: &mut WorldCombat,
@@ -893,15 +900,14 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = demon_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile::from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("demon"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "demon",
             player_x + fx * 1.5,
             player_z + fz * 1.5,
         ));
@@ -909,24 +915,22 @@ impl CombatLayer {
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Demon;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
     }
 
-    /// One published blue_demon 1.5 m in front of the player. First Punch after swing_s.
-    /// Live bolt/self-Mend/Ward tells are HOLD (no mob caster API). Melee clip is Punch.
+    /// Seat one published blue demon 1.5 m in front of the player.
     pub fn install_bluedemon_fixture(
         &mut self,
         combat: &mut WorldCombat,
@@ -941,15 +945,14 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = blue_demon_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile::from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("blue_demon"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "blue_demon",
             player_x + fx * 1.5,
             player_z + fz * 1.5,
         ));
@@ -957,24 +960,22 @@ impl CombatLayer {
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::BlueDemon;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
     }
 
-    /// One published tribal_veteran 1.5 m in front of the player. First Punch after swing_s.
-    /// Pin/slow tells are HOLD (no clip). Melee clip is Punch. Empty hands.
+    /// Seat one published tribal veteran 1.5 m in front of the player.
     pub fn install_tribal_veteran_fixture(
         &mut self,
         combat: &mut WorldCombat,
@@ -989,15 +990,14 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = tribal_veteran_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(WorldHostile::from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("tribal_veteran"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "tribal_veteran",
             player_x + fx * 1.5,
             player_z + fz * 1.5,
         ));
@@ -1005,16 +1005,15 @@ impl CombatLayer {
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::TribalVeteran;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
@@ -1038,8 +1037,7 @@ impl CombatLayer {
             (1.0, 0.0)
         };
         let (sx, sz) = (-fz, fx);
-        let warrior = skeleton_warrior_sheet();
-        let minion = skeleton_minion_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
         for i in 0..3 {
@@ -1049,35 +1047,35 @@ impl CombatLayer {
                 2 => STRAFE_M,
                 _ => 0.0,
             };
-            let sheet = if i == 0 { &warrior } else { &minion };
             let mob_id = if i == 0 {
                 "skeleton_warrior"
             } else {
                 "skeleton_minion"
             };
-            combat.add_hostile(hostile_from_sheet(
+            let x = player_x + fx * dist + sx * strafe;
+            let z = player_z + fz * dist + sz * strafe;
+            combat.add_hostile(combat.canonical_hostile(
+                &crate::gamedata::MobId::new(mob_id),
                 i,
-                player_x + fx * dist + sx * strafe,
-                player_z + fz * dist + sz * strafe,
-                sheet,
-                mob_id,
+                x,
+                z,
+                x,
+                z,
             ));
         }
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Bones;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
-        self.mage_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
@@ -1099,38 +1097,37 @@ impl CombatLayer {
         } else {
             (1.0, 0.0)
         };
-        let sheet = skeleton_mage_sheet();
+
         combat.clear_hostiles();
         combat.reset_encounter_state();
-        combat.add_hostile(hostile_from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("skeleton_mage"),
             0,
             player_x + fx * 1.5,
             player_z + fz * 1.5,
-            &sheet,
-            "skeleton_mage",
+            player_x + fx * 1.5,
+            player_z + fz * 1.5,
         ));
         *combat = keep_player(combat);
         combat.reset_encounter_state();
         self.fixture_kind = FixtureKind::Mage;
         self.fixture = true;
-        self.first_auto = None;
         self.attack_pip_s = 0.0;
         self.swing_whoosh = false;
         self.hit_flash = false;
         self.pending_sfx.clear();
-        self.pending_flinch = None;
+        self.pending_flinches.clear();
         self.flinch = None;
         self.ring_on = None;
-        self.pending_melee = None;
-        self.skull_tele.clear();
-        self.mage_tele.clear();
+        self.pending_actor_animations.clear();
+        self.pending_fauna_animations.clear();
         self.incoming_hit = false;
         self.hurt_flash_s = 0.0;
         self.hp_ghost_frac = 0.0;
         self.hp_chunk_s = 0.0;
     }
 
-    /// Soft lock + auto. Does not touch camera, Esc, or E.
+    /// Cycle the canonical target lock without touching camera, Esc, or E.
     pub fn press_tab(
         &mut self,
         combat: &mut WorldCombat,
@@ -1150,12 +1147,9 @@ impl CombatLayer {
         facing_x: f64,
         facing_z: f64,
         dt: f64,
-    ) -> Option<i32> {
-        if dt <= 0.0 {
-            return None;
-        }
-        if self.fixture_activation == FixtureActivation::Held {
-            return None;
+    ) {
+        if dt <= 0.0 || self.fixture_activation == FixtureActivation::Held {
+            return;
         }
         if self.attack_pip_s > 0.0 {
             self.attack_pip_s = (self.attack_pip_s - dt).max(0.0);
@@ -1166,70 +1160,53 @@ impl CombatLayer {
         if self.hp_chunk_s > 0.0 {
             self.hp_chunk_s = (self.hp_chunk_s - dt).max(0.0);
         }
-        let mut just = None;
         let fixed_steps = combat.consume_fixed_steps(dt);
         for _ in 0..fixed_steps {
-            let pending_cast = combat.cast_kind();
-            let lock_id = combat.lock_id();
-            let lock_hp = lock_id.and_then(|id| {
-                combat
-                    .hostiles()
-                    .iter()
-                    .find(|h| h.idx == id)
-                    .map(|h| (h.name.clone(), h.hp(), h.root_s, h.slow_s))
-            });
-            let player_hp = combat.player().resources.hp();
-            let ward = combat.ward_value();
             let step = combat.step_fixed(player_x, player_z, facing_x, facing_z);
-            log_finished_cast(combat, pending_cast, lock_id, lock_hp, player_hp, ward);
-            if let Some((dealt, target_id, strike)) = step.outgoing {
-                if self.first_auto.is_none() {
-                    self.first_auto = Some(dealt);
-                }
-                self.attack_pip_s = ATTACK_PIP_S;
-                self.swing_whoosh = true;
-                self.hit_flash = true;
-                self.pending_sfx.push(CombatSfx::Swing);
-                self.pending_sfx.push(CombatSfx::Hit);
-                self.pending_flinch = Some(target_id);
-                just = Some(dealt);
-                let name = combat
-                    .hostiles()
-                    .iter()
-                    .find(|h| h.idx == target_id)
-                    .map(|h| h.name.clone())
-                    .unwrap_or_else(|| "Wolf".into());
-                combat.log_mut().push(format!(
-                    "You {} {name} for {dealt}",
-                    if strike { "Strike" } else { "hit" }
-                ));
-            }
-            if let Some((prev_hp, hit)) = step.incoming {
-                self.latch_incoming_chunk(prev_hp, combat.player().resources.hp_max());
-                self.pending_sfx.push(CombatSfx::Hurt);
-                combat
-                    .log_mut()
-                    .push(format!("{} hits you for {}", hit.by, hit.dealt));
-                if hit.killed {
-                    combat.log_mut().push("You are slain");
-                }
-                if let Some(h) = combat
-                    .hostiles()
-                    .iter()
-                    .find(|h| h.name == hit.by || h.mob_id == hit.by)
-                {
-                    queue_connecting_melee(&mut self.pending_melee, &self.models, h);
-                }
-            }
             self.present_resolutions(combat, step.resolutions);
-            self.present_special_events(combat, step.specials);
         }
-        just
     }
 
     fn present_resolutions(&mut self, combat: &mut WorldCombat, resolutions: Vec<Resolution>) {
         for mut resolution in resolutions {
-            let caster_is_player = resolution.caster == 0;
+            let caster_is_player = resolution.caster.get() == 0;
+            if !caster_is_player {
+                let action = combat
+                    .game_data()
+                    .action(&resolution.action_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resolution references unknown action {}",
+                            resolution.action_id
+                        )
+                    });
+                let hostile = combat
+                    .hostiles()
+                    .iter()
+                    .find(|hostile| hostile.actor_id().canonical() == resolution.caster.get())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resolution references missing caster {:?}",
+                            resolution.caster
+                        )
+                    });
+                let animation = if action.cast_s() > 0.0
+                    && mesh_spec(&hostile.mob_id).is_some_and(|spec| spec.anim_weapon.is_some())
+                {
+                    AnimationAction::Cast
+                } else {
+                    AnimationAction::Attack
+                };
+                match hostile.presentation_source() {
+                    HostilePresentationSource::Headless => {}
+                    HostilePresentationSource::Fauna => self
+                        .pending_fauna_animations
+                        .push((hostile.actor_id(), animation)),
+                    HostilePresentationSource::CombatLayer => self
+                        .pending_actor_animations
+                        .push((hostile.actor_id(), animation)),
+                }
+            }
             self.pending_level_ups.extend(
                 resolution
                     .level_ups
@@ -1242,42 +1219,84 @@ impl CombatLayer {
                     if applied <= 0.0 {
                         continue;
                     }
-                    match effect.kind {
-                        EffectKind::Damage if caster_is_player => {
-                            let hostile_index = target
-                                .checked_sub(1)
-                                .expect("player damage target must be a hostile actor");
+                    let target_runtime_id = (target.get() != 0).then(|| {
+                        combat
+                            .hostiles()
+                            .iter()
+                            .find(|hostile| hostile.actor_id().canonical() == target.get())
+                            .unwrap_or_else(|| {
+                                panic!("resolution references missing hostile actor {target:?}")
+                            })
+                            .idx
+                    });
+                    match effect.operation {
+                        EffectOperation::DirectDamage if target.get() != 0 => {
+                            let target_id = target_runtime_id.expect("hostile target id");
                             let hostile_name = combat
                                 .hostiles()
-                                .get(hostile_index)
-                                .unwrap_or_else(|| {
-                                    panic!("resolution references missing hostile actor {target}")
-                                })
+                                .iter()
+                                .find(|hostile| hostile.idx == target_id)
+                                .expect("resolution hostile target")
                                 .name
                                 .clone();
                             let dealt = applied.round() as i32;
-                            if self.first_auto.is_none() {
-                                self.first_auto = Some(dealt);
+                            if caster_is_player {
+                                self.attack_pip_s = ATTACK_PIP_S;
+                                self.swing_whoosh = true;
+                                self.pending_sfx.push(CombatSfx::Swing);
+                                let action_name = combat
+                                    .game_data()
+                                    .action(&resolution.action_id)
+                                    .expect("resolution action validated")
+                                    .name()
+                                    .to_owned();
+                                combat
+                                    .log_mut()
+                                    .push(format!("You {action_name} {hostile_name} for {dealt}"));
+                            } else {
+                                let attacker = combat
+                                    .hostiles()
+                                    .iter()
+                                    .find(|hostile| {
+                                        hostile.actor_id().canonical() == resolution.caster.get()
+                                    })
+                                    .map(|hostile| hostile.name.clone())
+                                    .unwrap_or_else(|| "Hostile".into());
+                                combat
+                                    .log_mut()
+                                    .push(format!("{attacker} hits {hostile_name} for {dealt}"));
                             }
-                            self.attack_pip_s = ATTACK_PIP_S;
-                            self.swing_whoosh = true;
                             self.hit_flash = true;
-                            self.pending_sfx.push(CombatSfx::Swing);
                             self.pending_sfx.push(CombatSfx::Hit);
-                            let target_id = combat.hostiles()[hostile_index].idx;
-                            self.pending_flinch = Some(target_id);
-                            if resolution.action_id.as_str() == "fire_bolt" {
-                                self.pending_fire_bolts.push(target_id);
+                            let target_hostile = combat
+                                .hostiles()
+                                .iter()
+                                .find(|hostile| hostile.idx == target_id)
+                                .expect("resolution hostile target");
+                            match target_hostile.presentation_source() {
+                                HostilePresentationSource::Headless => {}
+                                HostilePresentationSource::Fauna => self
+                                    .pending_fauna_animations
+                                    .push((target_hostile.actor_id(), AnimationAction::Hit)),
+                                HostilePresentationSource::CombatLayer => {
+                                    self.pending_flinches.push(target_id)
+                                }
                             }
-                            combat.log_mut().push(format!(
-                                "You {} {} for {dealt}",
-                                resolution.action_id, hostile_name
-                            ));
+                            self.pending_effect_vfx.push(EffectPresentation {
+                                operation: effect.operation,
+                                application: effect.application,
+                                caster: resolution.caster,
+                                target,
+                                duration_s: effect.duration_s,
+                            });
                         }
-                        EffectKind::Damage => {
+                        EffectOperation::DirectDamage => {
                             let attacker = combat
                                 .hostiles()
-                                .get(resolution.caster - 1)
+                                .iter()
+                                .find(|hostile| {
+                                    hostile.actor_id().canonical() == resolution.caster.get()
+                                })
                                 .map(|hostile| hostile.name.clone())
                                 .unwrap_or_else(|| "Hostile".into());
                             self.latch_incoming_chunk(
@@ -1292,177 +1311,56 @@ impl CombatLayer {
                             if combat.is_dead() {
                                 combat.log_mut().push("You are slain");
                             }
-                            if let Some(hostile) = combat.hostiles().get(resolution.caster - 1) {
-                                queue_connecting_melee(
-                                    &mut self.pending_melee,
-                                    &self.models,
-                                    hostile,
-                                );
+                        }
+                        EffectOperation::Heal => {
+                            if caster_is_player {
+                                combat.log_mut().push(format!(
+                                    "You {} for {}",
+                                    resolution.action_id,
+                                    applied.round() as i32
+                                ));
+                            } else {
+                                let caster = combat
+                                    .hostiles()
+                                    .iter()
+                                    .find(|hostile| {
+                                        hostile.actor_id().canonical() == resolution.caster.get()
+                                    })
+                                    .map(|hostile| hostile.name.clone())
+                                    .unwrap_or_else(|| "Hostile".into());
+                                combat
+                                    .log_mut()
+                                    .push(format!("{caster} heals for {}", applied.round() as i32));
+                            }
+                            if target_runtime_id.is_some() || target.get() == 0 {
+                                self.pending_effect_vfx.push(EffectPresentation {
+                                    operation: effect.operation,
+                                    application: effect.application,
+                                    caster: resolution.caster,
+                                    target,
+                                    duration_s: effect.duration_s,
+                                });
                             }
                         }
-                        EffectKind::Heal if caster_is_player => {
-                            combat.log_mut().push(format!(
-                                "You {} for {}",
-                                resolution.action_id,
-                                applied.round() as i32
-                            ));
+                        EffectOperation::Root
+                        | EffectOperation::Hold
+                        | EffectOperation::Snare
+                        | EffectOperation::Charm => {
+                            if target_runtime_id.is_some() || target.get() == 0 {
+                                self.refreshed_status_vfx.insert(StatusVfxIdentity {
+                                    target,
+                                    kind: status_kind(effect.operation),
+                                });
+                            }
                         }
-                        _ => {}
                     }
                 }
             }
         }
     }
 
-    fn present_special_events(
-        &mut self,
-        combat: &mut WorldCombat,
-        events: Vec<SpecialAttackEvent>,
-    ) {
-        for event in events {
-            let Some(h) = combat
-                .hostiles()
-                .iter()
-                .find(|h| h.idx == event.attacker_idx)
-            else {
-                panic!(
-                    "special attack event references missing hostile {}",
-                    event.attacker_idx
-                );
-            };
-            let tele = match event.cue {
-                SpecialAttackCue::Weapon => &mut self.skull_tele,
-                SpecialAttackCue::SpellcastShoot => &mut self.mage_tele,
-            };
-            if event.hit.is_none() {
-                let duration = match event.cue {
-                    SpecialAttackCue::Weapon => SKULL_TELE_S,
-                    SpecialAttackCue::SpellcastShoot => MAGE_TELE_S,
-                };
-                tele.insert(event.attacker_idx, duration);
-                let clip = match event.cue {
-                    SpecialAttackCue::Weapon => "Weapon",
-                    SpecialAttackCue::SpellcastShoot => "Spellcast_Shoot",
-                };
-                self.pending_melee = Some((h.entity, clip));
-                continue;
-            }
-            tele.remove(&event.attacker_idx);
-            let hit = event.hit.expect("special hit present after is_none check");
-            self.latch_incoming_chunk(event.previous_player_hp, combat.player().resources.hp_max());
-            self.pending_sfx.push(CombatSfx::Hurt);
-            combat
-                .log_mut()
-                .push(format!("{} hits you for {}", hit.by, hit.dealt));
-            if hit.killed {
-                combat.log_mut().push("You are slain");
-            }
-        }
-    }
-
-    /// Play catalog anim_melee on the locked mesh only.
-    pub fn replay_melee(&mut self, world: &mut World, combat: &WorldCombat) {
-        let Some(lock) = combat.lock_id() else {
-            panic!("{}", EngineError::Model("replay_melee: no lock".into()));
-        };
-        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
-            panic!(
-                "{}",
-                EngineError::Model("replay_melee: lock not in hostiles".into())
-            );
-        };
-        let _spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
-            panic!(
-                "{}",
-                EngineError::Model(format!("replay_melee: no mesh spec for '{}'", h.mob_id))
-            )
-        });
-        let id = h
-            .entity
-            .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
-            .unwrap_or_else(|| {
-                panic!(
-                    "{}",
-                    EngineError::Model("replay_melee: locked mesh has no entity".into())
-                )
-            });
-        if let Err(err) = world.play_animation_action(id, AnimationAction::Attack) {
-            panic!(
-                "{}",
-                EngineError::Model(format!("melee action failed for '{}': {err}", h.mob_id))
-            );
-        }
-        if let Err(err) = world.set_animation_speed(id, 1.0) {
-            panic!(
-                "{}",
-                EngineError::Model(format!("melee clip speed failed: {err}"))
-            );
-        }
-    }
-
-    /// Play catalog anim_weapon (Spellcast_Shoot) on the locked mesh. Fail-loud.
-    pub fn replay_weapon(&mut self, world: &mut World, combat: &WorldCombat) {
-        let Some(lock) = combat.lock_id() else {
-            panic!("{}", EngineError::Model("replay_weapon: no lock".into()));
-        };
-        let Some(h) = combat.hostiles().iter().find(|h| h.idx == lock) else {
-            panic!(
-                "{}",
-                EngineError::Model("replay_weapon: lock not in hostiles".into())
-            );
-        };
-        let spec = mesh_spec(&h.mob_id).unwrap_or_else(|| {
-            panic!(
-                "{}",
-                EngineError::Model(format!("replay_weapon: no mesh spec for '{}'", h.mob_id))
-            )
-        });
-        let _clip = spec.anim_weapon.unwrap_or_else(|| {
-            panic!(
-                "{}",
-                EngineError::Model(format!("replay_weapon: '{}' has no anim_weapon", h.mob_id))
-            )
-        });
-        let id = h
-            .entity
-            .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
-            .unwrap_or_else(|| {
-                panic!(
-                    "{}",
-                    EngineError::Model("replay_weapon: locked mesh has no entity".into())
-                )
-            });
-        if let Err(err) = world.play_animation_action(id, AnimationAction::Cast) {
-            panic!(
-                "{}",
-                EngineError::Model(format!("weapon action failed for '{}': {err}", h.mob_id))
-            );
-        }
-        if let Err(err) = world.set_animation_speed(id, 1.0) {
-            panic!(
-                "{}",
-                EngineError::Model(format!("weapon clip speed failed: {err}"))
-            );
-        }
-    }
-
-    /// Session hook: ring + flinch after the combat clock. `player_y` is the
-    /// fallback ground when the caller has no column yet.
-    pub fn sync_tells(
-        &mut self,
-        world: &mut World,
-        combat: &WorldCombat,
-        player_y: f64,
-        dt: f64,
-        _just: Option<i32>,
-    ) -> EngineResult<()> {
-        self.present(
-            world,
-            combat,
-            GlobalPosition::at(0.0, player_y, 0.0),
-            |_, _| player_y,
-            dt as f32,
-        )
+    pub fn take_fauna_animation_cues(&mut self) -> Vec<(crate::combat::ActorId, AnimationAction)> {
+        std::mem::take(&mut self.pending_fauna_animations)
     }
 
     /// Lock ring + hit flinch. Call after [`Self::tick`] with the live world.
@@ -1471,21 +1369,45 @@ impl CombatLayer {
         world: &mut World,
         combat: &WorldCombat,
         player_position: GlobalPosition,
-        mut ground_y: impl FnMut(f64, f64) -> f64,
+        mut ground_y: impl FnMut(f64, f64) -> EngineResult<f64>,
         dt: f32,
     ) -> EngineResult<()> {
-        if let Some((Some(id), clip)) = self.pending_melee.take() {
-            world
-                .play_animation(id, clip)
-                .map_err(|err| EngineError::Model(format!("melee clip '{clip}' failed: {err}")))?;
+        for (actor_id, animation) in std::mem::take(&mut self.pending_actor_animations) {
+            let hostile = combat
+                .hostiles()
+                .iter()
+                .find(|hostile| hostile.actor_id() == actor_id)
+                .ok_or_else(|| {
+                    EngineError::Model(format!(
+                        "combat presentation cue references missing actor {actor_id:?}"
+                    ))
+                })?;
+            if hostile.presentation_source() != HostilePresentationSource::CombatLayer {
+                return Err(EngineError::Model(format!(
+                    "combat presentation cue for {actor_id:?} has owner {:?}",
+                    hostile.presentation_source()
+                )));
+            }
+            let id = hostile.presentation_entity().ok_or_else(|| {
+                EngineError::Model(format!(
+                    "combat-owned actor {actor_id:?} has no presentation entity"
+                ))
+            })?;
+            world.play_animation_action(id, animation).map_err(|err| {
+                EngineError::Model(format!(
+                    "typed combat animation failed for {actor_id:?}: {err}"
+                ))
+            })?;
         }
         self.play_death_poses(world, combat)?;
         self.sync_lock_ring(world, combat, &mut ground_y)?;
-        let fire_targets = std::mem::take(&mut self.pending_fire_bolts);
-        for target_id in &fire_targets {
-            self.spawn_fire_bolt(world, combat, player_position, *target_id, &mut ground_y)?;
+        self.reconcile_status_vfx(world, combat, player_position, &mut ground_y)?;
+        let effects = std::mem::take(&mut self.pending_effect_vfx);
+        for effect in effects {
+            let _handle =
+                self.spawn_effect_vfx(world, combat, player_position, effect, &mut ground_y)?;
         }
-        if let Some(target_id) = self.pending_flinch.take() {
+        for target_id in std::mem::take(&mut self.pending_flinches) {
             self.start_flinch(world, combat, target_id)?;
         }
         self.tick_flinch(world, dt)?;
@@ -1498,17 +1420,35 @@ impl CombatLayer {
         &mut self,
         world: &mut World,
         combat: &WorldCombat,
-        mut ground_y: impl FnMut(f64, f64) -> Option<f64>,
+        mut ground_y: impl FnMut(f64, f64) -> EngineResult<f64>,
     ) -> EngineResult<()> {
         for h in combat.hostiles() {
-            let Some(id) = h.entity else {
-                continue;
-            };
-            let Some(anchor) = self.mesh_anchors.iter().find(|a| a.id == id) else {
-                continue;
-            };
+            match h.presentation_source() {
+                HostilePresentationSource::Headless | HostilePresentationSource::Fauna => continue,
+                HostilePresentationSource::CombatLayer => {}
+            }
+            let id = h.presentation_entity().ok_or_else(|| {
+                EngineError::Model(format!(
+                    "combat-owned hostile {:?} has no presentation entity during transform sync",
+                    h.actor_id()
+                ))
+            })?;
+            self.mesh_anchors
+                .iter()
+                .find(|a| a.id == id)
+                .ok_or_else(|| {
+                    EngineError::Model(format!(
+                        "combat-owned hostile {:?} entity {id} has no mesh anchor",
+                        h.actor_id()
+                    ))
+                })?;
             let (x, z, heading) = h.presented_pose(combat.presentation_alpha());
-            let y = ground_y(x, z).unwrap_or(anchor.pos.y);
+            let y = ground_y(x, z).map_err(|source| {
+                EngineError::InvalidValue(format!(
+                    "missing required ground contact for hostile {:?} at ({x:.3}, {z:.3}): {source}",
+                    h.actor_id()
+                ))
+            })?;
             let render = world.to_render(GlobalPosition::at(x, y, z))?;
             let yaw = heading.x().atan2(heading.z()).to_degrees() as f32;
             let place = Place::at(render.x, render.y, render.z)?.yaw_deg(yaw)?;
@@ -1541,14 +1481,21 @@ impl CombatLayer {
             if h.is_alive() {
                 continue;
             }
-            let Some(id) = h
-                .entity
-                .or_else(|| self.mesh_ids.get(h.idx as usize).copied())
-            else {
-                continue;
-            };
+            match h.presentation_source() {
+                HostilePresentationSource::Headless | HostilePresentationSource::Fauna => continue,
+                HostilePresentationSource::CombatLayer => {}
+            }
+            let id = h.presentation_entity().ok_or_else(|| {
+                EngineError::Model(format!(
+                    "combat-owned dead hostile {:?} has no presentation entity",
+                    h.actor_id()
+                ))
+            })?;
             if !self.mesh_anchors.iter().any(|anchor| anchor.id == id) {
-                continue;
+                return Err(EngineError::Model(format!(
+                    "combat-owned dead hostile {:?} entity {id} has no mesh anchor",
+                    h.actor_id()
+                )));
             }
             if !self.death_posed.insert(id) {
                 continue;
@@ -1578,7 +1525,7 @@ impl CombatLayer {
         &mut self,
         world: &mut World,
         combat: &WorldCombat,
-        ground_y: &mut impl FnMut(f64, f64) -> f64,
+        ground_y: &mut impl FnMut(f64, f64) -> EngineResult<f64>,
     ) -> EngineResult<()> {
         let want = combat.lock_id().filter(|_| self.fixture);
         let still = want == self.ring_on
@@ -1593,67 +1540,193 @@ impl CombatLayer {
         let Some(lock) = want else {
             return Ok(());
         };
-        let Some(h) = combat
+        let h = combat
             .hostiles()
             .iter()
-            .find(|h| h.idx == lock && h.is_alive())
-        else {
-            return Ok(());
-        };
-        let (x, z) = self
+            .find(|h| h.idx == lock)
+            .ok_or_else(|| {
+                EngineError::Model(format!(
+                    "target lock references missing hostile runtime id {lock}"
+                ))
+            })?;
+        if !h.is_alive() {
+            return Err(EngineError::Model(format!(
+                "target lock references dead hostile {:?} (runtime id {lock})",
+                h.actor_id()
+            )));
+        }
+        let entity = h.presentation_entity().ok_or_else(|| {
+            EngineError::Model(format!(
+                "locked hostile {:?} (runtime id {lock}, owner {:?}) has no presentation entity",
+                h.actor_id(),
+                h.presentation_source()
+            ))
+        })?;
+        let anchor = self
             .mesh_anchors
             .iter()
-            .find(|a| Some(a.id) == h.entity)
-            .map(|a| (a.pos.x, a.pos.z))
-            .unwrap_or((h.x, h.z));
-        let y = ground_y(x, z) + RING_LIFT_M;
+            .find(|anchor| anchor.id == entity)
+            .ok_or_else(|| {
+                EngineError::Model(format!(
+                    "locked hostile {:?} (runtime id {lock}, owner {:?}) entity {entity} has no presentation anchor",
+                    h.actor_id(),
+                    h.presentation_source()
+                ))
+            })?;
+        let (x, z) = (anchor.pos.x, anchor.pos.z);
+        let y = ground_y(x, z)? + RING_LIFT_M;
         let mesh = lock_ring_mesh()?;
         let place = GlobalPlace::at(GlobalPosition::at(x, y, z));
         let id = world.spawn_anchored(mesh, place)?;
-        let _ = world.set_casts_shadow(id, false);
+        disable_shadow(world, id, &format!("target-lock ring for hostile {lock}"))?;
         self.lock_ring = Some(id);
         self.ring_on = Some(lock);
         Ok(())
     }
 
-    fn spawn_fire_bolt(
+    fn spawn_effect_vfx(
         &mut self,
         world: &mut World,
         combat: &WorldCombat,
         player_position: GlobalPosition,
-        target_id: i32,
-        ground_y: &mut impl FnMut(f64, f64) -> f64,
-    ) -> EngineResult<()> {
-        let hostile = combat
-            .hostiles()
-            .iter()
-            .find(|hostile| hostile.idx == target_id)
-            .unwrap_or_else(|| panic!("fire bolt references missing hostile {target_id}"));
-        let target_y = ground_y(hostile.x, hostile.z);
-        let target = world.to_render(GlobalPosition::at(hostile.x, target_y + 0.85, hostile.z))?;
-        let origin = world.to_render(GlobalPosition::at(
-            player_position.x,
-            player_position.y + 1.35,
-            player_position.z,
-        ))?;
+        effect: EffectPresentation,
+        ground_y: &mut impl FnMut(f64, f64) -> EngineResult<f64>,
+    ) -> EngineResult<EffectHandle> {
+        let mut actor_position = |actor: ResolutionActorId| -> EngineResult<GlobalPosition> {
+            if actor.get() == 0 {
+                return Ok(GlobalPosition::at(
+                    player_position.x,
+                    player_position.y + 1.0,
+                    player_position.z,
+                ));
+            }
+            let hostile = combat
+                .hostiles()
+                .iter()
+                .find(|hostile| hostile.actor_id().canonical() == actor.get())
+                .unwrap_or_else(|| panic!("effect references missing hostile actor {actor:?}"));
+            Ok(GlobalPosition::at(
+                hostile.x,
+                ground_y(hostile.x, hostile.z)? + 0.85,
+                hostile.z,
+            ))
+        };
+        let origin = world.to_render(actor_position(effect.caster)?)?;
+        let target = world.to_render(actor_position(effect.target)?)?;
         let distance = origin.distance(target).max(0.1);
-        self.vfx.spawn(
+        let duration_s = if effect.duration_s > 0.0 {
+            effect.duration_s as f32
+        } else {
+            1.15
+        };
+        let handle = self.vfx.spawn(
             world,
             EffectSpec {
-                kind: VisualKind::Fire,
-                delivery: Delivery::SingleTarget,
+                kind: visual_kind(effect.operation),
+                delivery: delivery(effect.application),
                 origin,
                 target,
                 range_m: distance,
                 radius_m: 1.0,
                 angle_deg: 45.0,
-                duration_s: 1.15,
+                duration_s,
                 scale: 0.75,
                 intensity: 1.0,
                 seed: self.vfx_seed,
             },
         )?;
         self.vfx_seed = self.vfx_seed.wrapping_add(1);
+        Ok(handle)
+    }
+
+    fn reconcile_status_vfx(
+        &mut self,
+        world: &mut World,
+        combat: &WorldCombat,
+        player_position: GlobalPosition,
+        ground_y: &mut impl FnMut(f64, f64) -> EngineResult<f64>,
+    ) -> EngineResult<()> {
+        let mut desired = HashMap::new();
+        if !combat.is_dead() {
+            for status in combat
+                .player()
+                .canonical_actor
+                .as_ref()
+                .into_iter()
+                .flat_map(|a| a.statuses())
+            {
+                desired.insert(
+                    StatusVfxIdentity {
+                        target: ResolutionActorId::new(0),
+                        kind: status.kind(),
+                    },
+                    (status.source(), status.remaining_s()),
+                );
+            }
+        }
+        for hostile in combat.hostiles().iter().filter(|h| h.is_alive()) {
+            for status in hostile.statuses() {
+                desired.insert(
+                    StatusVfxIdentity {
+                        target: ResolutionActorId::new(hostile.actor_id().canonical()),
+                        kind: status.kind(),
+                    },
+                    (status.source(), status.remaining_s()),
+                );
+            }
+        }
+        let identities: HashSet<_> = self
+            .status_vfx
+            .keys()
+            .copied()
+            .chain(desired.keys().copied())
+            .collect();
+        for identity in identities {
+            let tracked = self.status_vfx.contains_key(&identity);
+            let active = self
+                .status_vfx
+                .get(&identity)
+                .is_some_and(|h| self.vfx.is_active(*h));
+            let want = desired.get(&identity).copied();
+            let decision = status_vfx_decision(
+                tracked,
+                active,
+                want.is_some(),
+                self.refreshed_status_vfx.contains(&identity),
+            );
+            if matches!(
+                decision,
+                StatusVfxDecision::Remove | StatusVfxDecision::Replace
+            ) {
+                if let Some(handle) = self.status_vfx.remove(&identity) {
+                    if self.vfx.is_active(handle) {
+                        self.vfx.interrupt(world, handle)?;
+                    }
+                }
+            }
+            if matches!(
+                decision,
+                StatusVfxDecision::Spawn | StatusVfxDecision::Replace
+            ) {
+                let (source, duration_s) =
+                    want.expect("status spawn decision requires desired status");
+                let handle = self.spawn_effect_vfx(
+                    world,
+                    combat,
+                    player_position,
+                    EffectPresentation {
+                        operation: status_operation(identity.kind),
+                        application: Application::SingleTarget,
+                        caster: source,
+                        target: identity.target,
+                        duration_s,
+                    },
+                    ground_y,
+                )?;
+                self.status_vfx.insert(identity, handle);
+            }
+        }
+        self.refreshed_status_vfx.clear();
         Ok(())
     }
 
@@ -1663,15 +1736,38 @@ impl CombatLayer {
         combat: &WorldCombat,
         target_id: i32,
     ) -> EngineResult<()> {
-        let Some(h) = combat.hostiles().iter().find(|h| h.idx == target_id) else {
-            return Ok(());
-        };
-        let Some(entity) = h.entity else {
-            return Ok(());
-        };
-        let Some(anchor) = self.mesh_anchors.iter().find(|a| a.id == entity) else {
-            return Ok(());
-        };
+        let h = combat
+            .hostiles()
+            .iter()
+            .find(|h| h.idx == target_id)
+            .ok_or_else(|| {
+                EngineError::Model(format!(
+                    "flinch references missing hostile runtime id {target_id}"
+                ))
+            })?;
+        if h.presentation_source() != HostilePresentationSource::CombatLayer {
+            return Err(EngineError::Model(format!(
+                "CombatLayer flinch cannot present {:?}-owned actor {:?}",
+                h.presentation_source(),
+                h.actor_id()
+            )));
+        }
+        let entity = h.presentation_entity().ok_or_else(|| {
+            EngineError::Model(format!(
+                "combat-owned flinch target {:?} has no presentation entity",
+                h.actor_id()
+            ))
+        })?;
+        let anchor = self
+            .mesh_anchors
+            .iter()
+            .find(|a| a.id == entity)
+            .ok_or_else(|| {
+                EngineError::Model(format!(
+                    "combat-owned flinch target {:?} entity {entity} has no mesh anchor",
+                    h.actor_id()
+                ))
+            })?;
         apply_mesh_scale(world, anchor, FLINCH_PEAK)?;
         self.flinch = Some(Flinch {
             id: anchor.id,
@@ -1723,14 +1819,25 @@ fn sparkle_mesh() -> EngineResult<Mesh> {
     Ok(mesh)
 }
 
+fn disable_shadow(world: &mut World, id: EntityId, context: &str) -> EngineResult<()> {
+    world.set_casts_shadow(id, false).map_err(|source| {
+        EngineError::Model(format!(
+            "disable shadows for {context} entity {id}: {source}"
+        ))
+    })
+}
+
 fn apply_mesh_scale(world: &mut World, anchor: &MeshAnchor, scale: f32) -> EngineResult<()> {
     let render = world.to_render(anchor.pos)?;
     let place = Place::at(render.x, render.y, render.z)?
         .yaw_deg(anchor.yaw)?
         .scale(scale)?;
-    // Wolf may have been despawned on rearm; a missing body is not a hard fail.
-    let _ = world.set_place(anchor.id, place);
-    Ok(())
+    world.set_place(anchor.id, place).map_err(|err| {
+        EngineError::Model(format!(
+            "flinch scale failed for entity {}: {err}",
+            anchor.id
+        ))
+    })
 }
 
 fn lock_ring_mesh() -> EngineResult<Mesh> {
@@ -1786,76 +1893,6 @@ fn lock_ring_mesh() -> EngineResult<Mesh> {
     mesh.paint_all(GOLD);
     Ok(mesh)
 }
-
-fn log_finished_cast(
-    combat: &mut WorldCombat,
-    kind: Option<&str>,
-    lock_id: Option<i32>,
-    before: Option<(String, f64, f64, f64)>,
-    player_hp: f64,
-    ward: f64,
-) {
-    let Some(kind) = kind else {
-        return;
-    };
-    let name = before
-        .as_ref()
-        .map(|(n, _, _, _)| n.clone())
-        .or_else(|| {
-            lock_id.and_then(|id| {
-                combat
-                    .hostiles()
-                    .iter()
-                    .find(|h| h.idx == id)
-                    .map(|h| h.name.clone())
-            })
-        })
-        .unwrap_or_else(|| "Wolf".into());
-    match kind {
-        "aimed" | "pin" | "ember" => {
-            if let Some((_, hp0, _, _)) = before {
-                if let Some(h) =
-                    lock_id.and_then(|id| combat.hostiles().iter().find(|h| h.idx == id))
-                {
-                    let dealt = (hp0 - h.hp()).round() as i32;
-                    if dealt > 0 {
-                        let verb = match kind {
-                            "aimed" => "Aimed Shot",
-                            "pin" => "Pin",
-                            "ember" => "Ember",
-                            _ => kind,
-                        };
-                        combat
-                            .log_mut()
-                            .push(format!("You {verb} {name} for {dealt}"));
-                    }
-                }
-            }
-        }
-        "bind" => {
-            if let Some((_, _, root0, _)) = before {
-                if let Some(h) =
-                    lock_id.and_then(|id| combat.hostiles().iter().find(|h| h.idx == id))
-                {
-                    if h.root_s > root0 {
-                        combat.log_mut().push(format!("You Bind {name}"));
-                    }
-                }
-            }
-        }
-        "mend" => {
-            let heal = (combat.player().resources.hp() - player_hp).round() as i32;
-            if heal > 0 {
-                combat.log_mut().push(format!("You Mend for {heal}"));
-            }
-        }
-        "ward" if combat.ward_value() > ward => {
-            combat.log_mut().push("You Ward");
-        }
-        _ => {}
-    }
-}
-
 fn keep_player(combat: &WorldCombat) -> WorldCombat {
     let mut out = combat.clone();
     out.reset_for_encounter();
@@ -1871,38 +1908,6 @@ pub fn is_bone_id(mob_id: &str) -> bool {
         mob_id,
         "skeleton_warrior" | "skeleton_minion" | "skeleton_mage"
     )
-}
-
-fn queue_clip(
-    pending: &mut Option<(Option<EntityId>, &'static str)>,
-    models: &HashMap<String, Arc<AnimatedModel>>,
-    h: &WorldHostile,
-    clip: &'static str,
-) {
-    let Some(spec) = mesh_spec(&h.mob_id) else {
-        return;
-    };
-    let has_clip = models
-        .get(spec.id)
-        .map(|m| m.find_clip(clip).is_some())
-        .unwrap_or(true);
-    if has_clip {
-        *pending = Some((h.entity, clip));
-    }
-}
-
-fn queue_connecting_melee(
-    pending: &mut Option<(Option<EntityId>, &'static str)>,
-    models: &HashMap<String, Arc<AnimatedModel>>,
-    h: &WorldHostile,
-) {
-    let Some(spec) = mesh_spec(&h.mob_id) else {
-        return;
-    };
-    if spec.anim_melee == spec.anim_idle {
-        return;
-    }
-    queue_clip(pending, models, h, spec.anim_melee);
 }
 
 fn assets_dir() -> EngineResult<PathBuf> {
@@ -1921,13 +1926,14 @@ fn assets_dir() -> EngineResult<PathBuf> {
             return Ok(root.clone());
         }
     }
-    Err(EngineError::Model(format!(
-        "no assets under {}",
+    Err(EngineError::Model(format!("no assets under {}", {
+        assert!(!tried.is_empty(), "asset candidate invariant");
         tried
-            .first()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
-    )))
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    })))
 }
 
 fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
@@ -1958,15 +1964,17 @@ fn load_combat_model(mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
     Ok(Arc::new(model))
 }
 
-fn hostile_from_sheet(idx: i32, x: f64, z: f64, sheet: &MobSheet, mob_id: &str) -> WorldHostile {
-    WorldHostile::from_sheet(idx, x, z, sheet, mob_id, x, z)
-}
-
 pub fn seat_dungeon_skulls(combat: &mut WorldCombat, spots: &[GlobalXZ]) {
-    let sheet = orc_skull_sheet();
     let next = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     for (idx, p) in (next..).zip(spots.iter()) {
-        combat.add_hostile(hostile_from_sheet(idx, p.x, p.z, &sheet, "orc_skull"));
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("orc_skull"),
+            idx,
+            p.x,
+            p.z,
+            p.x,
+            p.z,
+        ));
     }
 }
 
@@ -1981,34 +1989,35 @@ pub fn clear_dungeon_skulls(combat: &mut WorldCombat) {
 
 pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: Option<GlobalXZ>) {
     let mut idx = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
-    let warrior = skeleton_warrior_sheet();
-    let minion = skeleton_minion_sheet();
-    let mage = skeleton_mage_sheet();
+
     let (fx, fz) = (1.0, 0.0);
     let (sx, sz) = (-fz, fx);
     for p in spots {
-        combat.add_hostile(hostile_from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("skeleton_warrior"),
             idx,
             p.x,
             p.z,
-            &warrior,
-            "skeleton_warrior",
+            p.x,
+            p.z,
         ));
         idx += 1;
-        combat.add_hostile(hostile_from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("skeleton_minion"),
             idx,
             p.x + sx * -STRAFE_M,
             p.z + sz * -STRAFE_M,
-            &minion,
-            "skeleton_minion",
+            p.x + sx * -STRAFE_M,
+            p.z + sz * -STRAFE_M,
         ));
         idx += 1;
-        combat.add_hostile(hostile_from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("skeleton_minion"),
             idx,
             p.x + sx * STRAFE_M,
             p.z + sz * STRAFE_M,
-            &minion,
-            "skeleton_minion",
+            p.x + sx * STRAFE_M,
+            p.z + sz * STRAFE_M,
         ));
         idx += 1;
     }
@@ -2018,12 +2027,13 @@ pub fn seat_dungeon_bones(combat: &mut WorldCombat, spots: &[GlobalXZ], heart: O
             .unwrap_or(spots.len() > 1)
     });
     if let Some(p) = mage_at {
-        combat.add_hostile(hostile_from_sheet(
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("skeleton_mage"),
             idx,
             p.x + fx * STRAFE_M,
             p.z + fz * STRAFE_M,
-            &mage,
-            "skeleton_mage",
+            p.x + fx * STRAFE_M,
+            p.z + fz * STRAFE_M,
         ));
     }
 }
@@ -2037,513 +2047,251 @@ pub fn clear_dungeon_bones(combat: &mut WorldCombat) {
     }
 }
 
-/// Headless live lock+auto of the L1 Martial fixture wolf. First mitigated hit is 11.
-pub fn first_fixture_auto_hit() -> i32 {
-    let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-    let mut layer = CombatLayer::install();
-    layer.request_wolf_fixture();
-    layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-    layer.start_fixture_encounter(&mut combat);
-    combat.press_tab(0.0, 0.0, 1.0, 0.0);
-    layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
-    layer
-        .first_auto()
-        .expect("fixture L1 Martial auto must land within 2 s")
+fn status_kind(operation: EffectOperation) -> TimedStatusKind {
+    match operation {
+        EffectOperation::Root => TimedStatusKind::Root,
+        EffectOperation::Hold => TimedStatusKind::Hold,
+        EffectOperation::Snare => TimedStatusKind::Snare,
+        EffectOperation::Charm => TimedStatusKind::Charm,
+        EffectOperation::DirectDamage | EffectOperation::Heal => {
+            panic!("transient operation {operation:?} has no timed status identity")
+        }
+    }
+}
+
+fn status_operation(kind: TimedStatusKind) -> EffectOperation {
+    match kind {
+        TimedStatusKind::Root => EffectOperation::Root,
+        TimedStatusKind::Hold => EffectOperation::Hold,
+        TimedStatusKind::Snare => EffectOperation::Snare,
+        TimedStatusKind::Charm => EffectOperation::Charm,
+    }
+}
+
+fn visual_kind(operation: EffectOperation) -> VisualKind {
+    match operation {
+        EffectOperation::DirectDamage => VisualKind::Fire,
+        EffectOperation::Heal => VisualKind::Frost,
+        EffectOperation::Root => VisualKind::Root,
+        EffectOperation::Hold => VisualKind::Hold,
+        EffectOperation::Snare => VisualKind::Snare,
+        EffectOperation::Charm => VisualKind::Charm,
+    }
+}
+
+fn delivery(application: Application) -> Delivery {
+    match application {
+        Application::SingleTarget => Delivery::SingleTarget,
+        Application::Cone => Delivery::Cone,
+        Application::Aoe => Delivery::Aoe,
+        Application::Pbaoe => Delivery::Pbaoe,
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod typed_presentation_tests {
     use super::*;
-    use crate::combat::math::{mitigation, MAGE_BOLT_DMG, SKULL_BOLT_DMG};
-    use crate::world::fauna::FaunaCatalog;
 
-    #[test]
-    fn first_mitigated_auto_on_l1_wolf_is_11() {
-        assert_eq!(first_fixture_auto_hit(), 11);
+    fn world_entity(world: &mut World) -> EntityId {
+        let mut mesh = Mesh::new();
+        let a = mesh.add_point((0.0, 0.0, 0.0)).expect("point");
+        let b = mesh.add_point((1.0, 0.0, 0.0)).expect("point");
+        let c = mesh.add_point((0.0, 1.0, 0.0)).expect("point");
+        mesh.add_triangle(a, b, c).expect("triangle");
+        world.spawn(mesh)
+    }
+
+    fn test_combat() -> WorldCombat {
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        WorldCombat::with_game_data(data)
     }
 
     #[test]
-    fn orc_sheet_fixture_is_one_orc_with_swing_cd_armed() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+    fn combat_owned_transform_without_anchor_is_loud() {
+        let mut combat = test_combat();
+        let mut hostile =
+            combat.canonical_hostile(&crate::gamedata::MobId::new("deer"), 0, 2.0, 0.0, 2.0, 0.0);
+        let mut world = World::new();
+        let entity = world_entity(&mut world);
+        hostile.bind_presentation(HostilePresentationSource::CombatLayer, entity);
+        combat.add_hostile(hostile);
         let mut layer = CombatLayer::install();
-        layer.install_orc_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 1);
-        let h = &combat.hostiles()[0];
-        assert_eq!(h.mob_id, "orc");
-        assert_eq!(h.name, "orc");
-        assert!((h.x - 1.5).abs() < 1e-9);
-        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
-        assert!((h.reach_m - 2.0).abs() < 1e-9);
-        assert_eq!(h.max_hp(), 130.0);
-        assert!(layer.wants_orc());
-        assert!(layer.fixture_ready());
+        let err = layer
+            .sync_hostile_transforms(&mut world, &combat, |_, _| Ok(0.0))
+            .expect_err("missing combat anchor must fail");
+        assert!(err.to_string().contains("no mesh anchor"), "{err}");
     }
 
     #[test]
-    fn demon_sheet_fixture_is_one_demon_with_swing_cd_armed() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_demon_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 1);
-        let h = &combat.hostiles()[0];
-        assert_eq!(h.mob_id, "demon");
-        assert_eq!(h.name, "demon");
-        assert!((h.x - 1.5).abs() < 1e-9);
-        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
-        assert!((h.reach_m - 2.2).abs() < 1e-9);
-        assert_eq!(h.max_hp(), 220.0);
-        assert_eq!(h.damage, 16);
-        assert!(layer.wants_demon());
-        assert!(layer.fixture_ready());
-    }
-
-    #[test]
-    fn blue_demon_sheet_fixture_is_one_blue_demon_with_swing_cd_armed() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_bluedemon_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 1);
-        let h = &combat.hostiles()[0];
-        assert_eq!(h.mob_id, "blue_demon");
-        assert_eq!(h.name, "blue_demon");
-        assert!((h.x - 1.5).abs() < 1e-9);
-        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
-        assert!((h.reach_m - 2.0).abs() < 1e-9);
-        assert_eq!(h.max_hp(), 155.0);
-        assert_eq!(h.damage, 12);
-        assert!(layer.wants_bluedemon());
-        assert!(layer.fixture_ready());
-        assert!(!layer.wants_demon());
-    }
-
-    #[test]
-    fn tribal_veteran_sheet_fixture_is_one_tribal_veteran_with_swing_cd_armed() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_tribal_veteran_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 1);
-        let h = &combat.hostiles()[0];
-        assert_eq!(h.mob_id, "tribal_veteran");
-        assert_eq!(h.name, "tribal_veteran");
-        assert!((h.x - 1.5).abs() < 1e-9);
-        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
-        assert!((h.reach_m - 1.6).abs() < 1e-9);
-        assert_eq!(h.max_hp(), 210.0);
-        assert_eq!(h.damage, 22);
-        assert!(layer.wants_tribal_veteran());
-        assert!(layer.fixture_ready());
-        assert!(!layer.wants_bluedemon());
-    }
-
-    #[test]
-    fn yeti_sheet_fixture_is_one_yeti_with_swing_cd_armed() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_yeti_fixture(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 1);
-        let h = &combat.hostiles()[0];
-        assert_eq!(h.mob_id, "yeti");
-        assert_eq!(h.name, "yeti");
-        assert!((h.x - 1.5).abs() < 1e-9);
-        assert!((h.swing_cd - h.swing_s).abs() < 1e-9);
-        assert!((h.reach_m - 2.2).abs() < 1e-9);
-        assert_eq!(h.max_hp(), 240.0);
-        assert!(layer.wants_yeti());
-        assert!(layer.fixture_ready());
-    }
-
-    #[test]
-    fn held_canonical_mob_freezes_then_starts_once_and_preserves_actor_ids() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
-        let data = Arc::new(crate::gamedata::GameData::load(path).expect("canonical GameData"));
-        let mut combat = WorldCombat::specialist_with_game_data(data, 1, Discipline::Martial);
-        let prior = combat.add_canonical_mob(
-            &crate::gamedata::MobId::new("wolf"),
+    fn hostile_feet_cardinality_mismatch_is_loud_before_mutation() {
+        let mut combat = test_combat();
+        combat.add_hostile(combat.canonical_hostile(
+            &crate::gamedata::MobId::new("deer"),
             0,
-            30.0,
+            2.0,
             0.0,
-            30.0,
+            2.0,
             0.0,
+        ));
+        let mut world = World::new();
+        let mut layer = CombatLayer::install();
+
+        let err = layer
+            .spawn_hostile_meshes(&mut world, &mut combat, &[], 0.0)
+            .expect_err("missing feet height must fail");
+        assert!(err.to_string().contains("cardinality mismatch"), "{err}");
+    }
+
+    #[test]
+    fn missing_hostile_ground_contact_is_loud() {
+        let mut combat = test_combat();
+        let mut hostile =
+            combat.canonical_hostile(&crate::gamedata::MobId::new("deer"), 0, 2.0, 0.0, 2.0, 0.0);
+        let mut world = World::new();
+        let entity = world_entity(&mut world);
+        hostile.bind_presentation(HostilePresentationSource::CombatLayer, entity);
+        combat.add_hostile(hostile);
+        let mut layer = CombatLayer::install();
+        layer.mesh_anchors.push(MeshAnchor {
+            id: entity,
+            pos: GlobalPosition::at(2.0, 123.0, 2.0),
+            yaw: 0.0,
+        });
+
+        let err = layer
+            .sync_hostile_transforms(&mut world, &combat, |_, _| {
+                Err(EngineError::InvalidValue("fixture has no ground".into()))
+            })
+            .expect_err("missing ground contact must not use stale anchor Y");
+        assert!(
+            err.to_string().contains("missing required ground contact"),
+            "{err}"
         );
-        let mut layer = CombatLayer::install();
-        layer.request_canonical_mob_fixture();
-        let seated = layer.install_canonical_mob_fixture(
-            &mut combat,
-            &crate::gamedata::MobId::new("orc"),
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-        );
-
-        assert_eq!(combat.hostiles().len(), 1);
-        assert_eq!(combat.hostiles()[0].mob_id, "orc");
-        assert!(seated > prior, "canonical ActorId must remain monotonic");
-        let hp = combat.player().resources.hp();
-        combat.hostiles_mut()[0].swing_cd = 0.0;
-        assert!(layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 20.0).is_none());
-        assert_eq!(combat.player().resources.hp(), hp);
-        assert!(layer.fixture_encounter_held());
-
-        layer.start_fixture_encounter(&mut combat);
-        combat.hostiles_mut()[0].swing_cd = 0.0;
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.1);
-        assert!(combat.player().resources.hp() < hp);
     }
 
     #[test]
-    #[should_panic(expected = "fixture encounter start requires a held fixture")]
-    fn held_canonical_mob_cannot_start_twice() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
-        let data = Arc::new(crate::gamedata::GameData::load(path).expect("canonical GameData"));
-        let mut combat = WorldCombat::specialist_with_game_data(data, 1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.request_canonical_mob_fixture();
-        layer.install_canonical_mob_fixture(
-            &mut combat,
-            &crate::gamedata::MobId::new("orc"),
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-        );
-        layer.start_fixture_encounter(&mut combat);
-        layer.start_fixture_encounter(&mut combat);
-    }
-
-    #[test]
-    fn held_wolf_fixture_waits_for_explicit_start_and_tab() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.request_wolf_fixture();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.apply_damage_to_player(500, "fixture setup".into());
-
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 10.0);
-        assert!(combat.is_dead());
-        assert_eq!(combat.player().resources.hp(), 0.0);
-        assert!(combat.lock_id().is_none());
-        assert!(layer.first_auto().is_none());
-
-        layer.start_fixture_encounter(&mut combat);
-        assert!(!combat.is_dead());
-        assert_eq!(
-            combat.player().resources.hp(),
-            combat.player().resources.hp_max()
-        );
-        assert!(combat.lock_id().is_none());
-        combat.press_tab(0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.lock_id(), Some(0));
-    }
-
-    #[test]
-    fn combat_walk_is_4_5_not_10() {
-        assert!((CombatLayer::install().walk_mps() - 4.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn first_auto_latches_swing_hit_and_opens_pip() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.7);
-        assert!(layer.first_auto().is_none());
-        assert!(!layer.swing_whoosh());
-        assert!(!layer.hit_flash());
-        assert!(!layer.attack_pip());
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
-        assert_eq!(layer.first_auto(), Some(11));
-        assert!(layer.swing_whoosh());
-        assert!(layer.hit_flash());
-        assert!(layer.attack_pip());
-        let sfx = layer.take_combat_sfx();
-        assert!(sfx.contains(&CombatSfx::Swing));
-        assert!(sfx.contains(&CombatSfx::Hit));
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
-        assert!(!layer.attack_pip());
-        assert!(layer.swing_whoosh());
-        assert!(layer.hit_flash());
-    }
-
-    #[test]
-    fn strike_next_swing_is_one_point_five() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert!(combat.press_verb(crate::combat::CombatVerb::Strike, 0.0, 0.0, 1.0, 0.0));
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
-        assert_eq!(layer.first_auto(), Some(16));
-    }
-
-    #[test]
-    fn ember_is_create_and_bind_is_rank_gated() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ember_is_started());
-        combat.set_cast_kind(None);
-        combat.set_gcd(0.0);
-        combat.set_busy_time(0.0);
-        assert!(!combat.press_verb(crate::combat::CombatVerb::Bind, 0.0, 0.0, 1.0, 0.0));
-        let gate = combat
-            .last_rank_gate()
-            .expect("bind rank miss is fail-loud");
-        assert!(gate.blocked);
-        assert_eq!(gate.action, crate::combat::CombatVerb::Bind);
-    }
-
-    #[test]
-    fn ember_starts_on_l1_martial_without_arcane_rank() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert_eq!(combat.player().stats.ranks.arcane, 0);
-        let mana_before = combat.player().resources.mana();
-        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ember_is_started());
-        assert_eq!(combat.player().stats.ranks.arcane, 0);
-        assert!(combat.player().resources.mana() < mana_before);
-    }
-
-    #[test]
-    fn bash_is_blocked_on_l1_martial() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert!(!combat.press_verb(crate::combat::CombatVerb::Bash, 0.0, 0.0, 1.0, 0.0));
-        let gate = combat.last_rank_gate().expect("rank miss is fail-loud");
-        assert!(gate.blocked);
-        assert_eq!(gate.action, crate::combat::CombatVerb::Bash);
-        assert_ne!(combat.cast_kind(), Some("bash"));
-    }
-
-    #[test]
-    fn potion_heals_forty() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.set_player_hp(50.0);
-        assert!(combat.press_verb(crate::combat::CombatVerb::Potion, 0.0, 0.0, 1.0, 0.0));
-        assert_eq!(combat.player().resources.hp(), 90.0);
-        assert_eq!(combat.player().potions, 0);
-        assert_eq!(combat.last_potion_heal(), 40);
-    }
-
-    #[test]
-    fn fixture_lock_name_and_mesh_are_canonical_wolf() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        assert_eq!(combat.hostiles().len(), 3);
-        let expected = if combat.game_data().is_some() {
-            "Wolf"
-        } else {
-            "wolf-spider"
+    fn stale_flinch_entity_is_loud() {
+        let mut world = World::new();
+        let stale = world_entity(&mut world);
+        world.despawn(stale);
+        let anchor = MeshAnchor {
+            id: stale,
+            pos: GlobalPosition::at(0.0, 0.0, 0.0),
+            yaw: 0.0,
         };
-        assert!(combat.hostiles().iter().all(|h| h.name == expected));
-        assert!((combat.hostiles()[0].x - 1.5).abs() < 1e-9);
-        assert!(combat.hostiles()[0].z.abs() < 1e-9);
-        assert!((combat.hostiles()[1].z + 1.8).abs() < 1e-9);
-        assert!((combat.hostiles()[2].z - 1.8).abs() < 1e-9);
-        let catalog = FaunaCatalog::load().expect("fauna catalog");
-        let spec = catalog.spec("wolf");
-        assert_eq!(spec.source, "wolf/wolf.gltf");
-        let model = load_combat_model("wolf").expect("wolf.gltf via AnimatedModel");
-        assert!(model.find_clip(&spec.anim_idle).is_some());
+        let err =
+            apply_mesh_scale(&mut world, &anchor, 1.1).expect_err("stale flinch entity must fail");
+        assert!(err.to_string().contains("flinch scale failed"), "{err}");
     }
 
     #[test]
-    fn lock_ring_mesh_is_gold_and_nonempty() {
-        let mesh = lock_ring_mesh().expect("ring mesh");
-        assert!(mesh.point_count() > 32);
-        assert!(mesh.face_count() > 32);
-    }
-
-    #[test]
-    fn lock_ring_major_stays_inside_one_strafe_gap() {
+    fn shadow_configuration_failure_has_presentation_context() {
+        let mut world = World::new();
+        let stale = world_entity(&mut world);
+        world.despawn(stale);
+        let err = disable_shadow(&mut world, stale, "test marker")
+            .expect_err("stale marker shadow update must fail");
         assert!(
-            RING_MAJOR_M < STRAFE_M as f32,
-            "ring major {RING_MAJOR_M} must stay under strafe {STRAFE_M} so one lock reads as one body"
+            err.to_string().contains("disable shadows for test marker"),
+            "{err}"
         );
+        assert!(err.to_string().contains(&stale.to_string()), "{err}");
     }
 
     #[test]
-    fn tick_pushes_outgoing_and_incoming_log_lines() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+    fn stale_target_lock_is_loud() {
+        let mut combat = test_combat();
+        combat.set_lock(Some(77));
         let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.0);
-        let lines: Vec<_> = combat.log_lines();
+        layer.fixture = true;
+        let mut world = World::new();
+        let err = layer
+            .sync_lock_ring(&mut world, &combat, &mut |_, _| Ok(0.0))
+            .expect_err("missing locked hostile must fail");
         assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("You hit wolf-spider for ")),
-            "{lines:?}"
+            err.to_string()
+                .contains("target lock references missing hostile"),
+            "{err}"
         );
-        combat.set_player_hp(5.0);
-        for h in combat.hostiles_mut() {
-            h.swing_cd = 0.0;
-        }
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.2);
-        let lines: Vec<_> = combat.log_lines();
-        assert!(
-            lines.iter().any(|l| l.contains(" hits you for ")),
-            "{lines:?}"
-        );
-        layer.log_potion(&mut combat);
-        assert!(combat
-            .log_lines()
-            .iter()
-            .any(|l| l.starts_with("You drink a potion for ")));
+        assert!(err.to_string().contains("77"), "{err}");
     }
 
     #[test]
-    fn ember_cast_pushes_log_line() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
+    fn locked_visible_hostile_without_anchor_is_loud() {
+        let mut combat = test_combat();
+        let mut hostile =
+            combat.canonical_hostile(&crate::gamedata::MobId::new("deer"), 5, 2.0, 0.0, 2.0, 0.0);
+        let mut world = World::new();
+        let entity = world_entity(&mut world);
+        hostile.bind_presentation(HostilePresentationSource::CombatLayer, entity);
+        combat.add_hostile(hostile);
+        combat.set_lock(Some(5));
         let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert!(combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 2.5);
-        let lines: Vec<_> = combat.log_lines();
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with("You Ember wolf-spider for ")),
-            "{lines:?}"
-        );
+        layer.fixture = true;
+        let err = layer
+            .sync_lock_ring(&mut world, &combat, &mut |_, _| Ok(0.0))
+            .expect_err("locked hostile without anchor must fail");
+        assert!(err.to_string().contains("no presentation anchor"), "{err}");
+        assert!(err.to_string().contains("CombatLayer"), "{err}");
     }
 
     #[test]
-    fn mage_bolt_telegraphs_spellcast_shoot_then_deals_mitigated_15() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.clear_hostiles();
-        let sheet = skeleton_mage_sheet();
-        combat.add_hostile(hostile_from_sheet(0, 10.0, 0.0, &sheet, "skeleton_mage"));
-        let hp0 = combat.player().resources.hp();
-        let mut layer = CombatLayer::install();
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
-        assert!(
-            layer.mage_tele.contains_key(&0),
-            "mage telegraph should start on first tick"
+    fn every_typed_operation_has_a_visual_kind() {
+        assert_eq!(visual_kind(EffectOperation::DirectDamage), VisualKind::Fire);
+        assert_eq!(visual_kind(EffectOperation::Heal), VisualKind::Frost);
+        assert_eq!(visual_kind(EffectOperation::Root), VisualKind::Root);
+        assert_eq!(visual_kind(EffectOperation::Hold), VisualKind::Hold);
+        assert_eq!(visual_kind(EffectOperation::Snare), VisualKind::Snare);
+        assert_eq!(visual_kind(EffectOperation::Charm), VisualKind::Charm);
+    }
+
+    #[test]
+    fn persistent_status_presentation_uses_authored_duration() {
+        let cue = EffectPresentation {
+            operation: EffectOperation::Root,
+            application: Application::SingleTarget,
+            caster: ResolutionActorId::new(0),
+            target: ResolutionActorId::new(1),
+            duration_s: 4.0,
+        };
+        assert_eq!(cue.duration_s, 4.0);
+        assert_eq!(visual_kind(cue.operation), VisualKind::Root);
+    }
+
+    #[test]
+    fn every_typed_application_has_a_delivery() {
+        assert_eq!(delivery(Application::SingleTarget), Delivery::SingleTarget);
+        assert_eq!(delivery(Application::Cone), Delivery::Cone);
+        assert_eq!(delivery(Application::Aoe), Delivery::Aoe);
+        assert_eq!(delivery(Application::Pbaoe), Delivery::Pbaoe);
+    }
+
+    #[test]
+    fn status_vfx_reconciliation_replaces_refresh_and_removes_absent_status() {
+        assert_eq!(
+            status_vfx_decision(false, false, true, false),
+            StatusVfxDecision::Spawn
         );
         assert_eq!(
-            layer.pending_melee.as_ref().map(|(_, clip)| *clip),
-            Some("Spellcast_Shoot"),
-            "Spellcast_Shoot queued"
-        );
-        assert_eq!(combat.player().resources.hp(), hp0);
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
-        let want = mitigation(f64::from(MAGE_BOLT_DMG), combat.player().stats.attrs.grit);
-        let skull = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
-        assert_ne!(want, skull, "mage bolt 15 is not skull bolt 14");
-        assert_eq!(combat.player().resources.hp(), hp0 - f64::from(want));
-    }
-
-    #[test]
-    fn seat_dungeon_bones_is_warrior_two_minions_and_one_non_heart_mage() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.clear_hostiles();
-        let spots = [GlobalXZ::at(0.0, 0.0), GlobalXZ::at(10.0, 0.0)];
-        let heart = Some(GlobalXZ::at(10.0, 0.0));
-        seat_dungeon_bones(&mut combat, &spots, heart);
-        let warriors: Vec<_> = combat
-            .hostiles()
-            .iter()
-            .filter(|h| h.mob_id == "skeleton_warrior")
-            .collect();
-        let minions: Vec<_> = combat
-            .hostiles()
-            .iter()
-            .filter(|h| h.mob_id == "skeleton_minion")
-            .collect();
-        let mages: Vec<_> = combat
-            .hostiles()
-            .iter()
-            .filter(|h| h.mob_id == "skeleton_mage")
-            .collect();
-        assert_eq!(warriors.len(), 2);
-        assert_eq!(minions.len(), 4);
-        assert_eq!(mages.len(), 1);
-        assert!((mages[0].x - STRAFE_M).abs() < 1e-9);
-        assert!((mages[0].z).abs() < 1e-9);
-        assert_eq!(mages[0].name, "Mage");
-        assert_eq!(warriors[0].name, "Warrior");
-        assert_eq!(minions[0].name, "Minion");
-        assert!((minions[0].z + STRAFE_M).abs() < 1e-9 || (minions[0].z - STRAFE_M).abs() < 1e-9);
-    }
-
-    #[test]
-    fn skull_bolt_telegraphs_weapon_then_deals_mitigated_14() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.clear_hostiles();
-        let sheet = orc_skull_sheet();
-        combat.add_hostile(hostile_from_sheet(0, 10.0, 0.0, &sheet, "orc_skull"));
-        let hp0 = combat.player().resources.hp();
-        let mut layer = CombatLayer::install();
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
-        assert!(
-            layer.skull_tele.contains_key(&0),
-            "telegraph should start on first tick"
+            status_vfx_decision(true, true, true, false),
+            StatusVfxDecision::Keep
         );
         assert_eq!(
-            layer.pending_melee.as_ref().map(|(_, clip)| *clip),
-            Some("Weapon"),
-            "Weapon queued"
+            status_vfx_decision(true, true, true, true),
+            StatusVfxDecision::Replace
         );
-        assert_eq!(combat.player().resources.hp(), hp0);
-        layer.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 1.2);
-        let want = mitigation(f64::from(SKULL_BOLT_DMG), combat.player().stats.attrs.grit);
-        assert_eq!(combat.player().resources.hp(), hp0 - f64::from(want));
-        let lines: Vec<_> = combat.log_lines();
-        assert!(
-            lines.iter().any(|l| l.contains(" hits you for ")),
-            "{lines:?}"
+        assert_eq!(
+            status_vfx_decision(true, false, true, false),
+            StatusVfxDecision::Replace
         );
-    }
-
-    #[test]
-    fn ember_without_lock_tells_no_target() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(None);
-        assert!(!combat.press_verb(crate::combat::CombatVerb::Ember, 0.0, 0.0, 1.0, 0.0));
-        assert!(!combat.ember_is_started());
-        assert_eq!(combat.fail_tell(), Some("No target"));
-        let lines: Vec<_> = combat.log_lines();
-        assert!(lines.iter().any(|l| l == "No target"), "{lines:?}");
-    }
-
-    #[test]
-    fn strike_past_melee_tells_out_of_range() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        let mut layer = CombatLayer::install();
-        layer.install_l1_wolf_line(&mut combat, 0.0, 0.0, 1.0, 0.0);
-        combat.set_lock(Some(0));
-        assert!(!combat.press_verb(crate::combat::CombatVerb::Strike, -4.0, 0.0, 1.0, 0.0));
-        assert!(!combat.strike_is_armed());
-        assert_eq!(combat.fail_tell(), Some("Out of range"));
-        let lines: Vec<_> = combat.log_lines();
-        assert!(lines.iter().any(|l| l == "Out of range"), "{lines:?}");
-    }
-
-    #[test]
-    fn ward_success_pushes_you_ward() {
-        let mut combat = WorldCombat::specialist(1, Discipline::Martial);
-        combat.player_mut().stats.ranks.arcane = 7;
-        let layer = CombatLayer::install();
-        assert!(combat.press_verb(crate::combat::CombatVerb::Ward, 0.0, 0.0, 1.0, 0.0));
-        assert!(combat.ward_value() > 0.0);
-        layer.log_ward(&mut combat);
-        let lines: Vec<_> = combat.log_lines();
-        assert!(lines.iter().any(|l| l == "You Ward"), "{lines:?}");
+        assert_eq!(
+            status_vfx_decision(true, true, false, false),
+            StatusVfxDecision::Remove
+        );
     }
 }

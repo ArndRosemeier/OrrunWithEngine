@@ -10,7 +10,7 @@
 //! next level. Current resource values (current HP, current mana) do not live
 //! here; capacity is derived from the proficiency level on demand.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -277,21 +277,9 @@ impl ActorProgression {
         Self::from_levels(profile.skills().iter().map(|s| (s.id().clone(), s.level())))
     }
 
-    /// Initialize from an authored mob definition: every skill reachable from
-    /// the mob's actions starts at level 1 (provisional; the schema carries no
-    /// per-mob skill level yet). HP and mana start at level 1.
-    pub fn from_mob(mob: &MobDefinition, gamedata: &GameData) -> Self {
-        let mut ids = BTreeSet::new();
-        for action_id in mob.actions() {
-            if let Some(action) = gamedata.action(action_id) {
-                for assignment in action.effects() {
-                    if let Some(effect) = gamedata.effect(assignment.effect_id()) {
-                        ids.insert(effect.skill_id().clone());
-                    }
-                }
-            }
-        }
-        Self::from_levels(ids.into_iter().map(|id| (id, 1)))
+    /// Initialize from authored mob skill levels.
+    pub fn from_mob(mob: &MobDefinition, _gamedata: &GameData) -> Self {
+        Self::from_levels(mob.skills().iter().map(|s| (s.id().clone(), s.level())))
     }
 
     /// Export exact progression state in stable skill-ID order.
@@ -727,12 +715,12 @@ mod tests {
             .profile(&ProfileId::new("default_player"))
             .expect("default player");
         let p = ActorProgression::from_profile(profile);
-        assert_eq!(p.skill_level(&SkillId::new("slashing_damage")), Some(1));
+        assert_eq!(p.skill_level(&SkillId::new("melee")), Some(1));
         assert_eq!(p.skill_level(&SkillId::new("healing")), Some(1));
 
         let wolf = data.mob(&MobId::new("wolf")).expect("wolf mob");
         let m = ActorProgression::from_mob(wolf, &data);
-        assert!(m.skill_level(&SkillId::new("slashing_damage")).is_some());
+        assert!(m.skill_level(&SkillId::new("melee")).is_some());
         assert_eq!(m.hp_level(), 1);
     }
 }

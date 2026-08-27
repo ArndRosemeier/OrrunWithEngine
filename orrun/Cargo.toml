@@ -14,6 +14,10 @@ name = "orrun"
 path = "src/main.rs"
 
 [[bin]]
+name = "playtester"
+path = "src/bin/playtester.rs"
+
+[[bin]]
 name = "hamlet_lab"
 path = "src/bin/hamlet_lab.rs"
 
@@ -32,14 +36,6 @@ path = "src/bin/chunk_cost.rs"
 [[bin]]
 name = "pond_map"
 path = "src/bin/pond_map.rs"
-
-[[bin]]
-name = "playtester"
-path = "src/bin/playtester.rs"
-
-[[bin]]
-name = "combat_sim"
-path = "src/bin/combat_sim.rs"
 
 [dependencies]
 engine = { workspace = true }

@@ -414,6 +414,7 @@ impl DungeonLayer {
                                 },
                             };
                             if tx.send(msg).is_err() {
+                                // Receiver drop means the layer cancelled this obsolete generation batch.
                                 return;
                             }
                         }
@@ -818,9 +819,7 @@ fn pick_heart(clusters: &[(Vec3, u32)], mouth: Option<Vec3>) -> Option<Vec3> {
         .max_by(|(a, an), (b, bn)| {
             let da = mouth.map(|m| (a.x - m.x).hypot(a.z - m.z)).unwrap_or(0.0);
             let db = mouth.map(|m| (b.x - m.x).hypot(b.z - m.z)).unwrap_or(0.0);
-            da.partial_cmp(&db)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(an.cmp(bn))
+            da.total_cmp(&db).then(an.cmp(bn))
         })
         .map(|(c, _)| *c)
 }

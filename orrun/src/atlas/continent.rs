@@ -63,7 +63,9 @@ pub struct ContinentAtlas {
 impl ContinentAtlas {
     pub fn generate(world_seed: i32, size: usize) -> Self {
         assert!(size >= 32, "atlas size must be >= 32, got {size}");
-        let count = size * size;
+        let count = size
+            .checked_mul(size)
+            .expect("atlas size squared overflows usize");
         let mut cells = vec![0i32; count];
         let mut landmass_id = vec![-1i32; count];
         let mut lake_scratch = LakeScratch::new(count);
@@ -410,7 +412,7 @@ impl ContinentAtlas {
         let mut errors = Vec::new();
         let label = if kind == Kind::River { "river" } else { "road" };
         for az in 0..self.size {
-            for ax in 0..self.size.saturating_sub(1) {
+            for ax in 0..self.size.checked_sub(1).expect("validated atlas size") {
                 let a = self.ports_on_edge(ax as i32, az as i32, Dir::East, kind);
                 let b = self.ports_on_edge(ax as i32 + 1, az as i32, Dir::West, kind);
                 if a.len() != b.len() {
@@ -431,7 +433,7 @@ impl ContinentAtlas {
                 }
             }
         }
-        for az in 0..self.size.saturating_sub(1) {
+        for az in 0..self.size.checked_sub(1).expect("validated atlas size") {
             for ax in 0..self.size {
                 let a = self.ports_on_edge(ax as i32, az as i32, Dir::South, kind);
                 let b = self.ports_on_edge(ax as i32, az as i32 + 1, Dir::North, kind);

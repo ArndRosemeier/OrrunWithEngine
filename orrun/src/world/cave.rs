@@ -318,6 +318,7 @@ impl CaveLayer {
                                 },
                             };
                             if tx.send(msg).is_err() {
+                                // Receiver drop means the layer cancelled this obsolete generation batch.
                                 return;
                             }
                         }

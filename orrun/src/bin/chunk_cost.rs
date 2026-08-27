@@ -12,8 +12,29 @@ use orrun::world::{chunk_of, ContinentalSurface, TerrainChunkBuilder, CHUNK_SPAN
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-    let size = args.next().and_then(|s| s.parse().ok()).unwrap_or(64usize);
+    let seed = args
+        .next()
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid seed '{value}': {error}"))
+        })
+        .unwrap_or(1);
+    let size = args
+        .next()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid size '{value}': {error}"))
+        })
+        .unwrap_or(64);
+    assert!(
+        (32..=512).contains(&size),
+        "size must be in 32..=512, got {size}"
+    );
+    if let Some(extra) = args.next() {
+        panic!("unexpected command-line argument '{extra}'");
+    }
 
     let atlas = ContinentAtlas::generate(seed, size);
     eprintln!("alpine massifs: {}", atlas.alpine_massifs.len());

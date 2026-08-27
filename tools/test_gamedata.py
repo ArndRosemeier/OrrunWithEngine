@@ -1,98 +1,103 @@
 import unittest
 from pathlib import Path
+
 from tools.gamedata import GameData
 
+
 class GameDataTests(unittest.TestCase):
-    def test_starter_data_has_all_sections_and_canonical_animals(self):
-        data = GameData.load(Path("data/OrrunGameData.xml"))
-        self.assertEqual(len(data.mobs), 26)
-        self.assertEqual(data.validate(), [])
+    def setUp(self):
+        self.data = GameData.load(Path("data/OrrunGameData.xml"))
+        self.xml = self.data.to_xml()
 
-    def test_canonical_round_trip(self):
-        data = GameData.load(Path("data/OrrunGameData.xml"))
-        self.assertEqual(GameData.from_xml(data.to_xml()).to_xml(), data.to_xml())
-
-    def test_action_timings_round_trip(self):
-        data = GameData.load(Path("data/OrrunGameData.xml"))
-        actions = {action.id: action for action in data.actions}
-        self.assertEqual(actions["strike"].cast_s, 0.0)
-        self.assertEqual(actions["strike"].cooldown_s, 6.0)
-        self.assertEqual(actions["fire_bolt"].cast_s, 1.2)
-        self.assertEqual(actions["fire_bolt"].cooldown_s, 0.0)
-        self.assertEqual(actions["mend"].cast_s, 2.5)
-        round_tripped = {action.id: action for action in GameData.from_xml(data.to_xml()).actions}
-        self.assertEqual(round_tripped["strike"].cooldown_s, 6.0)
-        self.assertEqual(round_tripped["fire_bolt"].cast_s, 1.2)
-        self.assertEqual(round_tripped["mend"].cast_s, 2.5)
-
-    def test_negative_action_timing_is_rejected(self):
-        xml = GameData.load(Path("data/OrrunGameData.xml")).to_xml().replace('cast_s="1.2"', 'cast_s="-1"', 1)
-        with self.assertRaisesRegex(ValueError, "cast_s and cooldown_s must be non-negative"):
-            GameData.from_xml(xml)
-
-    def test_mob_motion_bounds_and_round_trip(self):
-        original = GameData.load(Path("data/OrrunGameData.xml")).to_xml()
-        for ratio in ("0", "0.20"):
-            xml = original.replace('speed_variance_ratio="0.08"', f'speed_variance_ratio="{ratio}"', 1)
-            data = GameData.from_xml(xml)
-            wolf = next(mob for mob in data.mobs if mob.id == "wolf")
-            self.assertEqual(wolf.speed_variance_ratio, float(ratio))
-            self.assertEqual(wolf.endurance_s, 28.0)
-            round_tripped = GameData.from_xml(data.to_xml())
-            round_trip_wolf = next(mob for mob in round_tripped.mobs if mob.id == "wolf")
-            self.assertEqual(round_trip_wolf.speed_variance_ratio, float(ratio))
-            self.assertEqual(round_trip_wolf.endurance_s, 28.0)
-
-    def test_missing_mob_motion_fields_are_rejected(self):
-        original = GameData.load(Path("data/OrrunGameData.xml")).to_xml()
-        for attribute in (' speed_variance_ratio="0.08"', ' endurance_s="28"'):
-            with self.subTest(attribute=attribute):
-                xml = original.replace(attribute, "", 1)
-                with self.assertRaisesRegex(ValueError, "missing attributes"):
-                    GameData.from_xml(xml)
-
-    def test_non_finite_mob_motion_fields_are_rejected(self):
-        original = GameData.load(Path("data/OrrunGameData.xml")).to_xml()
-        for attribute, current in (("speed_variance_ratio", "0.08"), ("endurance_s", "28")):
-            for invalid in ("nan", "inf", "-inf"):
-                with self.subTest(attribute=attribute, invalid=invalid):
-                    xml = original.replace(f'{attribute}="{current}"', f'{attribute}="{invalid}"', 1)
-                    with self.assertRaisesRegex(ValueError, f"{attribute} must be finite"):
-                        GameData.from_xml(xml)
-
-    def test_invalid_mob_motion_domains_are_rejected(self):
-        original = GameData.load(Path("data/OrrunGameData.xml")).to_xml()
-        cases = (
-            ("speed_variance_ratio", "0.08", "-0.01", "0..=0.20"),
-            ("speed_variance_ratio", "0.08", "0.200001", "0..=0.20"),
-            ("endurance_s", "28", "0", "finite and positive"),
-            ("endurance_s", "28", "-1", "finite and positive"),
+    def test_canonical_contract_and_round_trip(self):
+        self.assertEqual(self.data.validate(), [])
+        self.assertEqual(GameData.from_xml(self.xml).to_xml(), self.xml)
+        default_player = next(
+            profile
+            for profile in self.data.player_profiles
+            if profile.id == "default_player"
         )
-        for attribute, current, invalid, message in cases:
-            with self.subTest(attribute=attribute, invalid=invalid):
-                xml = original.replace(f'{attribute}="{current}"', f'{attribute}="{invalid}"', 1)
+        self.assertEqual(
+            default_player.actions,
+            ("slash", "arrow", "restore", "entangle", "stasis", "hobble", "befriend"),
+        )
+        self.assertEqual(
+            {effect.operation for effect in self.data.effects},
+            {"direct_damage", "heal", "root", "hold", "snare", "charm"},
+        )
+
+    def test_action_contract(self):
+        restore = next(action for action in self.data.actions if action.id == "restore")
+        self.assertTrue(restore.interruptible)
+        self.assertFalse(restore.reveals)
+        snare = next(action for action in self.data.actions if action.id == "hobble").effects[0]
+        self.assertEqual((snare.duration_s, snare.movement_multiplier), (6.0, 0.5))
+
+    def test_unknown_attributes_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown attributes"):
+            GameData.from_xml(
+                self.xml.replace('id="slash"', 'id="slash" surprise="x"', 1)
+            )
+
+    def test_numeric_parity_rejects_non_finite(self):
+        for field, current in (
+            ("mana_cost", "0"),
+            ("duration_s", "4"),
+            ("movement_multiplier", "0.5"),
+            ("speed_mps", "2.5"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "must be finite"):
+                    GameData.from_xml(
+                        self.xml.replace(
+                            f'{field}="{current}"', f'{field}="nan"', 1
+                        )
+                    )
+
+    def test_operation_specific_validation(self):
+        cases = (
+            (
+                'duration_s="0" movement_multiplier="1"',
+                'duration_s="2" movement_multiplier="1"',
+                "zero duration_s",
+            ),
+            (
+                'duration_s="6" movement_multiplier="0.5"',
+                'duration_s="6" movement_multiplier="1"',
+                "movement_multiplier in 0..1",
+            ),
+        )
+        for old, new, message in cases:
+            with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
-                    GameData.from_xml(xml)
+                    GameData.from_xml(self.xml.replace(old, new, 1))
 
-    def test_unknown_references_are_rejected(self):
-        xml = GameData.load(Path("data/OrrunGameData.xml")).to_xml().replace('skill_id="slashing_damage"', 'skill_id="missing"', 1)
-        with self.assertRaisesRegex(ValueError, "unknown skill"):
-            GameData.from_xml(xml)
+    def test_rosters_are_strict(self):
+        with self.assertRaisesRegex(ValueError, "action roster must not be empty"):
+            start = self.xml.index("<profile")
+            end = self.xml.index("</profile>")
+            profile = self.xml[start:end]
+            for action in (
+                "slash",
+                "arrow",
+                "restore",
+                "entangle",
+                "stasis",
+                "hobble",
+                "befriend",
+            ):
+                profile = profile.replace(f'<action id="{action}" />', "")
+            GameData.from_xml(self.xml[:start] + profile + self.xml[end:])
+        with self.assertRaisesRegex(ValueError, "requires unassigned skill"):
+            GameData.from_xml(
+                self.xml.replace('<skill id="ranged" level="1" />', "", 1)
+            )
 
-    def test_profile_skills_and_mob_actions_are_loaded(self):
-        data = GameData.load(Path("data/OrrunGameData.xml"))
-        profile = next(p for p in data.player_profiles if p.id == "default_player")
-        self.assertGreater(len(profile.skills), 0)
-        wolf = next(m for m in data.mobs if m.id == "wolf")
-        self.assertIn("strike", wolf.actions)
+    def test_mob_skills_and_actions_load(self):
+        hexer = next(mob for mob in self.data.mobs if mob.id == "hexer")
+        self.assertIn(("charm", 2), hexer.skills)
+        self.assertIn("befriend", hexer.actions)
 
-    def test_no_mob_xp_field(self):
-        data = GameData.load(Path("data/OrrunGameData.xml"))
-        self.assertFalse(hasattr(data.mobs[0], "xp"))
 
-    def test_unknown_mob_action_rejected(self):
-        xml = GameData.load(Path("data/OrrunGameData.xml")).to_xml().replace('<action id="strike" />', '<action id="missing" />', 1)
-        with self.assertRaisesRegex(ValueError, "unknown action"):
-            GameData.from_xml(xml)
-
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

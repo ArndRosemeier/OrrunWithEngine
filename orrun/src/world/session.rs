@@ -12,7 +12,7 @@
 //! window gives it back on Escape or when it loses focus.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use engine::camera::{Camera, MAX_PITCH_DEGREES};
@@ -21,7 +21,7 @@ use engine::error::EngineError;
 use engine::place::GlobalPlace;
 use engine::space::{GlobalPosition, GlobalXZ, RenderOrigin};
 use engine::world::{EntityId, Frame, Haze, Sky, World};
-use engine::{Key, MouseButton, SpaceId};
+use engine::{EngineResult, Key, MouseButton, SpaceId};
 
 use crate::controls::PressedActions;
 use crate::settings::KeyBinds;
@@ -29,7 +29,7 @@ use glam::{Vec2, Vec3};
 use thiserror::Error;
 
 use super::cave::CaveError;
-use super::coords::{Heading, CHUNK_SPAN_M};
+use super::coords::{CoordError, Heading, CHUNK_SPAN_M};
 use super::doors::DoorLayer;
 use super::dungeon::{DungeonError, DungeonLayer};
 use super::entry::{resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
@@ -85,6 +85,12 @@ pub enum SessionError {
 
     #[error(transparent)]
     Cave(#[from] CaveError),
+
+    #[error(transparent)]
+    Coordinate(#[from] CoordError),
+
+    #[error(transparent)]
+    PlayerSave(#[from] crate::combat::PlayerSaveError),
 
     #[error("no world has been entered yet")]
     NoWorld,
@@ -144,7 +150,7 @@ impl Locomotion {
 }
 
 /// One frame of movement intent, independent of how it was produced.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct WalkInput {
     /// Unit move vector in world space. Walking keeps this on the XZ plane;
     /// flying points it along the look, so W follows the gaze up or down.
@@ -213,6 +219,7 @@ impl WalkInput {
         mode: Locomotion,
         mouse_look: bool,
         binds: &KeyBinds,
+        roster: &[crate::gamedata::ActionId],
     ) -> Self {
         let keys = &frame.input;
         let interact = keys.pressed(Key::E);
@@ -268,7 +275,7 @@ impl WalkInput {
             tab: keys.pressed(Key::Tab),
             bag: keys.pressed(Key::I),
             sprint,
-            actions: crate::controls::resolve_pressed(binds, keys),
+            actions: crate::controls::resolve_pressed(binds, roster, keys),
         }
     }
 }
@@ -360,11 +367,69 @@ fn level_up_notice(
         level: event.new_level,
     }
 }
+enum GroundAuthority {
+    Overland {
+        contact: engine::contact::ContactSnapshot,
+        surface: Arc<ContinentalSurface>,
+        ponds: Arc<PondField>,
+        off_window_ponds: Arc<RwLock<Vec<Arc<PondField>>>>,
+    },
+    Indoor {
+        floor_y: f32,
+    },
+}
+
+impl GroundAuthority {
+    fn feet_y(&mut self, at: GlobalXZ) -> EngineResult<f64> {
+        match self {
+            Self::Indoor { floor_y } => Ok(f64::from(*floor_y + FOOT_CLEARANCE_M)),
+            Self::Overland {
+                contact,
+                surface,
+                ponds,
+                off_window_ponds,
+            } => {
+                if let Some(ground) = contact.height_at(at) {
+                    return Ok(f64::from(ground + FOOT_CLEARANCE_M));
+                }
+                let cached = {
+                    let cache = off_window_ponds.read().expect("off-window pond cache");
+                    cache.iter().find(|field| field.covers(at, 0.0)).cloned()
+                };
+                let governing_ponds = if ponds.covers(at, 0.0) {
+                    Arc::clone(ponds)
+                } else if let Some(field) = cached {
+                    field
+                } else {
+                    let field = Arc::new(PondField::build_covering(surface, at, 1.0));
+                    off_window_ponds
+                        .write()
+                        .expect("off-window pond cache")
+                        .push(Arc::clone(&field));
+                    field
+                };
+                let mut column = surface.column(at);
+                governing_ponds.carve(at, &mut column);
+                let ground = column.ground();
+                if !ground.is_finite() {
+                    return Err(EngineError::InvalidValue(format!(
+                        "authoritative overland ground at ({:.3}, {:.3}) is non-finite",
+                        at.x, at.z,
+                    )));
+                }
+                Ok(f64::from(ground + FOOT_CLEARANCE_M))
+            }
+        }
+    }
+}
+
 pub struct WorldSession {
     game_data: Arc<crate::gamedata::GameData>,
     surface: Arc<ContinentalSurface>,
     /// Sub-atlas water around the player, scanned off the main thread.
     ponds: PondWindow,
+    /// Deterministic pond fields for combat-owned overland actors outside the streaming window.
+    combat_ground_ponds: Arc<RwLock<Vec<Arc<PondField>>>>,
     stream: WorldStream,
     /// Ground cover, once the prop meshes have been uploaded.
     scatter: Option<ScatterLayer>,
@@ -395,7 +460,7 @@ pub struct WorldSession {
     proxy: Option<InstalledProxy>,
     /// Last stand in the default space. A hatch teleport must not overwrite this.
     overworld: Option<(GlobalXZ, Heading)>,
-    /// Soft lock + auto-attack. Empty hostiles until a fill/fixture registers them.
+    /// Target lock and canonical combat state.
     combat: crate::combat::WorldCombat,
     combat_layer: super::combat_layer::CombatLayer,
     inventory: crate::inventory::Inventory,
@@ -442,6 +507,7 @@ impl WorldSession {
         Self {
             surface,
             ponds,
+            combat_ground_ponds: Arc::new(RwLock::new(Vec::new())),
             stream,
             scatter: None,
             settlements: None,
@@ -462,11 +528,7 @@ impl WorldSession {
             proxy: None,
             overworld: None,
             game_data: Arc::clone(&game_data),
-            combat: crate::combat::WorldCombat::specialist_with_game_data(
-                Arc::clone(&game_data),
-                1,
-                crate::combat::Discipline::Martial,
-            ),
+            combat: crate::combat::WorldCombat::with_game_data(Arc::clone(&game_data)),
 
             combat_layer: super::combat_layer::CombatLayer::install(),
             inventory: crate::inventory::Inventory::create_kit(),
@@ -481,7 +543,7 @@ impl WorldSession {
             current_level_up: None,
             pending_held_fixture: None,
             last_shrine: None,
-            key_binds: KeyBinds::default(),
+            key_binds: KeyBinds::for_default_profile(&game_data),
             roster_pins_seated: false,
             overland_sites: Vec::new(),
             site_prop_ids: Vec::new(),
@@ -643,17 +705,10 @@ impl WorldSession {
             .max()
             .unwrap_or(-1)
             + 1;
-        let sheet = self.combat.mob_sheet(definition.id().as_str());
-        self.combat
-            .add_hostile(crate::combat::WorldHostile::from_sheet(
-                idx,
-                x,
-                z,
-                &sheet,
-                definition.id().as_str(),
-                x,
-                z,
-            ));
+        let hostile = self
+            .combat
+            .canonical_hostile(definition.id(), idx, x, z, x, z);
+        self.combat.add_hostile(hostile);
         self.combat_layer.hold_fixture();
         self.respawn_hostile_meshes(world, &player)?;
         Ok(idx)
@@ -687,7 +742,8 @@ impl WorldSession {
             return;
         };
         let mut pile = self.ground_loot[pos].clone();
-        crate::loot::take_one(&mut self.inventory, &mut pile, item_i);
+        crate::loot::take_one(&mut self.inventory, &mut pile, item_i)
+            .unwrap_or_else(|error| panic!("taking loot item {item_i} failed: {error}"));
         self.finish_loot_take(world, pos, pile);
     }
 
@@ -703,7 +759,8 @@ impl WorldSession {
             return;
         };
         let mut pile = self.ground_loot[pos].clone();
-        crate::loot::take_all(&mut self.inventory, &mut pile);
+        crate::loot::take_all(&mut self.inventory, &mut pile)
+            .unwrap_or_else(|error| panic!("taking all loot failed: {error}"));
         self.finish_loot_take(world, pos, pile);
     }
 
@@ -785,7 +842,7 @@ impl WorldSession {
         let site = self.overland_sites.iter().min_by(|a, b| {
             let da = (a.at.x - x).hypot(a.at.z - z);
             let db = (b.at.x - x).hypot(b.at.z - z);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            da.total_cmp(&db)
         })?;
         let d = (site.at.x - x).hypot(site.at.z - z);
         if d > 48.0 {
@@ -810,7 +867,12 @@ impl WorldSession {
             if h.is_alive() {
                 continue;
             }
-            let Some(entity) = h.entity else {
+            let Some(entity) = dead_loot_presentation(
+                h.actor_id(),
+                h.presentation_source(),
+                h.presentation_entity(),
+            )?
+            else {
                 continue;
             };
             let y = self
@@ -864,7 +926,7 @@ impl WorldSession {
                 .combat
                 .hostiles()
                 .iter()
-                .all(|hostile| hostile.entity.is_some())
+                .all(|hostile| hostile.presentation_entity().is_some())
     }
 
     pub fn fixture_encounter_held(&self) -> bool {
@@ -903,16 +965,6 @@ impl WorldSession {
 
     pub fn incoming_hit(&self) -> bool {
         self.combat_layer.incoming_hit()
-    }
-
-    /// Replay catalog anim_melee (Punch) on hostiles that have the clip.
-    pub fn replay_melee(&mut self, world: &mut World) {
-        self.combat_layer.replay_melee(world, &self.combat);
-    }
-
-    /// Replay catalog anim_weapon (Spellcast_Shoot) on the locked mesh. Fail-loud.
-    pub fn replay_weapon(&mut self, world: &mut World) {
-        self.combat_layer.replay_weapon(world, &self.combat);
     }
 
     pub fn hurt_flash(&self) -> bool {
@@ -966,10 +1018,6 @@ impl WorldSession {
         self.combat_layer.lock_ring_visible(world)
     }
 
-    pub fn first_auto_hit(&self) -> Option<i32> {
-        self.combat_layer.first_auto()
-    }
-
     fn resolve_death(&mut self, world: &mut World) {
         let place = self.last_shrine().or_else(|| {
             self.spawn
@@ -997,9 +1045,8 @@ impl WorldSession {
         WALK_SPEED
     }
 
-    /// Drop fixture meshes/props and clear Shaken so the next rearm measures
-    /// clean outgoing damage (Strike 16, not Shaken 14). Snap back to world
-    /// spawn so packs do not seat inside a hamlet from a prior village hook.
+    /// Drop fixture meshes and props, clear transient death state, and return
+    /// to the world spawn before seating the next fixture.
     fn begin_fixture_rearm(&mut self, world: &mut World) {
         self.combat_layer.despawn_meshes(world);
         if let Some(fauna) = self.fauna.as_mut() {
@@ -1071,7 +1118,7 @@ impl WorldSession {
             .hostiles()
             .iter()
             .find(|hostile| hostile.idx == idx)
-            .and_then(|hostile| hostile.entity)
+            .and_then(|hostile| hostile.presentation_entity())
             .is_some_and(|entity| self.combat_layer.is_death_posed(entity))
     }
 
@@ -1142,10 +1189,16 @@ impl WorldSession {
         Ok(())
     }
 
-    pub fn saved_full(&self, seed: i32, size: usize) -> Option<crate::save::SavedStand> {
-        let (at, heading) = self.saved_stand()?;
-        let player = self.combat.export_player_save().ok()?;
-        Some(crate::save::SavedStand::new(
+    pub fn saved_full(
+        &self,
+        seed: i32,
+        size: usize,
+    ) -> Result<Option<crate::save::SavedStand>, SessionError> {
+        let Some((at, heading)) = self.saved_stand()? else {
+            return Ok(None);
+        };
+        let player = self.combat.export_player_save()?;
+        Ok(Some(crate::save::SavedStand::new(
             seed,
             size,
             at,
@@ -1153,7 +1206,7 @@ impl WorldSession {
             player,
             self.last_shrine().map(crate::save::SavedShrine::from_place),
             self.inventory,
-        ))
+        )))
     }
 
     pub fn surface(&self) -> &ContinentalSurface {
@@ -1377,7 +1430,9 @@ impl WorldSession {
             .map(|p| (p.yaw_degrees, p.pitch_degrees, p.mode))
             .unwrap_or((0.0, 0.0, Locomotion::Walk));
         let looking = world.pointer_lock();
-        let mut input = WalkInput::from_frame(frame, yaw, pitch, mode, looking, &self.key_binds);
+        let roster = self.combat.player_action_roster();
+        let mut input =
+            WalkInput::from_frame(frame, yaw, pitch, mode, looking, &self.key_binds, roster);
         if world.bind_listen() {
             input.actions = crate::controls::PressedActions::NONE;
         }
@@ -1582,7 +1637,7 @@ impl WorldSession {
         self.travel = None;
         self.state = SessionState::World;
         if let Some(player) = self.player {
-            self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees);
+            self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees)?;
         }
         Ok(())
     }
@@ -1680,7 +1735,7 @@ impl WorldSession {
         if let Some(request) = self.entering {
             // Start the water window first so it runs while prop GLBs are read.
             if self.scatter.is_none() {
-                let _ = self.ponds.traced(request.requested());
+                self.ponds.traced(request.requested())?;
                 let catalog = ScatterCatalog::discover()?;
                 self.scatter = Some(ScatterLayer::install(
                     world,
@@ -1713,7 +1768,7 @@ impl WorldSession {
                 let plots = self.plot_index();
                 self.stream.set_house_plots(world, (*plots).clone())?;
             }
-            if !self.ponds.traced(request.requested()) {
+            if !self.ponds.traced(request.requested())? {
                 return Ok(false);
             }
             let pose = resolve_spawn(&self.surface, &self.ponds.field(), request)?;
@@ -1885,24 +1940,40 @@ impl WorldSession {
         Ok(true)
     }
 
+    fn ground_authority(&self, world: &World) -> Result<GroundAuthority, SessionError> {
+        if world.living_in() == SpaceId::DEFAULT {
+            return Ok(GroundAuthority::Overland {
+                contact: self.stream.contact_snapshot(),
+                surface: Arc::clone(&self.surface),
+                ponds: self.ponds.field(),
+                off_window_ponds: Arc::clone(&self.combat_ground_ponds),
+            });
+        }
+
+        let player = self.player.ok_or(SessionError::NoWorld)?;
+        if let Some(floor_y) = self
+            .dungeons
+            .as_ref()
+            .and_then(|dungeon| dungeon.indoor_floor_y(world, player.position))
+            .or_else(|| self.doors.indoor_floor_y(world, player.position))
+        {
+            return Ok(GroundAuthority::Indoor { floor_y });
+        }
+
+        Err(SessionError::Engine(EngineError::InvalidValue(format!(
+            "combat ground requested in space {:?}, which has no authoritative height surface",
+            world.living_in(),
+        ))))
+    }
+
     fn hostile_feet_y(
         &self,
         world: &World,
-        player: &Player,
         h: &crate::combat::WorldHostile,
-    ) -> f64 {
-        if h.mob_id == "orc_skull" || super::combat_layer::is_bone_id(&h.mob_id) {
-            if let Some(y) = self
-                .dungeons
-                .as_ref()
-                .and_then(|d| d.indoor_floor_y(world, player.position))
-            {
-                return f64::from(y + FOOT_CLEARANCE_M);
-            }
-        }
-        self.contact_height(GlobalXZ::at(h.x, h.z))
-            .map(|g| (g + FOOT_CLEARANCE_M) as f64)
-            .unwrap_or(player.position.y)
+    ) -> Result<f64, SessionError> {
+        self.ground_authority(world)?
+            .feet_y(GlobalXZ::at(h.x, h.z))
+            .map_err(Into::into)
     }
 
     fn respawn_hostile_meshes(
@@ -1914,8 +1985,8 @@ impl WorldSession {
             .combat
             .hostiles()
             .iter()
-            .map(|h| self.hostile_feet_y(world, player, h))
-            .collect();
+            .map(|h| self.hostile_feet_y(world, h))
+            .collect::<Result<Vec<_>, _>>()?;
         self.combat_layer
             .spawn_wolf_meshes(world, &mut self.combat, &feet, player.yaw_degrees)
             .map_err(Into::into)
@@ -2131,12 +2202,8 @@ impl WorldSession {
                     .combat
                     .hostiles()
                     .iter()
-                    .map(|h| {
-                        self.contact_height(GlobalXZ::at(h.x, h.z))
-                            .map(|g| (g + FOOT_CLEARANCE_M) as f64)
-                            .unwrap_or(player.position.y)
-                    })
-                    .collect();
+                    .map(|hostile| self.hostile_feet_y(world, hostile))
+                    .collect::<Result<Vec<_>, _>>()?;
                 if let Err(err) = self.combat_layer.spawn_wolf_meshes(
                     world,
                     &mut self.combat,
@@ -2178,21 +2245,15 @@ impl WorldSession {
                 }
             }
         }
-        for verb in input.actions.iter() {
+        for action_id in input.actions.iter() {
             let facing = Camera::facing_xz(player.yaw_degrees);
-            let started = self.combat.press_verb(
-                verb,
+            self.combat.press_action(
+                action_id,
                 player.position.x,
                 player.position.z,
                 facing.x as f64,
                 facing.z as f64,
             );
-            if started && verb == crate::controls::Action::Potion {
-                self.combat_layer.log_potion(&mut self.combat);
-            }
-            if started && verb == crate::controls::Action::Ward {
-                self.combat_layer.log_ward(&mut self.combat);
-            }
         }
         player.yaw_degrees = wrap_degrees(player.yaw_degrees + input.yaw_delta_degrees);
         player.pitch_degrees = (player.pitch_degrees + input.pitch_delta_degrees)
@@ -2245,38 +2306,30 @@ impl WorldSession {
             );
             let level_ups = self.combat_layer.take_player_level_ups();
             self.queue_level_ups(level_ups);
-            let py = player.position.y;
-            let feet: Vec<(f64, f64, f64)> = self
-                .combat
-                .hostiles()
-                .iter()
-                .map(|h| {
-                    let y = self
-                        .contact_height(GlobalXZ::at(h.x, h.z))
-                        .map(|g| (g + FOOT_CLEARANCE_M) as f64)
-                        .unwrap_or(py);
-                    (h.x, h.z, y)
-                })
-                .collect();
-            let ground_y = move |x: f64, z: f64| {
-                feet.iter()
-                    .min_by(|a, b| {
-                        let da = (a.0 - x).hypot(a.1 - z);
-                        let db = (b.0 - x).hypot(b.1 - z);
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|k| k.2)
-                    .unwrap_or(py)
-            };
-            let hostile_ground = self.stream.contact_snapshot();
+            let fauna_cues = self.combat_layer.take_fauna_animation_cues();
+            if fauna_cues.is_empty() {
+                // No fauna presentation work this frame.
+            } else {
+                let fauna = self.fauna.as_mut().ok_or_else(|| {
+                    SessionError::Fauna(super::fauna::FaunaError::Catalog(
+                        "fauna animation cues exist without an installed FaunaLayer".into(),
+                    ))
+                })?;
+                fauna.present_combat_cues(world, &self.combat, fauna_cues)?;
+            }
+            let mut transform_ground = self.ground_authority(world)?;
             self.combat_layer
                 .sync_hostile_transforms(world, &self.combat, move |x, z| {
-                    hostile_ground
-                        .height_at(GlobalXZ::at(x, z))
-                        .map(|height| f64::from(height + FOOT_CLEARANCE_M))
+                    transform_ground.feet_y(GlobalXZ::at(x, z))
                 })?;
-            self.combat_layer
-                .present(world, &self.combat, player.position, ground_y, input.dt)?;
+            let mut presentation_ground = self.ground_authority(world)?;
+            self.combat_layer.present(
+                world,
+                &self.combat,
+                player.position,
+                move |x, z| presentation_ground.feet_y(GlobalXZ::at(x, z)),
+                input.dt,
+            )?;
             self.sync_ground_loot(world)?;
             if self.combat.is_dead()
                 && self.combat.player().resources.hp() <= 0.0
@@ -2294,7 +2347,7 @@ impl WorldSession {
         // Before the streamer, so a chunk is never baked against a window that
         // has stopped reaching it.
         let t = Instant::now();
-        self.ponds.follow(foot);
+        self.ponds.follow(foot)?;
         world.hitch_span("ponds", hitch_ms(t), String::new());
 
         let t = Instant::now();
@@ -2499,7 +2552,7 @@ impl WorldSession {
 
         // Doors need the actor centre. The outdoor hatch needs the soles for
         // falling through; the dungeon ceiling hatch needs the actor's head.
-        self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees);
+        self.remember_overworld_from(world, player.position.horizontal(), player.yaw_degrees)?;
         let near_hatch = self
             .dungeons
             .as_ref()
@@ -2609,29 +2662,36 @@ impl WorldSession {
     }
 
     /// Stand to write on exit: the last default-space feet, never a dungeon interior.
-    pub fn saved_stand(&self) -> Option<(GlobalXZ, Heading)> {
+    pub fn saved_stand(&self) -> Result<Option<(GlobalXZ, Heading)>, CoordError> {
         if let Some(stand) = self.overworld {
-            return Some(stand);
+            return Ok(Some(stand));
         }
-        let player = self.player?;
-        let heading = Heading::from_degrees(player.yaw_degrees).ok()?;
-        Some((player.position.horizontal(), heading))
+        let Some(player) = self.player else {
+            return Ok(None);
+        };
+        let heading = Heading::from_degrees(player.yaw_degrees)?;
+        Ok(Some((player.position.horizontal(), heading)))
     }
 
-    fn remember_overworld_from(&mut self, world: &World, at: GlobalXZ, yaw_degrees: f32) {
+    fn remember_overworld_from(
+        &mut self,
+        world: &World,
+        at: GlobalXZ,
+        yaw_degrees: f32,
+    ) -> Result<(), CoordError> {
         if world.living_in() != SpaceId::DEFAULT {
-            return;
+            return Ok(());
         }
-        let Ok(heading) = Heading::from_degrees(yaw_degrees) else {
-            return;
-        };
+        let heading = Heading::from_degrees(yaw_degrees)?;
         self.overworld = Some((at, heading));
+        Ok(())
     }
 
     /// Compass heading the player is facing.
-    pub fn player_heading(&self) -> Option<Heading> {
+    pub fn player_heading(&self) -> Result<Option<Heading>, CoordError> {
         self.player
-            .and_then(|p| Heading::from_degrees(p.yaw_degrees).ok())
+            .map(|p| Heading::from_degrees(p.yaw_degrees))
+            .transpose()
     }
 
     /// How the player is currently getting around.
@@ -2679,8 +2739,7 @@ impl WorldSession {
         self.village_doors().iter().min_by(|a, b| {
             a.at.horizontal()
                 .distance(from)
-                .partial_cmp(&b.at.horizontal().distance(from))
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&b.at.horizontal().distance(from))
         })
     }
 
@@ -3010,11 +3069,7 @@ impl WorldSession {
             .settlements()
             .iter()
             .filter(|p| p.tier <= 1)
-            .min_by(|a, b| {
-                a.at.distance(from)
-                    .partial_cmp(&b.at.distance(from))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .min_by(|a, b| a.at.distance(from).total_cmp(&b.at.distance(from)))
             .copied()
     }
 }
@@ -3086,6 +3141,25 @@ fn apply_walk_height(player: &mut Player, ground: Option<f32>, jump: bool, dt: f
     }
 }
 
+fn dead_loot_presentation(
+    actor_id: crate::combat::ActorId,
+    owner: crate::combat::HostilePresentationSource,
+    entity: Option<EntityId>,
+) -> Result<Option<EntityId>, SessionError> {
+    match (owner, entity) {
+        (crate::combat::HostilePresentationSource::Headless, None) => Ok(None),
+        (crate::combat::HostilePresentationSource::Headless, Some(entity)) => {
+            Err(SessionError::Engine(EngineError::Model(format!(
+                "headless dead hostile {actor_id:?} unexpectedly owns presentation entity {entity}"
+            ))))
+        }
+        (_, Some(entity)) => Ok(Some(entity)),
+        (owner, None) => Err(SessionError::Engine(EngineError::Model(format!(
+            "visible dead hostile {actor_id:?} with presentation owner {owner:?} has no entity during loot synchronization"
+        )))),
+    }
+}
+
 #[cfg(test)]
 mod level_up_notice_tests {
     use super::*;
@@ -3096,6 +3170,83 @@ mod level_up_notice_tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
         )
         .expect("canonical GameData")
+    }
+
+    #[test]
+    fn overland_ground_authority_resolves_outside_resident_contact() {
+        let atlas = crate::atlas::ContinentAtlas::generate(1, 48);
+        let surface =
+            Arc::new(crate::world::ContinentalSurface::new(&atlas).expect("canonical surface"));
+        let ponds = Arc::new(PondField::empty(GlobalXZ::at(0.0, 0.0)));
+        let at = GlobalXZ::at(15_000.192, 12_510.531);
+        assert!(!ponds.covers(at, 0.0));
+        let mut authority = GroundAuthority::Overland {
+            contact: engine::contact::ContactSnapshot::default(),
+            surface,
+            ponds,
+            off_window_ponds: Arc::new(RwLock::new(Vec::new())),
+        };
+
+        let feet = authority
+            .feet_y(at)
+            .expect("procedural authority must resolve off-window overland ground");
+        assert!(feet.is_finite());
+    }
+
+    #[test]
+    fn saved_full_preserves_no_save_due_as_none() {
+        let atlas = crate::atlas::ContinentAtlas::generate(1, 48);
+        let surface =
+            Arc::new(crate::world::ContinentalSurface::new(&atlas).expect("canonical surface"));
+        let session = WorldSession::new(surface);
+
+        assert_eq!(session.saved_full(1, 48).expect("no export is due"), None);
+    }
+
+    #[test]
+    fn saved_full_propagates_player_export_failure() {
+        let atlas = crate::atlas::ContinentAtlas::generate(1, 48);
+        let surface =
+            Arc::new(crate::world::ContinentalSurface::new(&atlas).expect("canonical surface"));
+        let mut session = WorldSession::new(surface);
+        session.overworld = Some((
+            GlobalXZ::at(12.0, -7.0),
+            Heading::from_degrees(90.0).expect("finite heading"),
+        ));
+        session.combat.set_player_hp(0.0);
+
+        assert!(matches!(
+            session.saved_full(1, 48),
+            Err(SessionError::PlayerSave(
+                crate::combat::PlayerSaveError::DeadPlayer(0.0)
+            ))
+        ));
+    }
+
+    #[test]
+    fn canonical_world_session_seats_every_live_combat_fixture_identity() {
+        let atlas = crate::atlas::ContinentAtlas::generate(1, 48);
+        let surface =
+            Arc::new(crate::world::ContinentalSurface::new(&atlas).expect("canonical surface"));
+        let mut session = WorldSession::new(surface);
+        for (index, id) in crate::combat::catalog::LIVE_COMBAT_MOB_IDS
+            .iter()
+            .enumerate()
+        {
+            let runtime_index = i32::try_from(index).expect("live fixture index");
+            session.combat.add_canonical_mob(
+                &crate::gamedata::MobId::new(*id),
+                runtime_index,
+                1.0 + index as f64,
+                0.0,
+                1.0 + index as f64,
+                0.0,
+            );
+        }
+        assert_eq!(
+            session.combat.hostiles().len(),
+            crate::combat::catalog::LIVE_COMBAT_MOB_IDS.len()
+        );
     }
 
     #[test]
@@ -3127,5 +3278,45 @@ mod level_up_notice_tests {
             },
         );
         assert_eq!(hp_notice.name(), "HP");
+    }
+
+    #[test]
+    fn headless_dead_hostile_is_explicitly_ignored_for_loot_presentation() {
+        let actor = crate::combat::ActorId::from_runtime_index(7);
+        let result = dead_loot_presentation(
+            actor,
+            crate::combat::HostilePresentationSource::Headless,
+            None,
+        )
+        .expect("headless actor is a legitimate no-presentation state");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn visible_dead_hostile_without_entity_is_loud() {
+        let actor = crate::combat::ActorId::from_runtime_index(8);
+        let err = dead_loot_presentation(
+            actor,
+            crate::combat::HostilePresentationSource::CombatLayer,
+            None,
+        )
+        .expect_err("visible owner without entity must fail");
+        assert!(err.to_string().contains("has no entity"), "{err}");
+        assert!(err.to_string().contains("CombatLayer"), "{err}");
+    }
+
+    #[test]
+    fn headless_dead_hostile_with_entity_is_loud() {
+        let actor = crate::combat::ActorId::from_runtime_index(9);
+        let mut world = World::new();
+        let mesh = engine::mesh::Mesh::new();
+        let entity = world.spawn(mesh);
+        let err = dead_loot_presentation(
+            actor,
+            crate::combat::HostilePresentationSource::Headless,
+            Some(entity),
+        )
+        .expect_err("headless actor cannot own a visible entity");
+        assert!(err.to_string().contains("unexpectedly owns"), "{err}");
     }
 }

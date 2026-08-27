@@ -36,47 +36,82 @@ enum Target {
 }
 
 impl Target {
-    fn parse(text: &str) -> Self {
+    fn parse(text: &str) -> Result<Self, String> {
         match text {
-            "river" => Self::River,
-            "coast" => Self::Coast,
-            "inland" => Self::Inland,
-            "forest" => Self::Forest,
-            "ocean" => Self::Ocean,
-            "summit" => Self::Summit,
-            "pond" => Self::Pond,
+            "river" => Ok(Self::River),
+            "coast" => Ok(Self::Coast),
+            "inland" => Ok(Self::Inland),
+            "forest" => Ok(Self::Forest),
+            "ocean" => Ok(Self::Ocean),
+            "summit" => Ok(Self::Summit),
+            "pond" => Ok(Self::Pond),
             other => {
-                let (x, z) = other
-                    .split_once(',')
-                    .expect("entry must be river|coast|inland|forest|ocean|summit|pond|x,z");
-                Self::Exact(
-                    x.trim().parse().expect("entry x in metres"),
-                    z.trim().parse().expect("entry z in metres"),
-                )
+                let (x, z) = other.split_once(',').ok_or_else(|| {
+                    format!("entry must be river|coast|inland|forest|ocean|summit|pond|x,z, got '{other}'")
+                })?;
+                let x = x
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|error| format!("invalid entry x '{}': {error}", x.trim()))?;
+                let z = z
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|error| format!("invalid entry z '{}': {error}", z.trim()))?;
+                if !x.is_finite() || !z.is_finite() {
+                    return Err(format!("entry coordinates must be finite, got ({x}, {z})"));
+                }
+                Ok(Self::Exact(x, z))
             }
         }
     }
 }
 
+#[derive(Debug)]
 struct Args {
     seed: i32,
     size: usize,
     target: Target,
 }
 
-fn parse_args() -> Args {
-    let mut args = std::env::args().skip(1);
-    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-    let size = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(128usize)
-        .clamp(32, 512);
+fn parse_args_from<I, S>(args: I) -> Result<Args, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let seed = match args.next() {
+        Some(value) => value
+            .as_ref()
+            .parse::<i32>()
+            .map_err(|error| format!("invalid seed '{}': {error}", value.as_ref()))?,
+        None => 1,
+    };
+    let size = match args.next() {
+        Some(value) => value
+            .as_ref()
+            .parse::<usize>()
+            .map_err(|error| format!("invalid size '{}': {error}", value.as_ref()))?,
+        None => 128,
+    };
+    if !(32..=512).contains(&size) {
+        return Err(format!("size must be in 32..=512, got {size}"));
+    }
     let target = args
         .next()
-        .map(|s| Target::parse(&s))
+        .map(|value| Target::parse(value.as_ref()))
+        .transpose()?
         .unwrap_or(Target::River);
-    Args { seed, size, target }
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "unexpected command-line argument '{}'",
+            extra.as_ref()
+        ));
+    }
+    Ok(Args { seed, size, target })
+}
+
+fn parse_args() -> Args {
+    parse_args_from(std::env::args().skip(1)).unwrap_or_else(|error| panic!("{error}"))
 }
 
 /// Coarse scan for the driest (`Inland`) or deepest (`Ocean`) column.
@@ -277,7 +312,7 @@ fn entry_position(
     (at, None)
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let args = parse_args();
     eprintln!("generating atlas seed={} size={}…", args.seed, args.size);
     let atlas = Arc::new(ContinentAtlas::generate(args.seed, args.size));
@@ -375,5 +410,27 @@ fn main() {
                 worst.1
             );
         }
-    });
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_arguments_are_loud() {
+        assert!(parse_args_from(["bad"])
+            .unwrap_err()
+            .contains("invalid seed"));
+        assert!(parse_args_from(["1", "31"])
+            .unwrap_err()
+            .contains("32..=512"));
+        assert!(parse_args_from(["1", "64", "NaN,2"])
+            .unwrap_err()
+            .contains("finite"));
+        assert!(parse_args_from(["1", "64", "unknown"])
+            .unwrap_err()
+            .contains("entry must"));
+    }
 }

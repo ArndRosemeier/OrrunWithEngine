@@ -194,7 +194,7 @@ Owns action validation and execution order:
 7. record progression from actual effect execution, damage received, and mana spent;
 8. emit typed results.
 
-It never branches on `strike`, `fire_bolt`, `mend`, or another concrete action ID to select game rules.
+It never branches on `slash`, `arrow`, `restore`, or another concrete action ID to select game rules.
 
 ### Presentation adapters
 
@@ -229,7 +229,7 @@ These are balance parameters, not design law; M7 retunes them from play evidence
 1. **Make data lossless.** Do not build runtime progression on fields the Rust loader discards.
 2. **Build progression headlessly.** Establish private state, formulas, typed training commands, and events without touching live combat.
 3. **Build action resolution headlessly.** Prove action/effect execution for player and mob actors from GameData.
-4. **Cross one playable slice.** Strike, fire bolt, mend, and one hostile attack provide enough coverage for damage, healing, mana, HP training, skill training, death, and loot.
+4. **Cross one playable slice.** Slash, arrow, restore, and one hostile attack provide enough coverage for damage, healing, mana, HP training, skill training, death, and loot.
 5. **Expose and save progression.** Only persist the new model after its live behavior is proven.
 6. **Migrate effect breadth.** Add control/status and remaining useful action semantics through the same path.
 7. **Delete legacy code.** Removal is a milestone, not background cleanup; compatibility shims must not become permanent architecture.

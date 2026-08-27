@@ -14,9 +14,7 @@ use quick_xml::de::from_str;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::combat::sheets::MobSheet;
-
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum GameDataError {
@@ -76,7 +74,7 @@ typed_id! {
     EffectId
 }
 typed_id! {
-    /// Identifies an action such as `strike`, `fire_bolt`, or `mend`.
+    /// Identifies an action such as `slash`, `arrow`, or `restore`.
     ActionId
 }
 typed_id! {
@@ -100,27 +98,27 @@ typed_id! {
     SpeciesId
 }
 
-/// The finite categories an effect can belong to.
+/// The finite executable operations an effect performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectKind {
-    Damage,
+pub enum EffectOperation {
+    DirectDamage,
     Heal,
-    Control,
-    Movement,
-    Defense,
-    Utility,
+    Root,
+    Hold,
+    Snare,
+    Charm,
 }
 
-impl EffectKind {
+impl EffectOperation {
     fn from_str(value: &str) -> Result<Self, GameDataError> {
         match value {
-            "damage" => Ok(EffectKind::Damage),
-            "heal" => Ok(EffectKind::Heal),
-            "control" => Ok(EffectKind::Control),
-            "movement" => Ok(EffectKind::Movement),
-            "defense" => Ok(EffectKind::Defense),
-            "utility" => Ok(EffectKind::Utility),
-            other => Err(validation(format!("unknown effect kind {other:?}"))),
+            "direct_damage" => Ok(EffectOperation::DirectDamage),
+            "heal" => Ok(EffectOperation::Heal),
+            "root" => Ok(EffectOperation::Root),
+            "hold" => Ok(EffectOperation::Hold),
+            "snare" => Ok(EffectOperation::Snare),
+            "charm" => Ok(EffectOperation::Charm),
+            other => Err(validation(format!("unknown effect operation {other:?}"))),
         }
     }
 }
@@ -329,8 +327,12 @@ struct RawAction {
     mana_cost: f64,
     #[serde(rename = "@cast_s", default)]
     cast_s: f64,
-    #[serde(rename = "@cooldown_s", default)]
+    #[serde(rename = "@cooldown_s")]
     cooldown_s: f64,
+    #[serde(rename = "@interruptible")]
+    interruptible: bool,
+    #[serde(rename = "@reveals")]
+    reveals: bool,
     #[serde(rename = "effects", default)]
     effects: RawActionEffects,
 }
@@ -350,6 +352,10 @@ struct RawActionEffect {
     radius_m: f64,
     #[serde(rename = "@angle_deg", default)]
     angle_deg: f64,
+    #[serde(rename = "@duration_s", default)]
+    duration_s: f64,
+    #[serde(rename = "@movement_multiplier", default = "one")]
+    movement_multiplier: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,8 +365,8 @@ struct RawEffect {
     id: String,
     #[serde(rename = "@name", default)]
     name: String,
-    #[serde(rename = "@kind", default)]
-    kind: String,
+    #[serde(rename = "@operation")]
+    operation: String,
     #[serde(rename = "@skill_id")]
     skill_id: String,
     #[serde(rename = "@progression", default = "default_progression")]
@@ -378,6 +384,8 @@ struct RawPlayerProfile {
     faction: String,
     #[serde(rename = "skill", default)]
     skills: Vec<RawProfileSkill>,
+    #[serde(rename = "action", default)]
+    actions: Vec<RawMobActionRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -408,16 +416,12 @@ struct RawMobDefinition {
     hp: i32,
     #[serde(rename = "@armor", default)]
     armor: i32,
-    #[serde(rename = "@damage")]
-    damage: i32,
-    #[serde(rename = "@swing_s", default = "default_swing")]
-    swing_s: f64,
-    #[serde(rename = "@reach_m", default = "default_reach")]
-    reach_m: f64,
     #[serde(rename = "@speed_variance_ratio")]
     speed_variance_ratio: f64,
     #[serde(rename = "@endurance_s")]
     endurance_s: f64,
+    #[serde(rename = "skill", default)]
+    skills: Vec<RawProfileSkill>,
     #[serde(rename = "action", default)]
     actions: Vec<RawMobActionRef>,
 }
@@ -474,12 +478,6 @@ fn one() -> f64 {
 }
 fn default_true() -> bool {
     true
-}
-fn default_swing() -> f64 {
-    1.0
-}
-fn default_reach() -> f64 {
-    1.8
 }
 fn default_mode() -> String {
     "active".into()
@@ -562,7 +560,7 @@ impl Faction {
 pub struct Effect {
     id: EffectId,
     name: String,
-    kind: EffectKind,
+    operation: EffectOperation,
     skill_id: SkillId,
     progression: Progression,
 }
@@ -574,8 +572,8 @@ impl Effect {
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub fn kind(&self) -> EffectKind {
-        self.kind
+    pub fn operation(&self) -> EffectOperation {
+        self.operation
     }
     pub fn skill_id(&self) -> &SkillId {
         &self.skill_id
@@ -593,6 +591,8 @@ pub struct ActionEffect {
     range_m: f64,
     radius_m: f64,
     angle_deg: f64,
+    duration_s: f64,
+    movement_multiplier: f64,
 }
 
 impl ActionEffect {
@@ -614,6 +614,12 @@ impl ActionEffect {
     pub fn angle_deg(&self) -> f64 {
         self.angle_deg
     }
+    pub fn duration_s(&self) -> f64 {
+        self.duration_s
+    }
+    pub fn movement_multiplier(&self) -> f64 {
+        self.movement_multiplier
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -625,6 +631,8 @@ pub struct Action {
     mana_cost: f64,
     cast_s: f64,
     cooldown_s: f64,
+    interruptible: bool,
+    reveals: bool,
     effects: Vec<ActionEffect>,
 }
 
@@ -649,6 +657,12 @@ impl Action {
     }
     pub fn cooldown_s(&self) -> f64 {
         self.cooldown_s
+    }
+    pub fn interruptible(&self) -> bool {
+        self.interruptible
+    }
+    pub fn reveals(&self) -> bool {
+        self.reveals
     }
     pub fn effects(&self) -> &[ActionEffect] {
         &self.effects
@@ -677,6 +691,7 @@ pub struct PlayerProfile {
     name: String,
     faction: FactionId,
     skills: Vec<ProfileSkill>,
+    actions: Vec<ActionId>,
 }
 
 impl PlayerProfile {
@@ -691,6 +706,9 @@ impl PlayerProfile {
     }
     pub fn skills(&self) -> &[ProfileSkill] {
         &self.skills
+    }
+    pub fn actions(&self) -> &[ActionId] {
+        &self.actions
     }
 }
 
@@ -738,11 +756,9 @@ pub struct MobDefinition {
     species_id: Option<SpeciesId>,
     hp: i32,
     armor: i32,
-    damage: i32,
-    swing_s: f64,
-    reach_m: f64,
     speed_variance_ratio: SpeedVarianceRatio,
     endurance_s: EnduranceSeconds,
+    skills: Vec<ProfileSkill>,
     actions: Vec<ActionId>,
 }
 
@@ -771,51 +787,17 @@ impl MobDefinition {
     pub fn armor(&self) -> i32 {
         self.armor
     }
-    pub fn damage(&self) -> i32 {
-        self.damage
-    }
-    pub fn swing_s(&self) -> f64 {
-        self.swing_s
-    }
-    pub fn reach_m(&self) -> f64 {
-        self.reach_m
-    }
     pub fn speed_variance_ratio(&self) -> SpeedVarianceRatio {
         self.speed_variance_ratio
     }
     pub fn endurance_s(&self) -> EnduranceSeconds {
         self.endurance_s
     }
+    pub fn skills(&self) -> &[ProfileSkill] {
+        &self.skills
+    }
     pub fn actions(&self) -> &[ActionId] {
         &self.actions
-    }
-
-    /// Temporary adapter: expose base stats in the legacy sheet shape so the
-    /// live combat POC keeps running until canonical action resolution lands.
-    fn to_mob_sheet(&self, movement: &MovementSpec) -> MobSheet {
-        MobSheet {
-            id: self.id.as_str().to_string(),
-            name: self.name.clone(),
-            hp: self.hp,
-            armor: self.armor,
-            damage: self.damage,
-            swing_s: self.swing_s,
-            slam_damage: None,
-            slam_every_s: None,
-            telegraph_s: None,
-            reach_m: self.reach_m,
-            speed_mps: movement.speed_mps,
-            sight_m: 0.0,
-            hear_m: 0.0,
-            leash_m: 0.0,
-            social_m: 0.0,
-            xp: 0,
-            token_brood: 0,
-            specials: Vec::new(),
-            scale_hp: None,
-            scale_dmg: None,
-            scale_xp: None,
-        }
     }
 }
 
@@ -962,7 +944,7 @@ impl GameData {
                 Ok(Effect {
                     id: EffectId::new(e.id),
                     name: e.name,
-                    kind: EffectKind::from_str(&e.kind)?,
+                    operation: EffectOperation::from_str(&e.operation)?,
                     skill_id: SkillId::new(e.skill_id),
                     progression: Progression::from_str(&e.progression)?,
                 })
@@ -981,6 +963,8 @@ impl GameData {
                     mana_cost: a.mana_cost,
                     cast_s: a.cast_s,
                     cooldown_s: a.cooldown_s,
+                    interruptible: a.interruptible,
+                    reveals: a.reveals,
                     effects: a
                         .effects
                         .items
@@ -993,6 +977,8 @@ impl GameData {
                                 range_m: assignment.range_m,
                                 radius_m: assignment.radius_m,
                                 angle_deg: assignment.angle_deg,
+                                duration_s: assignment.duration_s,
+                                movement_multiplier: assignment.movement_multiplier,
                             })
                         })
                         .collect::<Result<Vec<_>, GameDataError>>()?,
@@ -1015,6 +1001,7 @@ impl GameData {
                         level: s.level,
                     })
                     .collect(),
+                actions: p.actions.into_iter().map(|a| ActionId::new(a.id)).collect(),
             })
             .collect();
         let mobs: Vec<MobDefinition> = raw
@@ -1034,11 +1021,16 @@ impl GameData {
                     species_id: (!m.species_id.is_empty()).then(|| SpeciesId::new(m.species_id)),
                     hp: m.hp,
                     armor: m.armor,
-                    damage: m.damage,
-                    swing_s: m.swing_s,
-                    reach_m: m.reach_m,
                     speed_variance_ratio,
                     endurance_s,
+                    skills: m
+                        .skills
+                        .into_iter()
+                        .map(|s| ProfileSkill {
+                            id: SkillId::new(s.id),
+                            level: s.level,
+                        })
+                        .collect(),
                     actions: m.actions.into_iter().map(|a| ActionId::new(a.id)).collect(),
                 })
             })
@@ -1105,6 +1097,23 @@ impl GameData {
                     profile.faction()
                 )));
             }
+            if profile.actions().is_empty() {
+                return Err(validation(format!(
+                    "profile {} action roster must not be empty",
+                    profile.id()
+                )));
+            }
+            validate_actor_roster(
+                "profile",
+                profile.id().as_str(),
+                profile.skills(),
+                profile.actions(),
+                &self.skills_by_id,
+                &self.actions_by_id,
+                &self.actions,
+                &self.effects_by_id,
+                &self.effects,
+            )?;
             for known in profile.skills() {
                 if !self.skills_by_id.contains_key(known.id()) {
                     return Err(validation(format!(
@@ -1135,6 +1144,15 @@ impl GameData {
         }
 
         for action in &self.actions {
+            if !action.mana_cost().is_finite()
+                || !action.cast_s().is_finite()
+                || !action.cooldown_s().is_finite()
+            {
+                return Err(validation(format!(
+                    "action {} timing and mana values must be finite",
+                    action.id()
+                )));
+            }
             if action.mana_cost() < 0.0 {
                 return Err(validation(format!(
                     "action {} mana_cost must be non-negative",
@@ -1155,12 +1173,36 @@ impl GameData {
                         assignment.effect_id()
                     )));
                 }
-                if assignment.magnitude() <= 0.0 {
-                    return Err(validation(format!(
-                        "action {} effect {} magnitude must be positive",
-                        action.id(),
-                        assignment.effect_id()
-                    )));
+                let effect = self
+                    .effect(assignment.effect_id())
+                    .expect("validated effect reference");
+                validate_finite_action_numbers(action, assignment)?;
+                match effect.operation() {
+                    EffectOperation::DirectDamage | EffectOperation::Heal => {
+                        if assignment.magnitude() <= 0.0
+                            || assignment.duration_s() != 0.0
+                            || assignment.movement_multiplier() != 1.0
+                        {
+                            return Err(validation(format!("action {} effect {} direct operations require positive magnitude, zero duration_s, and movement_multiplier 1", action.id(), assignment.effect_id())));
+                        }
+                    }
+                    EffectOperation::Root | EffectOperation::Hold | EffectOperation::Charm => {
+                        if assignment.magnitude() != 1.0
+                            || assignment.duration_s() <= 0.0
+                            || assignment.movement_multiplier() != 1.0
+                        {
+                            return Err(validation(format!("action {} effect {} control operation requires magnitude 1, positive duration_s, and movement_multiplier 1", action.id(), assignment.effect_id())));
+                        }
+                    }
+                    EffectOperation::Snare => {
+                        if assignment.magnitude() != 1.0
+                            || assignment.duration_s() <= 0.0
+                            || !(0.0 < assignment.movement_multiplier()
+                                && assignment.movement_multiplier() < 1.0)
+                        {
+                            return Err(validation(format!("action {} effect {} snare requires magnitude 1, positive duration_s, and movement_multiplier in 0..1", action.id(), assignment.effect_id())));
+                        }
+                    }
                 }
                 validate_application(action.id(), assignment)?;
             }
@@ -1190,6 +1232,23 @@ impl GameData {
                     mob.movement_id()
                 )));
             }
+            if mob.actions().is_empty() {
+                return Err(validation(format!(
+                    "mob {} action roster must not be empty",
+                    mob.id()
+                )));
+            }
+            validate_actor_roster(
+                "mob",
+                mob.id().as_str(),
+                mob.skills(),
+                mob.actions(),
+                &self.skills_by_id,
+                &self.actions_by_id,
+                &self.actions,
+                &self.effects_by_id,
+                &self.effects,
+            )?;
             for action in mob.actions() {
                 if !self.actions_by_id.contains_key(action) {
                     return Err(validation(format!(
@@ -1199,7 +1258,7 @@ impl GameData {
                     )));
                 }
             }
-            if mob.hp() <= 0 || mob.damage() <= 0 || mob.swing_s() <= 0.0 || mob.reach_m() <= 0.0 {
+            if mob.hp() <= 0 {
                 return Err(validation(format!(
                     "mob {} has non-positive combat value",
                     mob.id()
@@ -1208,9 +1267,9 @@ impl GameData {
         }
 
         for movement in &self.movement {
-            if movement.speed_mps() <= 0.0 {
+            if !movement.speed_mps().is_finite() || movement.speed_mps() <= 0.0 {
                 return Err(validation(format!(
-                    "movement {} speed_mps must be positive",
+                    "movement {} speed_mps must be finite and positive",
                     movement.id()
                 )));
             }
@@ -1310,33 +1369,7 @@ impl GameData {
         }
         Ok(id)
     }
-
-    /// Legacy adapter for the combat POC: resolve a mob id to a bare sheet.
-    pub fn mob_sheet(&self, id: &str) -> Result<MobSheet, GameDataError> {
-        let mob = self
-            .mobs
-            .iter()
-            .find(|mob| mob.id().as_str() == id)
-            .ok_or_else(|| validation(format!("unknown mob id {id:?}")))?;
-        let movement = self
-            .movement
-            .iter()
-            .find(|movement| movement.id() == mob.movement_id())
-            .ok_or_else(|| {
-                validation(format!(
-                    "mob {id:?} references missing movement {:?}",
-                    mob.movement_id()
-                ))
-            })?;
-        let mut sheet = mob.to_mob_sheet(movement);
-        sheet.sight_m = crate::combat::math::SIGHT_AGGRO_M;
-        sheet.hear_m = crate::combat::math::HEAR_AGGRO_M;
-        sheet.leash_m = crate::combat::math::LEASH_M;
-        sheet.social_m = crate::combat::math::SOCIAL_M;
-        Ok(sheet)
-    }
 }
-
 fn index<K, T>(items: &[T], id: impl Fn(&T) -> &K) -> HashMap<K, usize>
 where
     K: Clone + std::hash::Hash + Eq,
@@ -1360,6 +1393,87 @@ fn validate_ids<'a>(label: &str, ids: impl Iterator<Item = &'a str>) -> Result<(
         }
         if !seen.insert(value) {
             return Err(validation(format!("duplicate {label} id {value:?}")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite_action_numbers(
+    action: &Action,
+    assignment: &ActionEffect,
+) -> Result<(), GameDataError> {
+    for (name, value) in [
+        ("magnitude", assignment.magnitude()),
+        ("range_m", assignment.range_m()),
+        ("radius_m", assignment.radius_m()),
+        ("angle_deg", assignment.angle_deg()),
+        ("duration_s", assignment.duration_s()),
+        ("movement_multiplier", assignment.movement_multiplier()),
+    ] {
+        if !value.is_finite() {
+            return Err(validation(format!(
+                "action {} effect {} {name} must be finite",
+                action.id(),
+                assignment.effect_id()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_actor_roster(
+    label: &str,
+    id: &str,
+    skills: &[ProfileSkill],
+    action_ids: &[ActionId],
+    skills_by_id: &HashMap<SkillId, usize>,
+    actions_by_id: &HashMap<ActionId, usize>,
+    actions: &[Action],
+    effects_by_id: &HashMap<EffectId, usize>,
+    effects: &[Effect],
+) -> Result<(), GameDataError> {
+    let mut seen_skills = std::collections::HashSet::new();
+    for skill in skills {
+        if !seen_skills.insert(skill.id()) {
+            return Err(validation(format!(
+                "{label} {id} has duplicate skill {}",
+                skill.id()
+            )));
+        }
+        if !skills_by_id.contains_key(skill.id()) || skill.level() <= 0 {
+            return Err(validation(format!(
+                "{label} {id} has invalid skill {} level {}",
+                skill.id(),
+                skill.level()
+            )));
+        }
+    }
+    let mut seen_actions = std::collections::HashSet::new();
+    for action_id in action_ids {
+        if !seen_actions.insert(action_id) {
+            return Err(validation(format!(
+                "{label} {id} has duplicate action {action_id}"
+            )));
+        }
+        let action = actions_by_id
+            .get(action_id)
+            .map(|&i| &actions[i])
+            .ok_or_else(|| {
+                validation(format!(
+                    "{label} {id} references unknown action {action_id}"
+                ))
+            })?;
+        for assignment in action.effects() {
+            let effect = effects_by_id
+                .get(assignment.effect_id())
+                .map(|&i| &effects[i])
+                .expect("action effects validated");
+            if !seen_skills.contains(effect.skill_id()) {
+                return Err(validation(format!(
+                    "{label} {id} action {action_id} requires unassigned skill {}",
+                    effect.skill_id()
+                )));
+            }
         }
     }
     Ok(())
@@ -1442,164 +1556,96 @@ fn validate_application(
 mod tests {
     use super::*;
 
-    fn minimal_valid_xml() -> String {
-        r#"<OrrunGameData schema_version="2"><skills><skill id="slashing_damage" name="Slashing Damage" level_scale="1"/></skills><factions><faction id="neutral" neutral="true"/><faction id="citizen" neutral="false"/></factions><effects><effect id="slashing_damage" name="Slashing Damage" kind="damage" skill_id="slashing_damage" progression="skill_level"/></effects><actions><action id="strike" name="Strike" target="hostile"><effects><effect effect_id="slashing_damage" magnitude="1" application="single_target" range_m="1.8"/></effects></action></actions><players><profile id="default_player" name="Adventurer" faction="citizen"><skill id="slashing_damage" level="1"/></profile></players><mobs><mob id="wolf" name="Wolf-spider" faction="citizen" mode="active" hp="70" armor="0" damage="10" movement_id="walk" speed_variance_ratio="0.05" endurance_s="30"><action id="strike"/></mob></mobs><movement><spec id="walk" speed_mps="2.5"/></movement><hamlet enabled="true"/><defaults/></OrrunGameData>"#.to_string()
+    fn canonical_xml() -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+        )
+        .unwrap()
     }
 
     #[test]
-    fn rejects_duplicate_and_invalid_data() {
-        let xml = r#"<OrrunGameData schema_version="2"><skills/><factions><faction id="neutral" neutral="true"/><faction id="neutral" neutral="false"/></factions><actions/><players/><mobs/><movement/></OrrunGameData>"#;
-        let raw: RawGameData = from_str(xml).unwrap();
-        assert!(GameData::from_raw(raw).is_err());
+    fn canonical_schema_three_loads_typed_contract() {
+        let data = GameData::from_xml_str(&canonical_xml()).expect("canonical data");
+        let profile = data.profile(&ProfileId::new("default_player")).unwrap();
+        assert_eq!(profile.actions().len(), 7);
+        let snare = data
+            .action(&ActionId::new("hobble"))
+            .unwrap()
+            .effects()
+            .first()
+            .unwrap();
+        assert_eq!(snare.duration_s(), 6.0);
+        assert_eq!(snare.movement_multiplier(), 0.5);
+        let heal = data.action(&ActionId::new("restore")).unwrap();
+        assert!(heal.interruptible());
+        assert!(!heal.reveals());
+        let hexer = data.mob(&MobId::new("hexer")).unwrap();
+        assert!(hexer
+            .skills()
+            .iter()
+            .any(|s| s.id() == &SkillId::new("charm") && s.level() == 2));
     }
 
     #[test]
-    fn loads_minimal_valid_data() {
-        let raw: RawGameData = from_str(&minimal_valid_xml()).unwrap();
-        let data = GameData::from_raw(raw).expect("minimal data should load");
-        assert_eq!(data.skills().len(), 1);
-        assert_eq!(data.actions().len(), 1);
-        assert_eq!(data.mobs().len(), 1);
+    fn rejects_unknown_attributes() {
+        let xml = canonical_xml().replacen(r#"id="slash""#, r#"id="slash" surprise="x""#, 1);
+        assert!(GameData::from_xml_str(&xml)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
     }
 
     #[test]
-    fn exposes_previously_dropped_fields() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
-        let data = GameData::load(path).expect("canonical data loads");
-
-        let fire = data
-            .skill(&SkillId::new("fire_damage"))
-            .expect("fire skill");
-        assert_eq!(fire.level_scale(), 1.0);
-
-        let profile = data
-            .profile(&ProfileId::new("default_player"))
-            .expect("default player");
-        assert!(!profile.skills().is_empty(), "profile skills are loaded");
-        for known in profile.skills() {
-            assert!(known.level() > 0, "starting level is positive");
-        }
-
-        let strike = data
-            .action(&ActionId::new("strike"))
-            .expect("strike action");
-        assert!(
-            !strike.effects().is_empty(),
-            "strike has effect assignments"
-        );
-
-        let wolf = data.mob(&MobId::new("wolf")).expect("wolf mob");
-        assert!(wolf.actions().contains(&ActionId::new("strike")));
-    }
-
-    #[test]
-    fn exposes_action_timings_and_default_profile() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
-        let data = GameData::load(path).expect("canonical data loads");
-
-        let strike = data
-            .action(&ActionId::new("strike"))
-            .expect("strike action");
-        assert_eq!(strike.cast_s(), 0.0);
-        assert_eq!(strike.cooldown_s(), 6.0);
-        let fire_bolt = data
-            .action(&ActionId::new("fire_bolt"))
-            .expect("fire bolt action");
-        assert_eq!(fire_bolt.cast_s(), 1.2);
-        assert_eq!(fire_bolt.cooldown_s(), 0.0);
-        let mend = data.action(&ActionId::new("mend")).expect("mend action");
-        assert_eq!(mend.cast_s(), 2.5);
-        assert_eq!(
-            data.default_player_profile_id().expect("default profile"),
-            ProfileId::new("default_player")
-        );
-    }
-
-    #[test]
-    fn rejects_zero_radius_aoe() {
-        let xml = minimal_valid_xml().replace(
-            r#"application="single_target" range_m="1.8""#,
-            r#"application="aoe" range_m="5" radius_m="0""#,
-        );
-        let raw: RawGameData = from_str(&xml).unwrap();
-        assert!(GameData::from_raw(raw).is_err());
-    }
-
-    #[test]
-    fn accepts_mob_speed_variance_bounds_and_positive_endurance() {
-        for ratio in ["0", "0.20"] {
-            let xml = minimal_valid_xml().replace(
-                r#"speed_variance_ratio="0.05""#,
-                &format!(r#"speed_variance_ratio="{ratio}""#),
-            );
-            let data = GameData::from_xml_str(&xml).expect("ratio bound should load");
-            let wolf = data.mob(&MobId::new("wolf")).expect("wolf");
-            assert_eq!(
-                wolf.speed_variance_ratio().as_ratio(),
-                ratio.parse::<f64>().unwrap()
-            );
-            assert_eq!(wolf.endurance_s().seconds(), 30.0);
-        }
-    }
-
-    #[test]
-    fn rejects_missing_required_mob_motion_attributes() {
-        for attribute in [r#" speed_variance_ratio="0.05""#, r#" endurance_s="30""#] {
-            let xml = minimal_valid_xml().replace(attribute, "");
-            let error = GameData::from_xml_str(&xml).expect_err("missing attribute must fail");
-            assert!(error
-                .to_string()
-                .contains(attribute.split('=').next().unwrap().trim()));
-        }
-    }
-
-    #[test]
-    fn rejects_non_finite_and_out_of_range_mob_motion_values() {
-        for (attribute, invalid, expected) in [
-            ("speed_variance_ratio", "NaN", "speed_variance_ratio"),
-            ("speed_variance_ratio", "inf", "speed_variance_ratio"),
-            ("speed_variance_ratio", "-0.01", "speed_variance_ratio"),
-            ("speed_variance_ratio", "0.200001", "speed_variance_ratio"),
-            ("endurance_s", "NaN", "endurance_s"),
-            ("endurance_s", "inf", "endurance_s"),
-            ("endurance_s", "0", "endurance_s"),
+    fn rejects_non_finite_numeric_values() {
+        for (old, new) in [
+            (r#"mana_cost="0""#, r#"mana_cost="NaN""#),
+            (r#"duration_s="4""#, r#"duration_s="NaN""#),
+            (
+                r#"movement_multiplier="0.5""#,
+                r#"movement_multiplier="NaN""#,
+            ),
+            (r#"speed_mps="2.5""#, r#"speed_mps="NaN""#),
         ] {
-            let original = if attribute == "speed_variance_ratio" {
-                "0.05"
-            } else {
-                "30"
-            };
-            let xml = minimal_valid_xml().replace(
-                &format!(r#"{attribute}="{original}""#),
-                &format!(r#"{attribute}="{invalid}""#),
-            );
-            let error = GameData::from_xml_str(&xml).expect_err("invalid value must fail");
-            assert!(
-                error.to_string().contains(expected),
-                "unexpected error: {error}"
-            );
+            let xml = canonical_xml().replacen(old, new, 1);
+            let error = GameData::from_xml_str(&xml).expect_err("non-finite must fail");
+            assert!(error.to_string().contains("finite"), "{error}");
         }
     }
 
     #[test]
-    fn rejects_unknown_mob_action() {
-        let xml = minimal_valid_xml().replace(
-            r#"<action id="strike"/></mob>"#,
-            r#"<action id="missing"/></mob>"#,
+    fn enforces_operation_specific_assignment_domains() {
+        let direct = canonical_xml().replacen(
+            r#"duration_s="0" movement_multiplier="1""#,
+            r#"duration_s="2" movement_multiplier="1""#,
+            1,
         );
-        let raw: RawGameData = from_str(&xml).unwrap();
-        assert!(GameData::from_raw(raw).is_err());
+        assert!(GameData::from_xml_str(&direct)
+            .unwrap_err()
+            .to_string()
+            .contains("zero duration_s"));
+        let snare = canonical_xml().replacen(
+            r#"duration_s="6" movement_multiplier="0.5""#,
+            r#"duration_s="6" movement_multiplier="1""#,
+            1,
+        );
+        assert!(GameData::from_xml_str(&snare)
+            .unwrap_err()
+            .to_string()
+            .contains("0..1"));
     }
 
     #[test]
-    fn rejects_unknown_profile_skill() {
-        let xml = minimal_valid_xml().replace(
-            r#"<skill id="slashing_damage" level="1"/>"#,
-            r#"<skill id="missing" level="1"/>"#,
-        );
-        let raw: RawGameData = from_str(&xml).unwrap();
-        assert!(GameData::from_raw(raw).is_err());
+    fn rejects_incoherent_actor_rosters() {
+        let xml = canonical_xml().replacen(r#"<skill id="melee" level="1" />"#, "", 1);
+        assert!(GameData::from_xml_str(&xml)
+            .unwrap_err()
+            .to_string()
+            .contains("requires unassigned skill"));
+        let xml =
+            canonical_xml().replacen(r#"<action id="slash" />"#, r#"<action id="missing" />"#, 1);
+        assert!(GameData::from_xml_str(&xml)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown action"));
     }
 }

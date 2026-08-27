@@ -28,6 +28,12 @@ fn pack_roundtrip() {
 }
 
 #[test]
+#[should_panic(expected = "atlas size must be >= 32, got 31")]
+fn generate_rejects_atlas_below_minimum_size() {
+    let _ = ContinentAtlas::generate(20260809, 31);
+}
+
+#[test]
 fn generate_validates_clean() {
     let atlas = ContinentAtlas::generate(20260809, 128);
     let errors = atlas.validate();

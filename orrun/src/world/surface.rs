@@ -125,6 +125,14 @@ pub enum SurfaceError {
 
     #[error("surface probe at ({x} m, {z} m) produced a non-finite ground height")]
     NonFiniteProbe { x: f64, z: f64 },
+
+    #[error("atlas field {field} has length {actual}, expected {expected} for size {size}")]
+    BadAtlasSize {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+        size: usize,
+    },
 }
 
 /// Unmixed height terms at one column. The HUD uses this so a snowy loft is
@@ -717,7 +725,9 @@ fn port_quota(settlements: usize) -> usize {
 
 fn town_quota(settlements: usize) -> usize {
     let ports = port_quota(settlements);
-    let rest = settlements.saturating_sub(ports);
+    let rest = settlements
+        .checked_sub(ports)
+        .expect("port quota exceeds settlement count");
     let want = match settlements {
         0..=2 => 0,
         3..=6 => 1,
@@ -875,6 +885,31 @@ impl ContinentalSurface {
         atlas: &ContinentAtlas,
         fields: Arc<AtlasFields>,
     ) -> Result<Self, SurfaceError> {
+        let expected = atlas
+            .size
+            .checked_mul(atlas.size)
+            .ok_or(SurfaceError::BadAtlasSize {
+                field: "size squared",
+                actual: atlas.size,
+                expected: usize::MAX,
+                size: atlas.size,
+            })?;
+        for (field, actual) in [
+            ("cells", atlas.cells.len()),
+            ("landmass_id", atlas.landmass_id.len()),
+            ("lake_id", atlas.lake_id.len()),
+            ("river_receiver", atlas.river_receiver.len()),
+            ("mouth_distance", atlas.mouth_distance.len()),
+        ] {
+            if actual != expected {
+                return Err(SurfaceError::BadAtlasSize {
+                    field,
+                    actual,
+                    expected,
+                    size: atlas.size,
+                });
+            }
+        }
         let bounds = AtlasBounds::of(atlas);
         let massifs = Arc::new(AlpineMassifField::build(
             &atlas.alpine_massifs,
@@ -1321,6 +1356,16 @@ mod ladder_tests {
             at: GlobalXZ::at(0.0, 0.0),
             tier,
             population: pop,
+        }
+    }
+
+    #[test]
+    fn quota_accounting_never_exceeds_settlements() {
+        for settlements in 0..100 {
+            let ports = port_quota(settlements);
+            let towns = town_quota(settlements);
+            assert!(ports <= settlements);
+            assert!(towns <= settlements - ports);
         }
     }
 

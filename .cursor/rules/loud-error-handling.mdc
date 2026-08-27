@@ -1,0 +1,31 @@
+---
+description: Enforce loud, contextual error handling without silent fallbacks
+alwaysApply: true
+---
+
+# Loud Error Handling
+
+- Propagate every `Result`/error with useful context, or handle it deliberately at the authoritative owner.
+- Never discard fallible work with `let _ =`, suppress it with `.ok()`, or turn `Err` into `continue`, a default, or `Ok`.
+- Do not use `unwrap_or_default` when absence means required state is missing.
+- Do not use saturating arithmetic for invariant-bearing state; checked operations must report invariant violations.
+- Never substitute stale or default positions for missing/invalid positional state.
+- Model legitimate optional absence explicitly with `Option` or a domain enum, and document why absence is valid.
+- Make invariant violations loud through a typed error or a panic when the state is an internal impossibility.
+- Keep validation, mutation, and recovery policy in one central authoritative owner; callers must not invent fallbacks.
+- Cleanup/teardown may suppress an error only with an adjacent rationale explaining why failure is non-actionable.
+- Tests must exercise failure paths, including missing required state and violated invariants.
+
+```rust
+// Bad: hides required state and suppresses failure.
+let position = entity.position().unwrap_or_default();
+let _ = world.place(entity, position);
+
+// Good: preserves context and fails loudly.
+let position = entity
+    .position()
+    .ok_or(PlacementError::MissingPosition { entity_id })?;
+world.place(entity, position).map_err(|source| {
+    PlacementError::PlaceFailed { entity_id, source }
+})?;
+```

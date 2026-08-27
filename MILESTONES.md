@@ -135,9 +135,11 @@ Exit criteria:
 - Old saves fail with a clear incompatible-format message.
 - There is still no global level or global XP display.
 
-## M5 — Complete effect and action migration — NEXT
+## M5 — Complete effect and action migration — DONE
 
 Move the rest of useful combat behavior to the canonical pipeline.
+
+Verified complete: Python GameData tests, all Rust library tests, all-target checks, release build, and the headless `m5_actions` production-runtime hook pass. The hook covers slash, arrow, restore, root, hold, snare, charm, cooldowns, and the full authored mob roster.
 
 Deliverables:
 

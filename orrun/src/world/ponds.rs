@@ -45,6 +45,7 @@ use super::surface::{
 use super::world_stream::MEDIUM;
 use crate::atlas::CELL_METRES;
 use engine::space::GlobalXZ;
+use engine::EngineResult;
 
 /// Rebuild the window once the player is this far from where it was centred.
 pub const REBUILD_M: f64 = 800.0;
@@ -172,6 +173,7 @@ impl Pond {
 #[derive(Debug)]
 pub struct PondField {
     centre: GlobalXZ,
+    covers_m: f64,
     ponds: Vec<Pond>,
     basins: PondGrid,
 }
@@ -181,6 +183,7 @@ impl PondField {
     pub fn empty(centre: GlobalXZ) -> Self {
         Self {
             centre,
+            covers_m: 0.0,
             ponds: Vec::new(),
             basins: PondGrid::default(),
         }
@@ -188,7 +191,19 @@ impl PondField {
 
     /// Find every pond that can reach within [`COVERS_M`] of `centre`.
     pub fn build(surface: &ContinentalSurface, centre: GlobalXZ) -> Self {
-        Finder::new(surface, centre).run()
+        Finder::new(surface, centre, COVERS_M).run()
+    }
+
+    /// Build the exact procedural pond authority needed around one off-window query.
+    ///
+    /// Unlike the streaming window this scans only seeds that can influence
+    /// `reach_m`, while retaining absolute seed order and identical basin carving.
+    pub fn build_covering(surface: &ContinentalSurface, centre: GlobalXZ, reach_m: f64) -> Self {
+        assert!(
+            reach_m.is_finite() && reach_m >= 0.0,
+            "pond authority reach must be finite and non-negative"
+        );
+        Finder::new(surface, centre, reach_m).run()
     }
 
     pub fn centre(&self) -> GlobalXZ {
@@ -204,7 +219,7 @@ impl PondField {
     pub fn covers(&self, focus: GlobalXZ, reach_m: f64) -> bool {
         let dx = focus.x - self.centre.x;
         let dz = focus.z - self.centre.z;
-        (dx * dx + dz * dz).sqrt() + reach_m <= COVERS_M
+        (dx * dx + dz * dz).sqrt() + reach_m <= self.covers_m
     }
 
     /// Sink whatever pond stands on this column.
@@ -402,15 +417,15 @@ impl PondWindow {
     /// Called behind the loading screen, and again if the player ever outruns
     /// the field: baking ground from a window that does not reach it would put
     /// a pond in one chunk and not in its neighbour.
-    pub fn settle(&mut self, focus: GlobalXZ) {
+    pub fn settle(&mut self, focus: GlobalXZ) -> EngineResult<()> {
         if let Some((_, handle)) = self.pending.take() {
-            self.install(handle.join().expect("pond window thread"));
+            self.install(crate::worker::join_worker("pond window", handle)?);
         }
-        if self.field().covers(focus, MEDIUM.reach_m()) {
-            return;
+        if !self.field().covers(focus, MEDIUM.reach_m()) {
+            let field = PondField::build(&self.surface, focus);
+            self.install(field);
         }
-        let field = PondField::build(&self.surface, focus);
-        self.install(field);
+        Ok(())
     }
 
     /// Whether the window in hand speaks for `focus` yet, scanning one that does
@@ -421,20 +436,20 @@ impl PondWindow {
     /// milliseconds spent finding out is tens of milliseconds the window is not
     /// being drawn. So the caller asks, shows its loading screen, and asks
     /// again next frame.
-    pub fn traced(&mut self, focus: GlobalXZ) -> bool {
+    pub fn traced(&mut self, focus: GlobalXZ) -> EngineResult<bool> {
         if let Some((_, handle)) = self.pending.take() {
             if handle.is_finished() {
-                self.install(handle.join().expect("pond window thread"));
+                self.install(crate::worker::join_worker("pond window", handle)?);
             } else {
                 self.pending = Some((self.wanted(), handle));
-                return false;
+                return Ok(false);
             }
         }
         if self.field().covers(focus, MEDIUM.reach_m()) {
-            return true;
+            return Ok(true);
         }
         self.scan(focus);
-        false
+        Ok(false)
     }
 
     /// Keep the window around the player, without ever blocking on it.
@@ -444,13 +459,13 @@ impl PondWindow {
     /// hand, the next scan is still a background job — never [`Self::settle`].
     /// Chunks baked in that gap may miss a pond at the medium ring until the
     /// new field lands; a freeze is worse.
-    pub fn follow(&mut self, focus: GlobalXZ) {
+    pub fn follow(&mut self, focus: GlobalXZ) -> EngineResult<()> {
         if let Some((_, handle)) = self.pending.take() {
             if handle.is_finished() {
-                self.install(handle.join().expect("pond window thread"));
+                self.install(crate::worker::join_worker("pond window", handle)?);
             } else {
                 self.pending = Some((self.wanted(), handle));
-                return;
+                return Ok(());
             }
         }
         let current = self.field();
@@ -459,10 +474,11 @@ impl PondWindow {
             let dx = focus.x - current.centre().x;
             let dz = focus.z - current.centre().z;
             if (dx * dx + dz * dz).sqrt() < REBUILD_M {
-                return;
+                return Ok(());
             }
         }
         self.scan(focus);
+        Ok(())
     }
 
     fn scan(&mut self, focus: GlobalXZ) {
@@ -473,7 +489,6 @@ impl PondWindow {
             .expect("pond window thread");
         self.pending = Some((focus, handle));
     }
-
     fn wanted(&self) -> GlobalXZ {
         self.pending
             .as_ref()
@@ -503,18 +518,20 @@ struct Finder<'s> {
     sea: f32,
     bounds: AtlasBounds,
     centre: GlobalXZ,
+    covers_m: f64,
     ponds: Vec<Pond>,
     basins: PondGrid,
 }
 
 impl<'s> Finder<'s> {
-    fn new(surface: &'s ContinentalSurface, centre: GlobalXZ) -> Self {
+    fn new(surface: &'s ContinentalSurface, centre: GlobalXZ, covers_m: f64) -> Self {
         Self {
             surface,
             seed: surface.world_seed() as u32 as u64,
             sea: surface.sea_surface_z(),
             bounds: surface.bounds(),
             centre,
+            covers_m,
             ponds: Vec::new(),
             basins: PondGrid::default(),
         }
@@ -522,10 +539,11 @@ impl<'s> Finder<'s> {
 
     fn run(mut self) -> PondField {
         let cell = CELL_METRES as f64;
-        let lo_x = ((self.centre.x - SEED_RADIUS_M) / cell).floor() as i64;
-        let hi_x = ((self.centre.x + SEED_RADIUS_M) / cell).ceil() as i64;
-        let lo_z = ((self.centre.z - SEED_RADIUS_M) / cell).floor() as i64;
-        let hi_z = ((self.centre.z + SEED_RADIUS_M) / cell).ceil() as i64;
+        let seed_radius_m = self.covers_m + SINK_WALK_M as f64 + 2.0 * POND_MAX_RADIUS_M as f64;
+        let lo_x = ((self.centre.x - seed_radius_m) / cell).floor() as i64;
+        let hi_x = ((self.centre.x + seed_radius_m) / cell).ceil() as i64;
+        let lo_z = ((self.centre.z - seed_radius_m) / cell).floor() as i64;
+        let hi_z = ((self.centre.z + seed_radius_m) / cell).ceil() as i64;
 
         // Absolute cell order, never window order: two windows that both hold
         // a seed have to walk it in the same sequence, or the basin they fill
@@ -545,6 +563,7 @@ impl<'s> Finder<'s> {
         }
         PondField {
             centre: self.centre,
+            covers_m: self.covers_m,
             basins: self.basins,
             ponds: self.ponds,
         }

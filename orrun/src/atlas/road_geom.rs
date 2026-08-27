@@ -479,7 +479,7 @@ mod tests {
             .iter()
             .copied()
             .filter(|p| p.distance(plaza) < 400.0)
-            .max_by(|a, b| a.distance(plaza).partial_cmp(&b.distance(plaza)).unwrap())
+            .max_by(|a, b| a.distance(plaza).total_cmp(&b.distance(plaza)))
             .unwrap_or(plaza);
         (far - plaza).normalize_or_zero()
     }

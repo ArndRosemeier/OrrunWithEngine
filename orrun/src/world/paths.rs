@@ -205,7 +205,7 @@ impl PathLayer {
         let mut changed = false;
         if let Some(pending) = self.pending.take() {
             if pending.job.is_finished() {
-                let bake = pending.job.join().expect("path thread")?;
+                let bake = crate::worker::join_worker("path", pending.job)??;
                 self.install(world, bake)?;
                 self.centre = Some(pending.focus);
                 self.resident_chunks = pending.resident_chunks;

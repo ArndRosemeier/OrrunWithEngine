@@ -32,12 +32,29 @@ fn entry_point(atlas: &ContinentAtlas, bounds: AtlasBounds) -> MapPoint {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let seed = args
+        .next()
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid seed '{value}': {error}"))
+        })
+        .unwrap_or(1);
     let size = args
         .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(64usize)
-        .clamp(32, 512);
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid size '{value}': {error}"))
+        })
+        .unwrap_or(64);
+    assert!(
+        (32..=512).contains(&size),
+        "size must be in 32..=512, got {size}"
+    );
+    if let Some(extra) = args.next() {
+        panic!("unexpected command-line argument '{extra}'");
+    }
 
     eprintln!("atlas seed={seed} size={size}");
     let atlas = ContinentAtlas::generate(seed, size);
@@ -45,7 +62,7 @@ fn main() {
     let bounds = surface.bounds();
     let request = WorldEntryRequest::at(entry_point(&atlas, bounds));
     let mut ponds = PondWindow::new(Arc::clone(&surface));
-    ponds.settle(request.requested());
+    ponds.settle(request.requested()).expect("pond window");
     let pose = resolve_spawn(&surface, &ponds.field(), request).expect("spawn");
     let dir = pose.heading().direction();
     eprintln!(
@@ -91,7 +108,7 @@ fn main() {
         let tick = Instant::now();
         p = GlobalXZ::at(p.x + dir.x as f64 * step, p.z + dir.y as f64 * step);
         let frame_t0 = Instant::now();
-        ponds.follow(p);
+        ponds.follow(p).expect("pond window");
         let rebased = stream.maybe_rebase(&mut world, p).expect("rebase");
         if rebased {
             rebases += 1;

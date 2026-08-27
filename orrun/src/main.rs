@@ -35,7 +35,8 @@ use orrun::atlas::pack;
 use orrun::atlas::preview;
 use orrun::atlas::types::{Endpoint, Link};
 use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CONTINENT_SIZE};
-use orrun::controls::{is_reserved, Action};
+use orrun::controls::is_reserved;
+use orrun::gamedata::ActionId;
 use orrun::gamedata::GameData;
 use orrun::hud;
 use orrun::save::{SaveError, SavedStand};
@@ -649,15 +650,43 @@ impl AtlasViewer {
     }
 }
 
-fn parse_args(default_size: usize) -> (i32, usize) {
-    let mut args = std::env::args().skip(1);
-    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(20260809);
-    let size = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .map(clamp_continent_size)
-        .unwrap_or(default_size);
-    (seed, size)
+fn parse_args_from<I, S>(args: I, default_size: usize) -> Result<(i32, usize), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let seed = match args.next() {
+        Some(value) => value
+            .as_ref()
+            .parse::<i32>()
+            .map_err(|error| format!("invalid seed '{}': {error}", value.as_ref()))?,
+        None => 20260809,
+    };
+    let size = match args.next() {
+        Some(value) => {
+            let parsed = value
+                .as_ref()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid continent size '{}': {error}", value.as_ref()))?;
+            if !(32..=512).contains(&parsed) {
+                return Err(format!("continent size must be in 32..=512, got {parsed}"));
+            }
+            parsed
+        }
+        None => default_size,
+    };
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "unexpected command-line argument '{}'",
+            extra.as_ref()
+        ));
+    }
+    Ok((seed, size))
+}
+
+fn parse_args(default_size: usize) -> Result<(i32, usize), String> {
+    parse_args_from(std::env::args().skip(1), default_size)
 }
 
 /// Where the title starts streaming before Start is pressed.
@@ -707,10 +736,11 @@ fn opening_entry(
     request
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let game_data = Arc::new(GameData::load("data/OrrunGameData.xml").expect("canonical GameData"));
-    let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
-    let (seed, size) = parse_args(prefs.continent_size());
+    let mut prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
+    prefs.keys.validate_for_default_profile(&game_data);
+    let (seed, size) = parse_args(prefs.continent_size()).unwrap_or_else(|error| panic!("{error}"));
     let (remembered, mut startup_notice) = match SavedStand::read(seed, size) {
         Ok(remembered) => (remembered, None),
         Err(SaveError::IncompatibleFormat { found, .. }) => (
@@ -756,6 +786,21 @@ fn main() {
         applied: false,
         active_continent_size: size,
         listening: None,
+        action_labels: {
+            let profile_id = game_data
+                .default_player_profile_id()
+                .expect("default player profile");
+            game_data
+                .profile(&profile_id)
+                .expect("default player profile exists")
+                .actions()
+                .iter()
+                .map(|id| {
+                    let action = game_data.action(id).expect("profile action exists");
+                    (id.clone(), action.name().to_owned())
+                })
+                .collect()
+        },
     };
 
     let last_stand = Arc::new(Mutex::new(remembered.clone()));
@@ -764,7 +809,7 @@ fn main() {
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
             install_daylight(world);
-            ambience = Some(Ambience::load().unwrap_or_else(|err| panic!("{err}")));
+            ambience = Some(Ambience::load().map_err(app_error)?);
         }
         if !settings_ui.applied {
             apply_hitch_log(world, settings_ui.prefs.hitch_log, false);
@@ -775,7 +820,7 @@ fn main() {
 
         if let Some(job) = generating.take() {
             if job.is_finished() {
-                let (atlas, surface, proxy) = job.join().expect("atlas thread");
+                let (atlas, surface, proxy) = orrun::worker::join_worker("atlas", job)?;
                 eprintln!(
                     "ready: lakes={} rivers={} coasts={} nodes={} alpine_massifs={} hash={:#x}",
                     atlas.hydro.lakes.len(),
@@ -793,7 +838,7 @@ fn main() {
                 if let Some(stand) = remembered.as_ref() {
                     world_session
                         .apply_save(stand)
-                        .unwrap_or_else(|err| panic!("saved player state is invalid: {err}"));
+                        .map_err(|err| EngineError::application(err))?;
                 }
                 session = Some(world_session);
             } else {
@@ -846,9 +891,7 @@ fn main() {
                     }
                 }
                 if session.state() == SessionState::Travel {
-                    session
-                        .update(world, frame)
-                        .unwrap_or_else(|err| panic!("world session failed: {err}"));
+                    session.update(world, frame).map_err(app_error)?;
                 }
             }
             let line = if !ready {
@@ -876,11 +919,9 @@ fn main() {
             }
             draw_settings(&mut settings_ui, world, frame);
             if let Some(ambience) = ambience.as_mut() {
-                ambience
-                    .silence(frame.dt)
-                    .unwrap_or_else(|err| panic!("{err}"));
+                ambience.silence(frame.dt).map_err(app_error)?;
             }
-            return;
+            return Ok(());
         }
 
         let viewer = viewer
@@ -891,11 +932,9 @@ fn main() {
             .expect("left the title before the atlas was ready");
 
         session.set_key_binds(settings_ui.prefs.keys.clone());
-        if let Err(err) = session.update(world, frame) {
-            panic!("world session failed: {err}");
-        }
+        session.update(world, frame).map_err(app_error)?;
 
-        if let Some(stand) = session.saved_full(seed, size) {
+        if let Some(stand) = session.saved_full(seed, size).map_err(app_error)? {
             *stand_in_loop.lock().expect("last stand") = Some(stand);
         }
 
@@ -912,12 +951,13 @@ fn main() {
             .as_mut()
             .expect("audio opens with the window")
             .update(session, frame.dt)
-            .unwrap_or_else(|err| panic!("{err}"));
-    });
+            .map_err(app_error)?;
+        Ok(())
+    })?;
 
     let stand = last_stand.lock().expect("last stand").clone();
     if let Some(stand) = stand {
-        let path = stand.write().unwrap_or_else(|err| panic!("{err}"));
+        let path = stand.write().map_err(app_error)?;
         eprintln!(
             "saved ({:.0} m, {:.0} m) to {}",
             stand.x,
@@ -925,6 +965,11 @@ fn main() {
             path.display()
         );
     }
+    Ok(())
+}
+
+fn app_error(error: impl std::error::Error + Send + Sync + 'static) -> EngineError {
+    EngineError::application(error)
 }
 
 fn draw_startup_notice(ctx: &egui::Context, notice: &mut Option<String>) {
@@ -1655,7 +1700,8 @@ struct SettingsUi {
     /// Atlas edge length for the running session (fixed at launch).
     active_continent_size: usize,
     /// Combat verb waiting for the next key-down. Esc cancels listen.
-    listening: Option<Action>,
+    listening: Option<ActionId>,
+    action_labels: Vec<(ActionId, String)>,
 }
 
 fn apply_instance_submit_hotkeys(world: &mut World, frame: &Frame) {
@@ -1694,10 +1740,14 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
         // Engine Esc cancelled listen only.
         ui_state.listening = None;
     }
-    if let Some(action) = ui_state.listening {
+    if let Some(action) = ui_state.listening.clone() {
         if let Some(k) = frame.input.last_key_down() {
             if !is_reserved(k) {
-                ui_state.prefs.keys.assign(action, k);
+                ui_state
+                    .prefs
+                    .keys
+                    .assign(&action, k)
+                    .expect("reserved keys filtered");
                 ui_state.prefs.write().unwrap_or_else(|err| panic!("{err}"));
                 ui_state.listening = None;
             }
@@ -1726,7 +1776,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
 
     let mut hitch = ui_state.prefs.hitch_log;
     let mut continent_size = ui_state.prefs.continent_size as i32;
-    let log_path = settings::hitch_log_path().ok();
+    let log_path = Some(settings::hitch_log_path().unwrap_or_else(|error| panic!("{error}")));
     frame.ui.modal("Settings", &mut ui_state.open, |panel, open| {
         let ui = panel.ui();
         if ui.checkbox(&mut hitch, "Hitch log").changed() {
@@ -1801,13 +1851,13 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
                 .size(13.0)
                 .color(Color32::from_rgb(180, 188, 196)),
         );
-        for verb in Action::ALL {
-            let bound = ui_state.prefs.keys.display(verb);
-            let listening = ui_state.listening == Some(verb);
+        for (action_id, action_name) in &ui_state.action_labels {
+            let bound = ui_state.prefs.keys.display(action_id);
+            let listening = ui_state.listening.as_ref() == Some(action_id);
             let label = if listening {
-                format!("{}  (press a key)", verb.label())
+                format!("{}  (press a key)", action_name)
             } else {
-                format!("{}  {}", verb.label(), bound)
+                format!("{}  {}", action_name, bound)
             };
             if ui
                 .add(
@@ -1821,7 +1871,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
                 )
                 .clicked()
             {
-                ui_state.listening = Some(verb);
+                ui_state.listening = Some(action_id.clone());
             }
         }
         ui.add_space(8.0);
@@ -1845,8 +1895,9 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     };
     let heading = session
         .player_heading()
-        .map(|h| h.degrees())
-        .unwrap_or_default();
+        .unwrap_or_else(|error| panic!("player heading is invalid while drawing HUD: {error}"))
+        .expect("player position exists but player heading does not")
+        .degrees();
     let at = engine::space::GlobalXZ::at(p.x, p.z);
     let column = session.surface().column(at);
     let layers = session.surface().terrain_layers(at);
@@ -2000,4 +2051,30 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
     hud::draw_fail_toast(&ctx, session.combat());
     hud::draw_loot_windows(session, world, frame);
     hud::draw_summon_window(session, world, frame);
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::parse_args_from;
+
+    #[test]
+    fn malformed_arguments_are_rejected() {
+        assert!(parse_args_from(["bad"], 256)
+            .unwrap_err()
+            .contains("invalid seed"));
+        assert!(parse_args_from(["1", "31"], 256)
+            .unwrap_err()
+            .contains("32..=512"));
+        assert!(parse_args_from(["1", "64", "extra"], 256)
+            .unwrap_err()
+            .contains("unexpected"));
+    }
+
+    #[test]
+    fn absent_arguments_use_defaults() {
+        assert_eq!(
+            parse_args_from(std::iter::empty::<&str>(), 96).unwrap(),
+            (20260809, 96)
+        );
+    }
 }

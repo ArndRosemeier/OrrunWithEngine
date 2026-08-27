@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use engine::anim::AnimatedModel;
+use engine::anim::{AnimatedModel, AnimationAction, AnimationProfile};
 use engine::collision::{ActorBody, CollisionWorld};
 use engine::contact::ContactSnapshot;
 use engine::error::{EngineError, EngineResult};
@@ -337,7 +337,7 @@ impl FaunaLayer {
             else {
                 continue;
             };
-            self.models[i] = ModelSlot::Ready(job.join().expect("fauna load thread")?);
+            self.models[i] = ModelSlot::Ready(crate::worker::join_worker("fauna load", job)??);
         }
         Ok(())
     }
@@ -367,18 +367,19 @@ impl FaunaLayer {
                 continue;
             }
             let spec = &self.catalog.specs[agent.spec_i];
-            let mob = combat.mob_sheet(spec.mob_id.as_str());
             let idx = combat.next_actor_runtime_index();
-            let mut actor = crate::combat::WorldHostile::from_sheet(
+            let mut actor = combat.canonical_hostile(
+                &spec.mob_id,
                 idx,
                 agent.pos.x,
                 agent.pos.z,
-                &mob,
-                spec.mob_id.as_str(),
                 agent.pos.x,
                 agent.pos.z,
             );
-            actor.entity = Some(agent.entity);
+            actor.bind_presentation(
+                crate::combat::HostilePresentationSource::Fauna,
+                agent.entity,
+            );
             let actor_id = combat.register_hostile(
                 actor,
                 agent.spawn_seed,
@@ -386,6 +387,53 @@ impl FaunaLayer {
             );
             agent.actor_id = Some(actor_id);
         }
+    }
+
+    pub fn present_combat_cues(
+        &mut self,
+        world: &mut World,
+        combat: &crate::combat::WorldCombat,
+        cues: Vec<(crate::combat::ActorId, AnimationAction)>,
+    ) -> Result<(), FaunaError> {
+        for (actor_id, action) in cues {
+            let hostile = combat
+                .hostiles()
+                .iter()
+                .find(|hostile| hostile.actor_id() == actor_id)
+                .ok_or_else(|| {
+                    FaunaError::Catalog(format!(
+                        "fauna presentation cue references missing actor {actor_id:?}"
+                    ))
+                })?;
+            if hostile.presentation_source() != crate::combat::HostilePresentationSource::Fauna {
+                return Err(FaunaError::Catalog(format!(
+                    "fauna presentation cue for {actor_id:?} has owner {:?}",
+                    hostile.presentation_source()
+                )));
+            }
+            let agent = self
+                .agents
+                .iter_mut()
+                .find(|agent| agent.actor_id == Some(actor_id))
+                .ok_or_else(|| {
+                    FaunaError::Catalog(format!(
+                        "fauna-owned actor {actor_id:?} has no live fauna agent"
+                    ))
+                })?;
+            if hostile.presentation_entity() != Some(agent.entity) {
+                return Err(FaunaError::Catalog(format!(
+                    "fauna-owned actor {actor_id:?} entity does not match its live agent"
+                )));
+            }
+            world
+                .play_animation_action(agent.entity, action)
+                .map_err(|err| {
+                    FaunaError::Catalog(format!(
+                        "fauna combat animation {action:?} failed for {actor_id:?}: {err}"
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     pub fn sync_canonical_actors(
@@ -654,7 +702,9 @@ impl FaunaLayer {
             )?;
             born += 1;
             self.last_born += 1;
-            *budget = budget.saturating_sub(1);
+            *budget = budget
+                .checked_sub(1)
+                .expect("fauna spawn exceeded its per-pass budget");
         }
         if born > 0 {
             self.occupied.insert(cell, born);
@@ -674,11 +724,20 @@ impl FaunaLayer {
         let model = self
             .ready_model(spec_i)
             .expect("spawn_agent requires a ready mesh");
-        let scale = self.catalog.specs[spec_i].scale;
-        let idle = self.catalog.specs[spec_i].anim_idle.clone();
+        let spec = &self.catalog.specs[spec_i];
+        let scale = spec.scale;
+        let idle = spec.anim_idle.clone();
+        let profile = AnimationProfile::new()
+            .idle(spec.anim_idle.clone())
+            .walk(spec.anim_walk.clone())
+            .run(spec.anim_run.clone())
+            .attack(spec.anim_attack.clone())
+            .cast(spec.anim_attack.clone())
+            .hit(spec.anim_attack.clone())
+            .death(spec.anim_death.clone());
         let place = place_of(world, pos, yaw, scale)?;
         let entity = world.spawn_animated_shared(model, place)?;
-        world.play_animation(entity, &idle)?;
+        world.configure_animation(entity, profile)?;
         world.set_animation_speed(entity, ANIM_IDLE)?;
         let id = self.next_id;
         self.next_id += 1;
@@ -710,11 +769,17 @@ impl FaunaLayer {
         let agent = self.agents.swap_remove(index);
         world.despawn(agent.entity);
         self.last_died += 1;
-        if let Some(count) = self.occupied.get_mut(&agent.cell) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.occupied.remove(&agent.cell);
-            }
+        let count = self.occupied.get_mut(&agent.cell).unwrap_or_else(|| {
+            panic!(
+                "despawned fauna agent {:?} has no occupied-cell accounting",
+                agent.cell
+            )
+        });
+        *count = count
+            .checked_sub(1)
+            .unwrap_or_else(|| panic!("fauna occupied-cell count underflow at {:?}", agent.cell));
+        if *count == 0 {
+            self.occupied.remove(&agent.cell);
         }
         agent.actor_id
     }
@@ -867,8 +932,13 @@ impl FaunaLayer {
 
         let speed = roam_speed;
         let heading = Heading::from_degrees(self.agents[i].yaw)
-            .map(|h| h.direction())
-            .unwrap_or(Vec2::Y);
+            .unwrap_or_else(|error| {
+                panic!(
+                    "fauna agent {} has invalid yaw {}: {error}",
+                    self.agents[i].entity, self.agents[i].yaw
+                )
+            })
+            .direction();
         let dx = f64::from(heading.x * speed * dt);
         let dz = f64::from(heading.y * speed * dt);
         let dest = collision.move_xz(
@@ -944,12 +1014,23 @@ impl FaunaLayer {
             }
             _ => (self.catalog.specs[spec_i].anim_idle.clone(), ANIM_IDLE),
         };
-        if self.agents[i].clip != clip {
-            if self.agents[i].state == State::Dead {
-                world.play_animation_once(self.agents[i].entity, &clip)?;
-            } else {
-                world.play_animation(self.agents[i].entity, &clip)?;
+        if self.agents[i].state == State::Dead {
+            if self.agents[i].clip != clip {
+                world.play_animation_action(self.agents[i].entity, AnimationAction::Death)?;
+                self.agents[i].clip = clip;
             }
+        } else if matches!(self.agents[i].state, State::Engaged | State::Attack) {
+            let locomotion = if self.agents[i].state == State::Engaged {
+                engine::anim::Locomotion::Moving {
+                    speed_mps: self.catalog.specs[spec_i].roam_speed,
+                }
+            } else {
+                engine::anim::Locomotion::Idle
+            };
+            world.set_locomotion(self.agents[i].entity, locomotion)?;
+            self.agents[i].clip = clip;
+        } else if self.agents[i].clip != clip {
+            world.play_animation(self.agents[i].entity, &clip)?;
             self.agents[i].clip = clip;
         }
         // Canonical endurance can change locomotion rate while the run clip remains selected.
@@ -1153,7 +1234,10 @@ fn fauna_dir() -> Result<PathBuf, FaunaError> {
         }
     }
     Err(FaunaError::NoAssets(
-        tried.into_iter().next().unwrap_or_default(),
+        tried
+            .into_iter()
+            .next()
+            .expect("fauna asset candidates are never empty"),
     ))
 }
 
@@ -1179,7 +1263,10 @@ fn catalog_path() -> Result<PathBuf, FaunaError> {
         }
     }
     Err(FaunaError::MissingCatalog(
-        tried.into_iter().next().unwrap_or_default(),
+        tried
+            .into_iter()
+            .next()
+            .expect("fauna asset candidates are never empty"),
     ))
 }
 
@@ -1361,6 +1448,255 @@ mod tests {
                 "{id} stayed clay-white; baseColorFactor was dropped"
             );
         }
+    }
+
+    fn spawned_species(id: &str) -> (FaunaLayer, World, EntityId) {
+        let catalog = catalog();
+        let spec_i = catalog
+            .specs()
+            .iter()
+            .position(|spec| spec.id == id)
+            .expect("test species");
+        let root = fauna_dir().expect("fauna dir");
+        let spec = &catalog.specs()[spec_i];
+        let path = root.join(spec.source.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let model = Arc::new(
+            AnimatedModel::load_with(&path, &root, &EngineLimits::default())
+                .unwrap_or_else(|err| panic!("load {id}: {err}")),
+        );
+        let mut models = (0..catalog.specs().len())
+            .map(|_| ModelSlot::Idle)
+            .collect::<Vec<_>>();
+        models[spec_i] = ModelSlot::Ready(model);
+        let mut layer = FaunaLayer {
+            catalog,
+            models,
+            agents: Vec::new(),
+            occupied: HashMap::new(),
+            seed: FAUNA_SALT,
+            next_id: 1,
+            refresh: 0.0,
+            spawn_backlog: false,
+            last_born: 0,
+            last_died: 0,
+        };
+        let mut world = World::new();
+        layer
+            .spawn_agent(
+                &mut world,
+                spec_i,
+                (0, 0),
+                GlobalPosition::at(1.0, FOOT_CLEARANCE_M as f64, 0.0),
+                0.0,
+                CellRng::new(FAUNA_SALT, 0, 0),
+            )
+            .expect("spawn fauna");
+        let entity = layer.agents[0].entity;
+        (layer, world, entity)
+    }
+
+    fn flat_ground() -> ContactSnapshot {
+        use engine::contact::ContactGrid;
+        use engine::space::{ChunkCoord, ChunkSpan};
+        let span = ChunkSpan::new(20.0).expect("span");
+        let grid = ContactGrid::new(GlobalXZ::ORIGIN, 20.0, 2, vec![0.0; 4]).expect("flat contact");
+        ContactSnapshot::new(
+            span,
+            HashMap::from([(ChunkCoord::new(0, 0), Arc::new(grid))]),
+        )
+    }
+
+    #[test]
+    fn spawned_deer_and_fox_accept_semantic_combat_actions() {
+        for species in ["deer", "fox"] {
+            let (_layer, mut world, entity) = spawned_species(species);
+            world
+                .play_animation_action(entity, engine::AnimationAction::Attack)
+                .unwrap_or_else(|err| panic!("{species} attack action: {err}"));
+            world
+                .play_animation_action(entity, engine::AnimationAction::Death)
+                .unwrap_or_else(|err| panic!("{species} death action: {err}"));
+        }
+    }
+
+    #[test]
+    fn fire_bolt_leaves_living_fox_spawned_after_canonical_sync() {
+        let (mut layer, mut world, entity) = spawned_species("fox");
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        let mut combat = crate::combat::WorldCombat::with_game_data(data);
+        layer.register_canonical_actors(&mut combat);
+        let fox = layer.agents[0].actor_id.expect("registered fox");
+        combat.set_lock(fox.runtime_index());
+        assert!(combat.press_action(&crate::gamedata::ActionId::new("arrow"), 0.0, 0.0, 1.0, 0.0));
+        for _ in 0..4 {
+            combat.step_fixed(0.0, 0.0, 1.0, 0.0);
+        }
+        layer.sync_canonical_actors(&combat, &flat_ground());
+        layer.sync_anim(&mut world, 0).expect("sync living fox");
+        let fox_actor = combat
+            .hostiles()
+            .iter()
+            .find(|actor| actor.actor_id() == fox)
+            .expect("fox remains canonical");
+        assert_eq!(fox_actor.hp(), 37.0);
+        assert!(fox_actor.is_alive());
+        assert_ne!(fox_actor.state, crate::combat::HostileState::Dead);
+        assert_eq!(layer.agent_count(), 1);
+        assert_ne!(layer.agents[0].state, State::Dead);
+        assert!(world.animated_entities().any(|(id, _)| *id == entity));
+    }
+
+    #[test]
+    fn fire_bolt_deer_approaches_attacks_and_remains_presented_by_fauna() {
+        let (mut layer, mut world, entity) = spawned_species("deer");
+        layer.agents[0].pos.x = 12.0;
+        layer.sync_place(&mut world, 0).expect("seat deer at range");
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        let mut combat = crate::combat::WorldCombat::with_game_data(data);
+        let mut presentation = crate::world::combat_layer::CombatLayer::install();
+        layer.register_canonical_actors(&mut combat);
+        let deer = layer.agents[0].actor_id.expect("registered deer");
+        combat.set_lock(deer.runtime_index());
+        assert!(combat.press_action(&crate::gamedata::ActionId::new("arrow"), 0.0, 0.0, 1.0, 0.0,));
+
+        let ground = flat_ground();
+        let mut saw_attack_cue = false;
+        let mut closest = f64::MAX;
+        for _ in 0..100 {
+            presentation.tick(&mut combat, 0.0, 0.0, 1.0, 0.0, 0.1);
+            layer.sync_canonical_actors(&combat, &ground);
+            let cues = presentation.take_fauna_animation_cues();
+            saw_attack_cue |= cues
+                .iter()
+                .any(|(actor, action)| *actor == deer && *action == AnimationAction::Attack);
+            layer
+                .present_combat_cues(&mut world, &combat, cues)
+                .expect("dispatch fauna cues");
+            layer.sync_anim(&mut world, 0).expect("sync deer animation");
+            layer.sync_place(&mut world, 0).expect("sync deer place");
+            world.tick_animations(0.1);
+            let hostile = combat
+                .hostiles()
+                .iter()
+                .find(|hostile| hostile.actor_id() == deer)
+                .expect("deer remains canonical");
+            closest = closest.min(hostile.x.hypot(hostile.z));
+            let animated = world
+                .animated_entities()
+                .find(|(id, _)| **id == entity)
+                .map(|(_, animated)| animated)
+                .expect("deer entity remains visible");
+            let (scale, _, _) = animated.transform().to_scale_rotation_translation();
+            assert!(
+                scale.min_element() > 0.0,
+                "deer scale became zero: {scale:?}"
+            );
+        }
+
+        let hostile = combat
+            .hostiles()
+            .iter()
+            .find(|hostile| hostile.actor_id() == deer)
+            .expect("deer remains canonical after attack");
+        assert_eq!(
+            hostile.hp(),
+            47.0,
+            "Fire Bolt must hit without killing deer"
+        );
+        assert!(hostile.is_alive());
+        assert!(closest <= 2.0, "deer never reached melee range: {closest}");
+        assert!(saw_attack_cue, "deer never emitted a typed attack cue");
+        assert_eq!(layer.agent_count(), 1);
+        world.tick_animations(10.0);
+        layer
+            .sync_anim(&mut world, 0)
+            .expect("resume deer locomotion");
+        let animated = world
+            .animated_entities()
+            .find(|(id, _)| **id == entity)
+            .map(|(_, animated)| animated)
+            .expect("deer remains visible after action completion");
+        assert!(
+            animated.animator().is_looping(),
+            "attack action did not complete"
+        );
+        assert_eq!(
+            animated.animator().clip_name(),
+            layer.catalog.spec("deer").anim_idle,
+            "completed attack must resume the current idle locomotion"
+        );
+    }
+
+    #[test]
+    fn stale_fauna_owned_animation_cue_is_loud() {
+        let (mut layer, mut world, _) = spawned_species("deer");
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        let combat = crate::combat::WorldCombat::with_game_data(data);
+        let err = layer
+            .present_combat_cues(
+                &mut world,
+                &combat,
+                vec![(
+                    crate::combat::ActorId::from_runtime_index(99),
+                    AnimationAction::Attack,
+                )],
+            )
+            .expect_err("stale fauna cue must fail");
+        assert!(err.to_string().contains("missing actor"), "{err}");
+    }
+
+    #[test]
+    fn missing_fauna_owned_entity_is_loud() {
+        let (mut layer, mut world, entity) = spawned_species("deer");
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        let mut combat = crate::combat::WorldCombat::with_game_data(data);
+        layer.register_canonical_actors(&mut combat);
+        let deer = layer.agents[0].actor_id.expect("registered deer");
+        world.despawn(entity);
+        let err = layer
+            .present_combat_cues(&mut world, &combat, vec![(deer, AnimationAction::Attack)])
+            .expect_err("missing fauna entity must fail");
+        assert!(err.to_string().contains("failed"), "{err}");
+    }
+
+    #[test]
+    fn dead_fauna_is_retained_in_its_death_pose() {
+        let (mut layer, mut world, entity) = spawned_species("fox");
+        let data = Arc::new(
+            crate::gamedata::GameData::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+            )
+            .expect("canonical GameData"),
+        );
+        let mut combat = crate::combat::WorldCombat::with_game_data(data);
+        layer.register_canonical_actors(&mut combat);
+        let fox = layer.agents[0].actor_id.expect("registered fox");
+        combat.defeat_hostile(fox.runtime_index().expect("runtime index"));
+        layer.sync_canonical_actors(&combat, &flat_ground());
+        layer.sync_anim(&mut world, 0).expect("death pose");
+        assert_eq!(layer.agent_count(), 1);
+        assert_eq!(layer.agents[0].state, State::Dead);
+        assert!(world.animated_entities().any(|(id, _)| *id == entity));
     }
 
     #[test]

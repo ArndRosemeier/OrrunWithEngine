@@ -6,20 +6,14 @@ use engine::Frame;
 use glam::{Vec3, Vec4};
 
 use crate::combat::WorldCombat;
-use crate::controls::{Action, KeyBinds};
-use crate::gamedata::ActionId;
-
-const MIGRATED_HOTBAR: [(Action, &str); 3] = [
-    (Action::Strike, "strike"),
-    (Action::Ember, "fire_bolt"),
-    (Action::Mend, "mend"),
-];
+use crate::controls::KeyBinds;
 
 pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
     let screen = ctx.screen_rect();
     let slot = 64.0;
     let gap = 6.0;
-    let n = MIGRATED_HOTBAR.len() as f32;
+    let roster = combat.player_action_roster();
+    let n = roster.len() as f32;
     let bar_w = n * slot + (n - 1.0) * gap;
     let bar_x = ((screen.width() - bar_w) * 0.5).max(12.0);
     let bar_y = screen.height() - slot - 18.0;
@@ -31,16 +25,13 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                let data = combat
-                    .game_data()
-                    .expect("live migrated hotbar requires GameData");
-                for (binding, id) in MIGRATED_HOTBAR {
-                    let action_id = ActionId::new(id);
+                let data = combat.game_data();
+                for action_id in roster {
                     let action = data
-                        .action(&action_id)
+                        .action(action_id)
                         .unwrap_or_else(|| panic!("hotbar references unknown action {action_id}"));
-                    let gated = binds.get(binding).is_none();
-                    let cd = combat.action_cd_frac(&action_id);
+                    let gated = binds.get(action_id).is_none();
+                    let cd = combat.action_cd_frac(action_id);
                     let fill = if gated {
                         Color32::from_rgb(48, 48, 48)
                     } else {
@@ -87,7 +78,7 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
                     ui.painter().text(
                         rect.center() + egui::vec2(0.0, -8.0),
                         egui::Align2::CENTER_CENTER,
-                        binds.display(binding),
+                        binds.display(action_id),
                         egui::FontId::proportional(18.0),
                         key_col,
                     );
@@ -261,10 +252,10 @@ pub fn draw_nameplates(
 }
 
 pub fn draw_cast_bar(ctx: &egui::Context, combat: &WorldCombat) {
-    let Some(frac) = combat.cast_frac() else {
+    let Some(frac) = combat.action_cast_frac() else {
         return;
     };
-    let Some(label) = combat.cast_label() else {
+    let Some(label) = combat.action_cast_label() else {
         return;
     };
     let screen = ctx.screen_rect();
@@ -326,9 +317,8 @@ pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &Ke
     draw_fail_toast(ctx, combat);
 }
 
-use crate::inventory::{assets_dir, load_icon, EquipSlot, Family, Item};
+use crate::inventory::{load_icon, EquipSlot, Family, IconAsset, Item};
 use crate::world::WorldSession;
-use engine::load_rgba8_png;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -340,59 +330,41 @@ thread_local! {
     static ICON_TEX: RefCell<HashMap<&'static str, egui::TextureHandle>> = RefCell::new(HashMap::new());
 }
 
-fn shaken_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+fn icon_texture(ctx: &egui::Context, asset: IconAsset) -> egui::TextureHandle {
+    let key = match asset {
+        IconAsset::Item(family) => family.icon_file(),
+        IconAsset::Shaken => "shaken.png",
+    };
     ICON_TEX.with(|cell| {
         let mut map = cell.borrow_mut();
-        if let Some(tex) = map.get("shaken.png") {
-            return Some(tex.clone());
+        if let Some(texture) = map.get(key) {
+            return texture.clone();
         }
-        let path = assets_dir()?
-            .join("icons")
-            .join("status")
-            .join("shaken.png");
-        let (width, height, rgba) = load_rgba8_png(&path).ok()?;
-        let tex = ctx.load_texture(
-            "icon-shaken.png",
-            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba),
+        let pixels = load_icon(asset)
+            .unwrap_or_else(|error| panic!("required HUD icon {asset:?} failed to load: {error}"));
+        let texture = ctx.load_texture(
+            format!("icon-{key}"),
+            egui::ColorImage::from_rgba_unmultiplied(
+                [pixels.width as usize, pixels.height as usize],
+                &pixels.rgba,
+            ),
             egui::TextureOptions::NEAREST,
         );
-        map.insert("shaken.png", tex.clone());
-        Some(tex)
+        map.insert(key, texture.clone());
+        texture
     })
 }
 
 /// 48x48 cracked-shield next to the HP bar when Shaken.
 pub fn paint_shaken_icon(ui: &mut egui::Ui) {
-    if let Some(tex) = shaken_texture(ui.ctx()) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
-        ui.painter().image(
-            tex.id(),
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-    }
-}
-
-fn icon_texture(ctx: &egui::Context, family: Family) -> Option<egui::TextureHandle> {
-    let pix = load_icon(family)?;
-    let key = family.icon_file();
-    ICON_TEX.with(|cell| {
-        let mut map = cell.borrow_mut();
-        if let Some(tex) = map.get(key) {
-            return Some(tex.clone());
-        }
-        let tex = ctx.load_texture(
-            format!("icon-{key}"),
-            egui::ColorImage::from_rgba_unmultiplied(
-                [pix.width as usize, pix.height as usize],
-                &pix.rgba,
-            ),
-            egui::TextureOptions::NEAREST,
-        );
-        map.insert(key, tex.clone());
-        Some(tex)
-    })
+    let texture = icon_texture(ui.ctx(), IconAsset::Shaken);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::hover());
+    ui.painter().image(
+        texture.id(),
+        rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn paint_item_slot(ui: &mut egui::Ui, item: Option<Item>, label: &str) -> egui::Response {
@@ -406,7 +378,8 @@ fn paint_item_slot(ui: &mut egui::Ui, item: Option<Item>, label: &str) -> egui::
         StrokeKind::Inside,
     );
     if let Some(item) = item {
-        if let Some(tex) = icon_texture(ui.ctx(), item.family()) {
+        let tex = icon_texture(ui.ctx(), IconAsset::Item(item.family()));
+        {
             let inner = rect.shrink(6.0);
             ui.painter().image(
                 tex.id(),
@@ -438,9 +411,8 @@ fn paint_item_slot(ui: &mut egui::Ui, item: Option<Item>, label: &str) -> egui::
 
 fn paint_coin_row(ui: &mut egui::Ui, coin: i32) {
     ui.horizontal(|ui| {
-        if let Some(tex) = icon_texture(ui.ctx(), Family::Coin) {
-            ui.add(egui::Image::new((tex.id(), egui::vec2(22.0, 22.0))));
-        }
+        let tex = icon_texture(ui.ctx(), IconAsset::Item(Family::Coin));
+        ui.add(egui::Image::new((tex.id(), egui::vec2(22.0, 22.0))));
         ui.label(
             egui::RichText::new(format!("Coin: {coin}"))
                 .size(16.0)

@@ -29,11 +29,11 @@ The current app supports this loop:
 8. Die, receive Shaken, and return to the last dungeon hatch-mouth shrine.
 9. Save and restore player position, combat state, shrine, inventory, and coin.
 
-This is a combat-and-loot vertical slice. Strike, Fire Bolt, Mend, and the wolf basic attack now use the canonical GameData action path; legacy combat paths and abilities still coexist as POC code pending later migration.
+This is a combat-and-loot vertical slice. Every live player and mob combat action is selected from GameData and executes through the canonical resolver. Root, hold, snare, and charm use distinct typed runtime status semantics.
 
 ## Skill progression runtime
 
-**The legacy player-level/XP system is abolished.** Everything level/XP-shaped that still exists in code (`player.xp`, `xp_to_next`, `award_hostile_xp`, the L1-L20 curve, mob XP values, dungeon XP, per-level HP/mana/attribute/discipline-rank gains, disciplines themselves) is dead code walking: POC-era material that no future system builds on and that will be removed, not extended.
+**The legacy player-level/XP system is abolished and removed from live combat.** Skills plus HP and mana proficiencies are the only progression axes.
 
 ### The replacement design (decided)
 
@@ -100,7 +100,7 @@ Combat SFX wired through `orrun/src/world/combat_layer.rs` and `orrun/src/world/
 `orrun/src/resolution.rs`, `orrun/src/combat/verbs.rs`, `orrun/src/world/session.rs`, and `orrun/src/world/combat_layer.rs` execute the first live GameData-backed slice.
 
 - Stable action IDs resolve authored assignments and damage/heal effects through one typed player/mob path; target geometry, mitigation, resource mutation, aggression, death, and progression events are centralized.
-- The live player path includes Strike, Fire Bolt, and Mend; a wolf's Strike uses the same resolver. Cooldown/cast state and HUD labels consume action data without action-specific magnitude branches.
+- The live player and complete authored mob roster use the same resolver. Cooldown/cast state, targeting, range, and HUD labels consume action data without action-specific behavior branches.
 - Combined release verification passed `m3_wolf` with no failure or skip: incoming damage 8, Mend healing 8, Strike damage 8, Fire Bolt damage 14, skill/HP/mana training, death presentation, and one-time corpse transfer containing coin and an item.
 - Full deterministic headless resolver coverage and canonical GameData Python/Rust A/B coverage pass.
 
@@ -127,13 +127,13 @@ Why it is POC: non-migrated ability definitions, rank gates, formulas, and paths
 
 ### Hostile roster and encounters
 
-`orrun/src/combat/catalog.rs`, `orrun/src/combat/sheets.rs`, `orrun/src/world/sites.rs`, `orrun/src/world/dungeon.rs`, plus the `<mobs>` section of `data/OrrunGameData.xml`.
+`orrun/src/combat/catalog.rs`, `orrun/src/world/sites.rs`, `orrun/src/world/dungeon.rs`, plus the `<mobs>` section of `data/OrrunGameData.xml`.
 
-Wolf packs, dungeon skeleton packs, Taken Cairn and Woods Hut bandit sites, and the higher-tier roster (yeti, demon, blue demon, tribal veteran, orc skull) are placed and fightable. Mob stat authoring is migrating to GameData (`WorldCombat` already requires GameData for mob lookup); the legacy sheet values and their XP fields are POC. Canonical animal actors now bridge fauna presentation into the same combat arena, where faction/mode policy, perception, movement, retaliation, death, and loot are authoritative. Non-animal encounter sheets and their legacy XP-era fields remain POC.
+Wolf packs, dungeon skeleton packs, Taken Cairn and Woods Hut bandit sites, and the authored higher-tier roster are placed through canonical GameData mob definitions. Faction/mode policy, perception, movement, retaliation, action selection, death, and loot are authoritative in the shared combat arena.
 
-### Balance simulator
+### Headless combat harness
 
-`orrun/src/combat/sim.rs`, `orrun/src/combat/combat_sim.py`. Built entirely around the abolished level/XP model. Unusable for the skill-based design without a rewrite.
+`orrun/src/bin/playtester.rs` executes the production `WorldCombat` runtime from GameData. The `m5_actions` hook verifies canonical action/status semantics, cooldowns, and full authored mob-roster selection and writes a JSON report.
 
 ## Absent game systems
 
@@ -153,7 +153,7 @@ No implementation exists for:
 - Canonical action resolution: `orrun/src/resolution.rs`, `orrun/src/combat/verbs.rs`
 - Canonical animal ownership/presentation: `orrun/src/combat/types.rs`, `orrun/src/world/fauna.rs`
 - Plan: `MILESTONES.md` (migration boundaries: `TRANSITION.md`)
-- Combat (POC): `orrun/src/combat/types.rs`, `verbs.rs`, `math.rs`, `sheets.rs`, `sim.rs`
+- Combat runtime: `orrun/src/combat/types.rs`, `orrun/src/combat/actions.rs`, `orrun/src/resolution.rs`
 - Hostile presentation/session: `orrun/src/world/combat_layer.rs`, `orrun/src/world/session.rs`
 - Loot: `orrun/src/loot.rs`
 - Inventory: `orrun/src/inventory.rs`

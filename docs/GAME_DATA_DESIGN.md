@@ -40,7 +40,7 @@ IDs are stable keys, not ordinary display text. They are used by runtime lookups
 
 New records receive a generated unique ID. The editor may allow that provisional ID to be chosen during creation, but once the record exists it is treated as stable. Renaming a referenced record is therefore an explicit migration operation, not normal field editing.
 
-Finite domain values are selected from dropdowns rather than typed: faction neutrality, effect kind, effect progression, action target, mob mode, hamlet enabled state, and effect application mode. Numeric values and genuinely authored text remain editable, then strict validation checks them before saving. Required fields cannot be saved empty, and invalid existing values remain visible instead of being silently repaired.
+Finite domain values are selected from dropdowns rather than typed: faction neutrality, effect operation, effect progression, action target, mob mode, hamlet enabled state, and effect application mode. Numeric values and genuinely authored text remain editable, then strict validation checks them before saving. Required fields cannot be saved empty, and invalid existing values remain visible instead of being silently repaired.
 
 Deleting a referenced record is allowed as an editing operation only if the resulting data is repaired before saving. Validation must reject dangling references.
 
@@ -59,38 +59,23 @@ An actor may have different levels in each skill. A player can therefore have fi
 
 A skill definition owns the level-modifier behavior. An actor owns its current skill levels. The modifier calculation is centralized in Rust; XML supplies the skill definition and authored parameters.
 
-## Actions, effect catalog, and assignments
+## Schema 3: actions and executable operations
 
-There is one action model. Attacks, spells, abilities, mob attacks, and utility abilities are all `Action`s. A classification may be retained for editor or presentation purposes, but it must not create separate execution systems.
+Schema version 3 is a clean-slate contract. Each effect definition selects exactly one finite, typed executable `operation`: `direct_damage`, `heal`, `root`, `hold`, `snare`, or `charm`. Runtime execution matches this enum; action and effect IDs never select behavior.
 
-The top-level effect catalog defines what an effect is. Each catalog effect has a stable `id`, display `name`, `kind`, exactly one `skill_id`, and a `progression` rule. The catalog effect is authored once and reused.
+Every action explicitly authors non-negative finite `mana_cost`, `cast_s`, and `cooldown_s`, plus required booleans `interruptible` and `reveals`. Every assignment explicitly authors `magnitude`, application geometry, `duration_s`, and `movement_multiplier`; all numeric values must be finite.
 
-An action contains effect assignments. An assignment references an authored effect with `effect_id` and defines how that effect behaves for this action, including `magnitude` and application geometry. The assignment does not redefine the effect’s kind, skill, or progression.
+Operation-specific rules are strict:
 
-Every authored effect references exactly one skill, and the level of that skill modifies the assignment’s effect. Levels are never stored on effects or action assignments.
+- `direct_damage` and `heal`: positive magnitude, zero duration, movement multiplier exactly 1.
+- `root`, `hold`, and `charm`: magnitude exactly 1, positive duration, movement multiplier exactly 1.
+- `snare`: magnitude exactly 1, positive duration, and movement multiplier strictly between 0 and 1.
 
-Conceptually:
+`root` prevents movement; `hold` prevents movement and actions; `snare` multiplies movement speed; `charm` temporarily uses the caster faction. Assignment geometry remains `single_target`, `cone`, `aoe`, or `pbaoe`, with the existing positive range/radius and cone angle invariants.
 
-```text
-Action
-  -> ActionEffect assignment -> Effect definition -> exactly one Skill
-  -> ActionEffect assignment -> Effect definition -> exactly one Skill
-```
+Player profiles and mobs both contain validated skill-level and action rosters. Rosters are non-empty, contain no duplicates, reference existing records, and assign every skill required by every assigned action. Mob progression starts at its authored skill levels, not inferred level 1.
 
-This permits one action to combine, for example, slashing damage and fire damage. Effect execution, validation, progression, and application are centralized in Rust.
-
-The starter catalog includes several damage types (`slashing_damage`, `fire_damage`, `frost_damage`, `piercing_damage`, `bludgeoning_damage`, `poison_damage`, and `lightning_damage`) plus control effects (`root`, `hold`, `snare`, and `charm`). These are authored effect identities, not arbitrary editor-created kinds. `root` prevents movement, `hold` prevents movement and actions, and `snare` reduces movement according to the eventual centralized control implementation. `charm` temporarily changes the affected actor's effective faction to the initiator's faction; it does not change the actor's permanent base faction and expires through runtime effect state.
-
-### Application geometry
-
-An action-effect assignment has one of these application modes:
-
-- `single_target`: applies to the selected tab target; requires positive `range_m`.
-- `cone`: originates from the caster, uses the selected target for direction, and requires positive `range_m` and an `angle_deg` between 0 and 360.
-- `aoe`: is centered on the selected tab target; requires positive `range_m` and `radius_m`.
-- `pbaoe`: is centered on the caster and requires no target; requires positive `radius_m` and `range_m="0"`.
-
-Tab targeting remains the only targeting mechanism. A target-centered AOE does not introduce free-area targeting. `range_m` is the targeting or reach distance, `radius_m` is required for area modes, and `angle_deg` is required for cones. Melee actions use a small positive range.
+Rust and `tools/gamedata.py` reject unknown XML attributes/elements, missing required contract fields, non-finite numbers, invalid domains, dangling references, and incoherent rosters. They do not default or repair schema-3 combat data.
 
 ## Actors and movement
 
@@ -189,36 +174,4 @@ The hamlet lab may be started on demand, but it must load the same `GameData` as
 
 ## XML shape
 
-The following is representative of the current schema. It shows the distinction between the effect catalog and action assignments; it is not a replacement for typed validation.
-
-```xml
-<OrrunGameData schema_version="1">
-  <skills>
-    <skill id="fire_damage" name="Fire Damage" level_scale="1" />
-  </skills>
-  <factions>
-    <faction id="neutral" name="Neutral" neutral="true" />
-    <faction id="citizen" name="Citizen" neutral="false" />
-  </factions>
-  <effects>
-    <effect id="fire_bolt_damage" name="Fire Bolt Damage" kind="damage"
-            skill_id="fire_damage" progression="skill_level" />
-  </effects>
-  <actions>
-    <action id="firebolt" name="Fire Bolt" target="hostile">
-      <effects>
-        <effect effect_id="fire_bolt_damage" magnitude="1"
-                application="single_target" range_m="18" />
-      </effects>
-    </action>
-  </actions>
-  <players />
-  <mobs />
-  <movement />
-  <hamlet enabled="true" width="32" depth="32"
-           kit_catalog="catalogs/medieval.json" />
-  <defaults />
-</OrrunGameData>
-```
-
-The typed Python authoring model, the typed Rust runtime model, and their strict validation rules are authoritative for implementation details.
+The canonical `data/OrrunGameData.xml` is the schema-3 example. Its minimal player roster covers melee, ranged, healing, root, hold, snare, and charm; mobs author coherent subsets and explicit levels. The typed Python authoring model and typed Rust runtime loader enforce the same contract.

@@ -62,6 +62,13 @@ pub enum SettlementError {
 
     #[error(transparent)]
     Hamlet(#[from] HamletError),
+
+    #[error("settlement layout failed for node {node_id}: {source}")]
+    Layout {
+        node_id: i32,
+        #[source]
+        source: HamletError,
+    },
 }
 
 struct PieceProto {
@@ -274,12 +281,10 @@ struct Packing {
 struct PackResult {
     plans: HashMap<i32, (Plan2D, Vec<Vec2>)>,
     cities: Vec<(i32, SeatedCity)>,
-    /// Pins that could not be laid out this pass; do not respawn every frame.
-    failed: Vec<i32>,
 }
 
 struct Pending {
-    job: JoinHandle<PackResult>,
+    job: JoinHandle<Result<PackResult, SettlementError>>,
 }
 
 /// Live hamlets around the player.
@@ -299,8 +304,6 @@ pub struct SettlementLayer {
     tile_queue: VecDeque<TileKey>,
     queued: HashSet<TileKey>,
     pending: Option<Pending>,
-    /// Layout failed for these pins while they were in reach; cleared when they leave.
-    unseatable: HashSet<i32>,
     doors: Vec<HouseDoor>,
     hidden_door: Option<u64>,
     camps: HashMap<i32, CampLive>,
@@ -334,7 +337,6 @@ impl SettlementLayer {
             tile_queue: VecDeque::new(),
             queued: HashSet::new(),
             pending: None,
-            unseatable: HashSet::new(),
             doors: Vec::new(),
             hidden_door: None,
             camps: HashMap::new(),
@@ -422,7 +424,6 @@ impl SettlementLayer {
         self.standing.clear();
         self.seated.clear();
         self.plans.clear();
-        self.unseatable.clear();
         self.hamlets.clear();
         self.doors.clear();
         self.hidden_door = None;
@@ -441,14 +442,14 @@ impl SettlementLayer {
         ponds: &Arc<PondField>,
         focus: GlobalXZ,
         rebased: bool,
-    ) -> EngineResult<bool> {
+    ) -> Result<bool, SettlementError> {
         let nearby = nearby_pins(surface, focus);
         let nearby_ids: HashSet<i32> = nearby.iter().map(|pin| pin.id).collect();
         let mut plots_changed = false;
 
         if let Some(pending) = self.pending.take() {
             if pending.job.is_finished() {
-                let bake = pending.job.join().expect("settlement thread");
+                let bake = crate::worker::join_worker("settlement", pending.job)??;
                 if self.install_cities(bake, &nearby_ids) {
                     plots_changed = true;
                 }
@@ -471,9 +472,7 @@ impl SettlementLayer {
         if self.pending.is_none() {
             let new_pins: Vec<SettlementPin> = nearby
                 .into_iter()
-                .filter(|pin| {
-                    !self.seated.contains_key(&pin.id) && !self.unseatable.contains(&pin.id)
-                })
+                .filter(|pin| !self.seated.contains_key(&pin.id))
                 .collect();
             if !new_pins.is_empty() {
                 let mut plans = HashMap::new();
@@ -627,16 +626,10 @@ impl SettlementLayer {
 
     fn install_cities(&mut self, bake: PackResult, nearby_ids: &HashSet<i32>) -> bool {
         self.plans.extend(bake.plans);
-        for id in bake.failed {
-            if nearby_ids.contains(&id) {
-                self.unseatable.insert(id);
-            }
-        }
         let mut changed = false;
         for (id, city) in bake.cities {
             if nearby_ids.contains(&id) {
                 self.seated.insert(id, city);
-                self.unseatable.remove(&id);
                 changed = true;
             }
         }
@@ -644,7 +637,6 @@ impl SettlementLayer {
     }
 
     fn drop_far_pins(&mut self, nearby_ids: &HashSet<i32>) -> bool {
-        self.unseatable.retain(|id| nearby_ids.contains(id));
         let before = self.seated.len();
         self.seated.retain(|id, _| nearby_ids.contains(id));
         before != self.seated.len()
@@ -798,22 +790,19 @@ impl SettlementLayer {
 }
 
 impl Packing {
-    fn pack(self) -> PackResult {
+    fn pack(self) -> Result<PackResult, SettlementError> {
         let mut plans = self.plans;
         let mut cities = Vec::new();
-        let mut failed = Vec::new();
         for pin in self.pins {
             if let std::collections::hash_map::Entry::Vacant(entry) = plans.entry(pin.id) {
-                match layout_for(self.seed, pin, &self.surface, &self.ponds) {
-                    Ok(layout) => {
-                        entry.insert(layout);
-                    }
-                    Err(err) => {
-                        eprintln!("hamlet at node {} failed: {err}", pin.id);
-                        failed.push(pin.id);
-                        continue;
-                    }
-                }
+                let layout =
+                    layout_for(self.seed, pin, &self.surface, &self.ponds).map_err(|source| {
+                        SettlementError::Layout {
+                            node_id: pin.id,
+                            source,
+                        }
+                    })?;
+                entry.insert(layout);
             }
             let (plan, cut) = &plans[&pin.id];
             let mut standing = Vec::new();
@@ -851,11 +840,7 @@ impl Packing {
                 },
             ));
         }
-        PackResult {
-            plans,
-            cities,
-            failed,
-        }
+        Ok(PackResult { plans, cities })
     }
 }
 

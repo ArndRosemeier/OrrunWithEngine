@@ -340,16 +340,15 @@ pub fn is_bandit_id(mob_id: &str) -> bool {
     matches!(mob_id, "bandit" | "male_bandit")
 }
 
-fn hostile_from_sheet(combat: &WorldCombat, idx: i32, x: f64, z: f64) -> WorldHostile {
-    let sheet = combat.mob_sheet("bandit");
-    WorldHostile::from_sheet(idx, x, z, &sheet, sheet.id.clone(), x, z)
+fn bandit_hostile(combat: &WorldCombat, idx: i32, x: f64, z: f64) -> WorldHostile {
+    combat.canonical_hostile(&crate::gamedata::MobId::new("bandit"), idx, x, z, x, z)
 }
 
 pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {
     let mut idx = combat.hostiles().iter().map(|h| h.idx).max().unwrap_or(-1) + 1;
     for site in sites {
         for (x, z) in site.bandit_xz() {
-            let hostile = hostile_from_sheet(combat, idx, x, z);
+            let hostile = bandit_hostile(combat, idx, x, z);
             combat.add_hostile(hostile);
             idx += 1;
         }
@@ -381,13 +380,14 @@ fn assets_dir() -> EngineResult<PathBuf> {
             return Ok(root.clone());
         }
     }
-    Err(EngineError::Model(format!(
-        "no assets under {}",
+    Err(EngineError::Model(format!("no assets under {}", {
+        assert!(!tried.is_empty(), "asset candidate invariant");
         tried
-            .first()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
-    )))
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    })))
 }
 
 fn load_static(rel: &str) -> EngineResult<Mesh> {
@@ -479,6 +479,22 @@ fn local_xz(dx: f32, dz: f32, yaw_deg: f32) -> (f64, f64) {
     (f64::from(x), f64::from(z))
 }
 
+fn site_spawn_error(
+    site: &OverlandSite,
+    spawned_before_site: usize,
+    source: EngineError,
+) -> EngineError {
+    EngineError::Model(format!(
+        "failed to spawn {} site for settlement pin {} at ({:.1}, {:.1}) after {} prior props: {}",
+        site.kind.as_str(),
+        site.pin_id,
+        site.at.x,
+        site.at.z,
+        spawned_before_site,
+        source
+    ))
+}
+
 pub fn spawn_site_props(
     world: &mut World,
     surface: &ContinentalSurface,
@@ -555,11 +571,11 @@ pub fn spawn_site_props(
             }
             Ok(())
         })();
-        match one {
-            Ok(()) => {}
-            Err(_) => {
-                ids.truncate(before);
+        if let Err(source) = one {
+            for id in ids.drain(..) {
+                world.despawn(id);
             }
+            return Err(site_spawn_error(site, before, source));
         }
     }
     Ok(ids)
@@ -666,6 +682,22 @@ mod tests {
     }
 
     #[test]
+    fn site_spawn_error_preserves_site_context_and_source() {
+        let site = OverlandSite {
+            kind: SiteKind::WoodsHut,
+            pin_id: 17,
+            at: GlobalXZ::at(12.5, -8.0),
+            yaw_deg: 0.0,
+        };
+        let error = site_spawn_error(&site, 6, EngineError::Model("missing roof mesh".to_owned()));
+        let message = error.to_string();
+        assert!(message.contains("hut site for settlement pin 17"));
+        assert!(message.contains("(12.5, -8.0)"));
+        assert!(message.contains("after 6 prior props"));
+        assert!(message.contains("missing roof mesh"));
+    }
+
+    #[test]
     fn cairn_menhir_reads_tall_enough() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/props/rocks/cairn_menhir_lean.glb");
@@ -699,8 +731,7 @@ mod tests {
             .filter(|p| p.tier <= 1)
             .min_by(|a, b| {
                 a.at.distance(GlobalXZ::at(0.0, 0.0))
-                    .partial_cmp(&b.at.distance(GlobalXZ::at(0.0, 0.0)))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&b.at.distance(GlobalXZ::at(0.0, 0.0)))
             })
             .expect("seed 1 size 64 must have a tier-0/1 pin for hamlet yard travel");
         WorldEntryRequest::at_global(bounds, yard.at).expect("hamlet yard travel entry");

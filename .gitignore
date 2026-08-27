@@ -1,4 +1,4 @@
-/target/
+/target*/
 **/target/
 Cargo.lock
 # ENGINE_SCREENSHOT captures

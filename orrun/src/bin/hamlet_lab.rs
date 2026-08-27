@@ -274,7 +274,7 @@ fn obb_corners(center: glam::Vec2, half_x: f32, half_z: f32, yaw: f32) -> [glam:
     ]
 }
 
-fn main() {
+fn main() -> EngineResult<()> {
     let _game_data = GameData::load("data/OrrunGameData.xml").expect("canonical GameData");
     let mut lab = HamletLab::new();
 
@@ -470,5 +470,6 @@ fn main() {
             });
 
         let _ = world;
-    });
+        Ok(())
+    })
 }

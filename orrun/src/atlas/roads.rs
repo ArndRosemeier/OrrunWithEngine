@@ -138,7 +138,7 @@ pub fn build_roads(
                 }
                 best.push((road_pair_weight(ni, nj, cells), j));
             }
-            best.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+            best.sort_by(|a, b| a.0.total_cmp(&b.0));
             let spur_budget = if ni.kind == NodeKind::Settlement {
                 0
             } else {
@@ -298,8 +298,7 @@ impl Ord for OpenNode {
     fn cmp(&self, other: &Self) -> Ordering {
         other
             .f
-            .partial_cmp(&self.f)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&self.f)
             .then_with(|| self.cell.cmp(&other.cell))
     }
 }

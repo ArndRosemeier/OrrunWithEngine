@@ -128,7 +128,7 @@ impl VillagerLayer {
                     None
                 }
             })
-            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, pos)| pos)
     }
 
@@ -150,7 +150,7 @@ impl VillagerLayer {
         plots: &[BuildingPlot],
         dt: f32,
     ) -> EngineResult<()> {
-        self.ensure_models();
+        self.ensure_models()?;
         self.drop_gone(world, hamlets);
         let models_ready = self.worksuit.is_some() && self.casual.is_some();
         for hamlet in hamlets {
@@ -183,22 +183,25 @@ impl VillagerLayer {
         Ok(())
     }
 
-    fn ensure_models(&mut self) {
+    fn ensure_models(&mut self) -> EngineResult<()> {
         // One GLB per follow: full UAL bakes are ~20 MB and a double load on the
         // first village visit was a multi-second hitch (looked like floating seats).
         if self.worksuit.is_none() {
-            match load_human(WORKSUIT_GLB) {
-                Ok(model) => self.worksuit = Some(model),
-                Err(err) => eprintln!("villagers: worksuit skipped: {err}"),
-            }
-            return;
+            self.worksuit = Some(load_human(WORKSUIT_GLB).map_err(|error| {
+                EngineError::Model(format!(
+                    "required villager worksuit failed to load: {error}"
+                ))
+            })?);
+            return Ok(());
         }
         if self.casual.is_none() {
-            match load_human(CASUAL_GLB) {
-                Ok(model) => self.casual = Some(model),
-                Err(err) => eprintln!("villagers: casual skipped: {err}"),
-            }
+            self.casual = Some(load_human(CASUAL_GLB).map_err(|error| {
+                EngineError::Model(format!(
+                    "required villager casual outfit failed to load: {error}"
+                ))
+            })?);
         }
+        Ok(())
     }
 
     fn drop_gone(&mut self, world: &mut World, hamlets: &[HamletStand]) {
@@ -617,13 +620,14 @@ fn assets_dir() -> EngineResult<PathBuf> {
             return Ok(root.clone());
         }
     }
-    Err(EngineError::Model(format!(
-        "no assets under {}",
+    Err(EngineError::Model(format!("no assets under {}", {
+        assert!(!tried.is_empty(), "asset candidate invariant");
         tried
-            .first()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default()
-    )))
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    })))
 }
 
 fn first_clip(model: &AnimatedModel, names: &[&str]) -> Option<String> {

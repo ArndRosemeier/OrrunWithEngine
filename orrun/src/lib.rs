@@ -12,6 +12,7 @@ pub mod progression;
 pub mod resolution;
 pub mod save;
 pub mod settings;
+pub mod worker;
 pub mod world;
 
 pub use atlas::{AtlasError, ContinentAtlas};

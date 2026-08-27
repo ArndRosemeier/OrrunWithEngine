@@ -155,8 +155,6 @@ pub fn begin_hitch_log(path: &Path) -> Result<(), SettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controls::Action;
-    use engine::Key;
 
     #[test]
     fn turning_the_hitch_log_on_replaces_the_old_file() {
@@ -202,27 +200,5 @@ mod tests {
     #[test]
     fn continent_size_clamps_to_atlas_max() {
         assert_eq!(clamp_continent_size(10_000), MAX_CONTINENT_SIZE);
-    }
-
-    #[test]
-    fn missing_keys_map_migrates_to_defaults() {
-        let text = r#"{"format":1,"hitch_log":false,"continent_size":256}"#;
-        let settings: Settings = serde_json::from_str(text).expect("read old settings");
-        assert_eq!(settings.keys, KeyBinds::default());
-        assert_eq!(settings.keys.get(Action::Strike), Some(Key::Digit1));
-        assert_eq!(settings.keys.get(Action::Ember), Some(Key::Digit5));
-        assert_eq!(settings.keys.get(Action::Potion), Some(Key::R));
-        assert_eq!(settings.keys.get(Action::Mark), Some(Key::T));
-        assert_eq!(settings.keys.get(Action::SecondWind), Some(Key::G));
-        assert!(settings.keys.missing().is_empty());
-    }
-
-    #[test]
-    fn last_assign_unbinds_the_previous_owner() {
-        let mut keys = KeyBinds::default();
-        keys.assign(Action::Strike, Key::Digit5);
-        assert_eq!(keys.get(Action::Strike), Some(Key::Digit5));
-        assert_eq!(keys.get(Action::Ember), None);
-        assert_eq!(keys.display(Action::Ember), "unbound");
     }
 }

@@ -80,11 +80,10 @@ fn classify_land(
     temp_n: &Noise,
 ) -> Biome {
     let mut temp = temp_n.fbm2(ax as f32 * 0.0025, az as f32 * 0.0025, 2, 2.0, 0.5) * 0.5 + 0.5;
-    temp = lerp(
-        temp,
-        0.15,
-        az as f32 / (size.saturating_sub(1).max(1) as f32) * 0.35,
-    );
+    let latitude_denominator = size
+        .checked_sub(1)
+        .expect("atlas size is validated before biome classification");
+    temp = lerp(temp, 0.15, az as f32 / latitude_denominator as f32 * 0.35);
     if elev >= 181 || (elev >= 160 && rel > 28) {
         return Biome::Alpine;
     }

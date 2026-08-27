@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use engine::load_rgba8_png;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Icon family on disk. One PNG each. No runtime atlas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -137,6 +138,62 @@ pub struct Item {
     pub count: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeItemOutcome {
+    Added,
+    BagFull,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum InventoryError {
+    #[error("coin credit must not be negative: {amount}")]
+    NegativeCoinCredit { amount: i32 },
+    #[error("coin debit must not be negative: {amount}")]
+    NegativeCoinDebit { amount: i32 },
+    #[error("coin credit overflow: balance {balance}, credit {amount}")]
+    CoinCreditOverflow { balance: i32, amount: i32 },
+    #[error("insufficient coin: balance {balance}, debit {amount}")]
+    InsufficientCoin { balance: i32, amount: i32 },
+    #[error("item stack overflow for {kind:?}: current {current}, additional {additional}")]
+    StackOverflow {
+        kind: ItemKind,
+        current: u16,
+        additional: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IconAsset {
+    Item(Family),
+    Shaken,
+}
+
+impl IconAsset {
+    pub fn relative_path(self) -> PathBuf {
+        match self {
+            Self::Item(family) => PathBuf::from("icons").join(family.icon_file()),
+            Self::Shaken => PathBuf::from("icons").join("status").join("shaken.png"),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum IconError {
+    #[error("no Orrun asset directory found; tried {candidates:?}")]
+    NoAssets { candidates: Vec<PathBuf> },
+    #[error("icon asset {asset:?} is missing at {}", .path.display())]
+    Missing { asset: IconAsset, path: PathBuf },
+    #[error("icon asset {asset:?} at {} failed to decode: {source}", .path.display())]
+    Decode {
+        asset: IconAsset,
+        path: PathBuf,
+        #[source]
+        source: engine::error::EngineError,
+    },
+    #[error("icon cache mutex was poisoned")]
+    CachePoisoned,
+}
+
 impl Item {
     pub fn one(kind: ItemKind) -> Self {
         Self { kind, count: 1 }
@@ -206,27 +263,58 @@ impl Inventory {
         }
     }
 
-    pub fn add_coin(&mut self, n: i32) {
-        self.coin = self.coin.saturating_add(n).max(0);
+    pub fn add_coin(&mut self, amount: i32) -> Result<(), InventoryError> {
+        if amount < 0 {
+            return Err(InventoryError::NegativeCoinCredit { amount });
+        }
+        self.coin = self
+            .coin
+            .checked_add(amount)
+            .ok_or(InventoryError::CoinCreditOverflow {
+                balance: self.coin,
+                amount,
+            })?;
+        Ok(())
     }
 
-    /// Put an item in the bag. Stacks potions/arrows. False if the bag is full.
-    pub fn take_item(&mut self, item: Item) -> bool {
+    pub fn debit_coin(&mut self, amount: i32) -> Result<(), InventoryError> {
+        if amount < 0 {
+            return Err(InventoryError::NegativeCoinDebit { amount });
+        }
+        self.coin = self
+            .coin
+            .checked_sub(amount)
+            .filter(|balance| *balance >= 0)
+            .ok_or(InventoryError::InsufficientCoin {
+                balance: self.coin,
+                amount,
+            })?;
+        Ok(())
+    }
+
+    /// Put an item in the bag. Stacks potions/arrows.
+    pub fn take_item(&mut self, item: Item) -> Result<TakeItemOutcome, InventoryError> {
         if item.kind.stacks() {
             for have in self.bag.iter_mut().flatten() {
                 if have.kind == item.kind {
-                    have.count = have.count.saturating_add(item.count);
-                    return true;
+                    have.count = have.count.checked_add(item.count).ok_or(
+                        InventoryError::StackOverflow {
+                            kind: item.kind,
+                            current: have.count,
+                            additional: item.count,
+                        },
+                    )?;
+                    return Ok(TakeItemOutcome::Added);
                 }
             }
         }
         for slot in &mut self.bag {
             if slot.is_none() {
                 *slot = Some(item);
-                return true;
+                return Ok(TakeItemOutcome::Added);
             }
         }
-        false
+        Ok(TakeItemOutcome::BagFull)
     }
 
     pub fn click_bag(&mut self, i: usize) {
@@ -258,21 +346,34 @@ impl Inventory {
     }
 }
 
-pub fn assets_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
-        return Some(PathBuf::from(dir));
-    }
+pub fn asset_candidates() -> Vec<PathBuf> {
     let mut tried = Vec::new();
+    if let Some(dir) = std::env::var_os("ORRUN_ASSETS") {
+        tried.push(PathBuf::from(dir));
+    }
     if let Ok(cwd) = std::env::current_dir() {
         tried.push(cwd.join("assets"));
         tried.push(cwd.join("orrun").join("assets"));
     }
     tried.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"));
-    tried.into_iter().find(|p| p.is_dir())
+    tried
 }
 
-pub fn icon_path(family: Family) -> Option<PathBuf> {
-    Some(assets_dir()?.join("icons").join(family.icon_file()))
+pub fn assets_dir() -> Result<PathBuf, IconError> {
+    let candidates = asset_candidates();
+    candidates
+        .iter()
+        .find(|path| path.is_dir())
+        .cloned()
+        .ok_or(IconError::NoAssets { candidates })
+}
+
+pub fn icon_path(asset: IconAsset) -> Result<PathBuf, IconError> {
+    let path = assets_dir()?.join(asset.relative_path());
+    if !path.is_file() {
+        return Err(IconError::Missing { asset, path });
+    }
+    Ok(path)
 }
 
 #[derive(Clone, Debug)]
@@ -282,32 +383,34 @@ pub struct IconPixels {
     pub rgba: Vec<u8>,
 }
 
-static ICONS: Mutex<Option<HashMap<Family, IconPixels>>> = Mutex::new(None);
+static ICONS: Mutex<Option<HashMap<IconAsset, IconPixels>>> = Mutex::new(None);
 
-/// Load one family PNG. The game only keeps pixels it actually reads.
-pub fn load_icon(family: Family) -> Option<IconPixels> {
-    let mut guard = ICONS.lock().ok()?;
+pub fn load_icon(asset: IconAsset) -> Result<IconPixels, IconError> {
+    let mut guard = ICONS.lock().map_err(|_| IconError::CachePoisoned)?;
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(hit) = map.get(&family) {
-        return Some(hit.clone());
+    if let Some(hit) = map.get(&asset) {
+        return Ok(hit.clone());
     }
-    let path = icon_path(family)?;
-    let (width, height, rgba) = load_rgba8_png(&path).ok()?;
-    let pix = IconPixels {
+    let path = icon_path(asset)?;
+    let (width, height, rgba) = load_rgba8_png(&path).map_err(|source| IconError::Decode {
+        asset,
+        path: path.clone(),
+        source,
+    })?;
+    let pixels = IconPixels {
         width,
         height,
         rgba,
     };
-    map.insert(family, pix.clone());
-    Some(pix)
+    map.insert(asset, pixels.clone());
+    Ok(pixels)
 }
 
-pub fn icon_was_loaded(family: Family) -> bool {
-    ICONS
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|m| m.contains_key(&family)))
-        .unwrap_or(false)
+pub fn icon_was_loaded(asset: IconAsset) -> Result<bool, IconError> {
+    let guard = ICONS.lock().map_err(|_| IconError::CachePoisoned)?;
+    Ok(guard
+        .as_ref()
+        .is_some_and(|icons| icons.contains_key(&asset)))
 }
 
 #[cfg(test)]
@@ -326,6 +429,104 @@ mod tests {
         assert_eq!(inv.coin, 0);
         assert_eq!(inv.bag.iter().filter(|s| s.is_some()).count(), 2);
         assert_eq!(inv.bag.len(), 8);
+    }
+
+    #[test]
+    fn coin_credit_rejects_negative_amount_without_mutation() {
+        let mut inv = Inventory::empty();
+        inv.coin = 7;
+
+        assert_eq!(
+            inv.add_coin(-1),
+            Err(InventoryError::NegativeCoinCredit { amount: -1 })
+        );
+        assert_eq!(inv.coin, 7);
+    }
+
+    #[test]
+    fn coin_credit_reports_overflow_without_mutation() {
+        let mut inv = Inventory::empty();
+        inv.coin = i32::MAX;
+
+        assert_eq!(
+            inv.add_coin(1),
+            Err(InventoryError::CoinCreditOverflow {
+                balance: i32::MAX,
+                amount: 1,
+            })
+        );
+        assert_eq!(inv.coin, i32::MAX);
+    }
+
+    #[test]
+    fn coin_credit_and_debit_update_balance() {
+        let mut inv = Inventory::empty();
+
+        assert_eq!(inv.add_coin(12), Ok(()));
+        assert_eq!(inv.debit_coin(5), Ok(()));
+        assert_eq!(inv.coin, 7);
+    }
+
+    #[test]
+    fn coin_debit_rejects_negative_and_insufficient_amounts() {
+        let mut inv = Inventory::empty();
+        inv.coin = 7;
+
+        assert_eq!(
+            inv.debit_coin(-1),
+            Err(InventoryError::NegativeCoinDebit { amount: -1 })
+        );
+        assert_eq!(
+            inv.debit_coin(8),
+            Err(InventoryError::InsufficientCoin {
+                balance: 7,
+                amount: 8,
+            })
+        );
+        assert_eq!(inv.coin, 7);
+    }
+
+    #[test]
+    fn stack_addition_reports_overflow_without_mutation() {
+        let mut inv = Inventory::empty();
+        inv.bag[0] = Some(Item {
+            kind: ItemKind::ThinArrows,
+            count: u16::MAX,
+        });
+
+        assert_eq!(
+            inv.take_item(Item::one(ItemKind::ThinArrows)),
+            Err(InventoryError::StackOverflow {
+                kind: ItemKind::ThinArrows,
+                current: u16::MAX,
+                additional: 1,
+            })
+        );
+        assert_eq!(inv.bag[0].expect("arrow stack").count, u16::MAX);
+    }
+
+    #[test]
+    fn stack_addition_and_full_bag_have_typed_outcomes() {
+        let mut inv = Inventory::empty();
+        inv.bag[0] = Some(Item {
+            kind: ItemKind::ThinArrows,
+            count: 40,
+        });
+
+        assert_eq!(
+            inv.take_item(Item {
+                kind: ItemKind::ThinArrows,
+                count: 2,
+            }),
+            Ok(TakeItemOutcome::Added)
+        );
+        assert_eq!(inv.bag[0].expect("arrow stack").count, 42);
+
+        inv.bag = [Some(Item::one(ItemKind::OrcClub)); 8];
+        assert_eq!(
+            inv.take_item(Item::one(ItemKind::CairnBlade)),
+            Ok(TakeItemOutcome::BagFull)
+        );
     }
 
     #[test]

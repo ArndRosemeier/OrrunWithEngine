@@ -40,7 +40,7 @@ pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use cave::{CaveError, CaveLayer, CAVE_LIVE_OPEN_M};
 pub use chunk_mesh::TerrainChunkBuilder;
-pub use combat_layer::{first_fixture_auto_hit, CombatLayer, CombatSfx, HeldMobFixture};
+pub use combat_layer::{CombatLayer, CombatSfx, HeldMobFixture};
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,

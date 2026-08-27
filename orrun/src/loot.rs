@@ -1,7 +1,7 @@
 //! loot-v1 corpse piles. Families on disk only. No 726-name catalog.
 
 use crate::combat::ActorId;
-use crate::inventory::{Inventory, Item, ItemKind};
+use crate::inventory::{Inventory, InventoryError, Item, ItemKind, TakeItemOutcome};
 
 /// Cairn vs hut, mapped by the session from overland sites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,39 +93,86 @@ pub fn force_visible_pile(mob_id: &str, actor_id: ActorId, site: Option<LootSite
     pile
 }
 
-pub fn take_one(inv: &mut Inventory, pile: &mut GroundPile, item_i: usize) -> bool {
+pub fn take_one(
+    inv: &mut Inventory,
+    pile: &mut GroundPile,
+    item_i: usize,
+) -> Result<bool, InventoryError> {
     if item_i >= pile.items.len() {
-        return false;
+        return Ok(false);
     }
     let item = pile.items[item_i];
-    if !inv.take_item(item) {
-        return false;
+    if inv.take_item(item)? == TakeItemOutcome::BagFull {
+        return Ok(false);
     }
     pile.items.remove(item_i);
-    true
+    Ok(true)
 }
 
-pub fn take_coin(inv: &mut Inventory, pile: &mut GroundPile) {
-    if pile.coin > 0 {
-        inv.add_coin(pile.coin);
-        pile.coin = 0;
+pub fn take_coin(inv: &mut Inventory, pile: &mut GroundPile) -> Result<(), InventoryError> {
+    if pile.coin == 0 {
+        return Ok(());
     }
+    inv.add_coin(pile.coin)?;
+    pile.coin = 0;
+    Ok(())
 }
 
-pub fn take_all(inv: &mut Inventory, pile: &mut GroundPile) {
-    take_coin(inv, pile);
+pub fn take_all(inv: &mut Inventory, pile: &mut GroundPile) -> Result<(), InventoryError> {
+    take_coin(inv, pile)?;
     let mut i = 0;
     while i < pile.items.len() {
-        if take_one(inv, pile, i) {
+        if take_one(inv, pile, i)? {
             continue;
         }
         i += 1;
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn taking_coin_propagates_invalid_credit_without_mutating_pile() {
+        let mut inv = Inventory::empty();
+        let mut pile = GroundPile {
+            actor_id: ActorId::from_runtime_index(1),
+            mob_id: "test".to_string(),
+            items: Vec::new(),
+            coin: -1,
+        };
+
+        assert_eq!(
+            take_coin(&mut inv, &mut pile),
+            Err(InventoryError::NegativeCoinCredit { amount: -1 })
+        );
+        assert_eq!(inv.coin, 0);
+        assert_eq!(pile.coin, -1);
+    }
+
+    #[test]
+    fn taking_coin_propagates_overflow_without_mutating_pile() {
+        let mut inv = Inventory::empty();
+        inv.coin = i32::MAX;
+        let mut pile = GroundPile {
+            actor_id: ActorId::from_runtime_index(1),
+            mob_id: "test".to_string(),
+            items: Vec::new(),
+            coin: 1,
+        };
+
+        assert_eq!(
+            take_coin(&mut inv, &mut pile),
+            Err(InventoryError::CoinCreditOverflow {
+                balance: i32::MAX,
+                amount: 1,
+            })
+        );
+        assert_eq!(inv.coin, i32::MAX);
+        assert_eq!(pile.coin, 1);
+    }
 
     #[test]
     fn coin_is_always_two_to_eight() {

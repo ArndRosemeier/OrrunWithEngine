@@ -273,6 +273,9 @@ pub enum ScatterError {
 
     #[error("tree asset {0} has no explicit TreeKind mapping")]
     UnknownTreeKind(PathBuf),
+
+    #[error("prop asset path {0} has no file stem")]
+    MissingAssetFileStem(PathBuf),
 }
 
 /// What a scattered prop is, which decides how it is placed.
@@ -886,14 +889,26 @@ impl ScatterCatalog {
             ("berries", PropClass::Berry),
         ] {
             let dir = root.join(dir);
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(scatter_io_error(&dir, "read category directory", source));
+                }
             };
-            let mut paths: Vec<PathBuf> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("glb")))
-                .collect();
+            let mut paths = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|source| {
+                    scatter_io_error(&dir, "read category directory entry", source)
+                })?;
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("glb"))
+                {
+                    paths.push(path);
+                }
+            }
             paths.sort();
             assets.extend(paths.into_iter().map(|path| PropAsset { class, path }));
         }
@@ -914,6 +929,19 @@ impl ScatterCatalog {
     pub fn count_of(&self, class: PropClass) -> usize {
         self.assets.iter().filter(|a| a.class == class).count()
     }
+}
+
+fn asset_file_stem(path: &Path) -> Result<String, ScatterError> {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_lowercase())
+        .ok_or_else(|| ScatterError::MissingAssetFileStem(path.to_path_buf()))
+}
+
+fn scatter_io_error(path: &Path, operation: &str, source: std::io::Error) -> ScatterError {
+    ScatterError::Engine(engine::error::EngineError::Io(std::io::Error::new(
+        source.kind(),
+        format!("failed to {operation} {}: {source}", path.display()),
+    )))
 }
 
 /// Folder that holds the vendored prop glbs (`grass/`, `trees/`, …).
@@ -938,7 +966,10 @@ pub(super) fn props_dir() -> Result<PathBuf, ScatterError> {
         }
     }
     Err(ScatterError::NoAssets(
-        tried.into_iter().next().unwrap_or_default(),
+        tried
+            .into_iter()
+            .next()
+            .expect("scatter asset candidates are never empty"),
     ))
 }
 
@@ -1160,11 +1191,7 @@ impl ScatterLayer {
             if asset.class == PropClass::Tree {
                 continue;
             }
-            let stem = asset
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
+            let stem = asset_file_stem(&asset.path)?;
             let prototype = {
                 let mesh = Model::load(&asset.path).map_err(|source| ScatterError::BadProp {
                     path: asset.path.clone(),
@@ -1359,7 +1386,7 @@ impl ScatterLayer {
 
         if let Some(pending) = self.pending.take() {
             if pending.job.is_finished() {
-                let (sown, took_ms) = pending.job.join().expect("scatter thread");
+                let (sown, took_ms) = crate::worker::join_worker("scatter", pending.job)?;
                 self.sow_ms = took_ms;
                 self.centre = Some(pending.focus);
                 self.resident_chunks = pending.resident_chunks;
@@ -1375,7 +1402,7 @@ impl ScatterLayer {
         if !landed_near {
             if let Some(pending) = self.far_pending.take() {
                 if pending.job.is_finished() {
-                    let (sown, _) = pending.job.join().expect("scatter far thread");
+                    let (sown, _) = crate::worker::join_worker("scatter far", pending.job)?;
                     self.far_centre = Some(pending.focus);
                     self.accept_far(world, sown)?;
                     changed = true;
@@ -1635,7 +1662,16 @@ impl ScatterLayer {
     fn tree_remaining(&self, job: &TreeJob) -> usize {
         self.near_buckets
             .get(&(job.vi, job.bx, job.bz))
-            .map(|s| s.len().saturating_sub(job.shown))
+            .map(|sprigs| {
+                sprigs.len().checked_sub(job.shown).unwrap_or_else(|| {
+                    panic!(
+                        "scatter tree job {:?} shows {} of only {} sprigs",
+                        (job.vi, job.bx, job.bz),
+                        job.shown,
+                        sprigs.len()
+                    )
+                })
+            })
             .unwrap_or(0)
     }
 
@@ -2725,6 +2761,53 @@ mod tests {
     use crate::atlas::ContinentAtlas;
     use crate::world::ponds::PondField;
     use glam::Vec2;
+
+    fn temp_catalog_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "orrun-scatter-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn malformed_asset_path_without_file_stem_is_rejected() {
+        let path = PathBuf::from(".");
+        let err = asset_file_stem(&path).expect_err("missing file stem must fail");
+        assert!(matches!(
+            err,
+            ScatterError::MissingAssetFileStem(ref invalid) if invalid == &path
+        ));
+        assert!(err.to_string().contains("has no file stem"));
+    }
+
+    #[test]
+    fn missing_optional_category_directories_are_valid() {
+        let root = temp_catalog_root("missing-category");
+        let grass = root.join("grass");
+        std::fs::create_dir_all(&grass).expect("create grass category");
+        std::fs::write(grass.join("tuft.glb"), []).expect("write prop placeholder");
+
+        let catalog = ScatterCatalog::load(&root).expect("missing optional categories are valid");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.count_of(PropClass::Grass), 1);
+
+        std::fs::remove_dir_all(&root).expect("clean scatter test root");
+    }
+
+    #[test]
+    fn category_path_io_error_is_contextual_and_loud() {
+        let root = temp_catalog_root("category-io");
+        std::fs::create_dir_all(&root).expect("create scatter test root");
+        std::fs::write(root.join("grass"), []).expect("create non-directory category path");
+
+        let err = ScatterCatalog::load(&root).expect_err("non-directory category must fail");
+        let message = err.to_string();
+        assert!(message.contains("read category directory"), "{message}");
+        assert!(message.contains("grass"), "{message}");
+
+        std::fs::remove_dir_all(&root).expect("clean scatter test root");
+    }
 
     fn world(seed: i32) -> (Arc<ContinentalSurface>, PondField) {
         let atlas = ContinentAtlas::generate(seed, 64);

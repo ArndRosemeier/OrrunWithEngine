@@ -12,8 +12,8 @@ use crate::combat::PlayerSaveSnapshot;
 use crate::inventory::Inventory;
 use crate::world::Heading;
 
-/// First canonical skill-progression save format. Formats 1-3 are not migrated.
-pub const FORMAT: u32 = 4;
+/// M5 skill-progression semantics. Formats 1-4 are incompatible and are not migrated.
+pub const FORMAT: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum SaveError {
@@ -281,8 +281,9 @@ mod tests {
             ("one", r#"{"format":1}"#),
             ("two", r#"{"format":2}"#),
             ("three", r#"{"format":3}"#),
+            ("four", r#"{"format":4}"#),
             ("missing", r#"{}"#),
-            ("future", r#"{"format":5}"#),
+            ("future", r#"{"format":6}"#),
         ] {
             let path = temp(name);
             fs::write(&path, json).unwrap();
@@ -292,6 +293,20 @@ mod tests {
             ));
             let _ = fs::remove_file(path);
         }
+    }
+    #[test]
+    fn rejects_structurally_readable_format_four_before_progression_restore() {
+        let mut value = serde_json::to_value(stand()).unwrap();
+        value["format"] = 4.into();
+        value["player"]["progression"]["skills"][0]["skill_id"] = "fire_damage".into();
+        let path = temp("format-four-m5-incompatible");
+        fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        assert!(matches!(
+            SavedStand::read_at(&path, 7, 64),
+            Err(SaveError::IncompatibleFormat { found, .. }) if found == "4"
+        ));
+        let _ = fs::remove_file(path);
     }
     #[test]
     fn rejects_unknown_fields_and_non_finite_pose() {

@@ -1,79 +1,183 @@
 <?xml version="1.0" encoding="utf-8"?>
-<OrrunGameData schema_version="2">
+<OrrunGameData schema_version="3">
   <skills>
-    <skill id="slashing_damage" name="Slashing Damage" level_scale="1.0" />
-    <skill id="fire_damage" name="Fire Damage" level_scale="1.0" />
-    <skill id="frost_damage" name="Frost Damage" level_scale="1.0" />
-    <skill id="piercing_damage" name="Piercing Damage" level_scale="1.0" />
-    <skill id="bludgeoning_damage" name="Bludgeoning Damage" level_scale="1.0" />
-    <skill id="poison_damage" name="Poison Damage" level_scale="1.0" />
-    <skill id="lightning_damage" name="Lightning Damage" level_scale="1.0" />
-    <skill id="root" name="Root" level_scale="1.0" />
-    <skill id="hold" name="Hold" level_scale="1.0" />
-    <skill id="snare" name="Snare" level_scale="1.0" />
-    <skill id="charm" name="Charm" level_scale="1.0" />
-    <skill id="healing" name="Healing" level_scale="1.0" />
-    <skill id="illusion" name="Illusion" level_scale="1.0" />
+    <skill id="melee" name="Melee" description="" level_scale="1" />
+    <skill id="ranged" name="Ranged" description="" level_scale="1" />
+    <skill id="healing" name="Healing" description="" level_scale="1" />
+    <skill id="root" name="Root" description="" level_scale="1" />
+    <skill id="hold" name="Hold" description="" level_scale="1" />
+    <skill id="snare" name="Snare" description="" level_scale="1" />
+    <skill id="charm" name="Charm" description="" level_scale="1" />
+    <skill id="ferocity" name="Ferocity" description="" level_scale="1" />
+    <skill id="bonecraft" name="Bonecraft" description="" level_scale="1" />
+    <skill id="frostcraft" name="Frostcraft" description="" level_scale="1" />
+    <skill id="infernal" name="Infernal" description="" level_scale="1" />
+    <skill id="venom" name="Venom" description="" level_scale="1" />
+    <skill id="ooze" name="Ooze" description="" level_scale="1" />
   </skills>
   <factions>
     <faction id="neutral" name="Neutral" neutral="true" />
     <faction id="citizen" name="Citizen" neutral="false" />
+    <faction id="wild" name="Wild" neutral="false" />
     <faction id="predator" name="Predator" neutral="false" />
     <faction id="prey" name="Prey" neutral="false" />
-    <faction id="wild" name="Wild" neutral="false" />
     <faction id="robber" name="Robber" neutral="false" />
+    <faction id="tribal_clan" name="Tribal Clan" neutral="false" />
+    <faction id="undead" name="Undead" neutral="false" />
+    <faction id="infernal_host" name="Infernal Host" neutral="false" />
+    <faction id="aberrant" name="Aberrant" neutral="false" />
   </factions>
   <effects>
-    <effect id="slashing_damage" name="Slashing Damage" kind="damage" skill_id="slashing_damage" progression="skill_level" />
-    <effect id="fire_damage" name="Fire Damage" kind="damage" skill_id="fire_damage" progression="skill_level" />
-    <effect id="frost_damage" name="Frost Damage" kind="damage" skill_id="frost_damage" progression="skill_level" />
-    <effect id="piercing_damage" name="Piercing Damage" kind="damage" skill_id="piercing_damage" progression="skill_level" />
-    <effect id="bludgeoning_damage" name="Bludgeoning Damage" kind="damage" skill_id="bludgeoning_damage" progression="skill_level" />
-    <effect id="poison_damage" name="Poison Damage" kind="damage" skill_id="poison_damage" progression="skill_level" />
-    <effect id="lightning_damage" name="Lightning Damage" kind="damage" skill_id="lightning_damage" progression="skill_level" />
-    <effect id="root" name="Root" kind="control" skill_id="root" progression="skill_level" />
-    <effect id="hold" name="Hold" kind="control" skill_id="hold" progression="skill_level" />
-    <effect id="snare" name="Snare" kind="control" skill_id="snare" progression="skill_level" />
-    <effect id="charm" name="Charm" kind="control" skill_id="charm" progression="skill_level" />
-    <effect id="healing" name="Healing" kind="heal" skill_id="healing" progression="skill_level" />
+    <effect id="melee_hit" name="Melee hit" operation="direct_damage" skill_id="melee" progression="skill_level" />
+    <effect id="ranged_hit" name="Ranged hit" operation="direct_damage" skill_id="ranged" progression="skill_level" />
+    <effect id="healing_touch" name="Healing touch" operation="heal" skill_id="healing" progression="skill_level" />
+    <effect id="root_bind" name="Root bind" operation="root" skill_id="root" progression="skill_level" />
+    <effect id="hold_bind" name="Hold bind" operation="hold" skill_id="hold" progression="skill_level" />
+    <effect id="snare_bind" name="Snare bind" operation="snare" skill_id="snare" progression="skill_level" />
+    <effect id="charm_bind" name="Charm bind" operation="charm" skill_id="charm" progression="skill_level" />
+    <effect id="ferocious_impact" name="Ferocious impact" operation="direct_damage" skill_id="ferocity" progression="skill_level" />
+    <effect id="bone_impact" name="Bone impact" operation="direct_damage" skill_id="bonecraft" progression="skill_level" />
+    <effect id="grave_force" name="Grave force" operation="direct_damage" skill_id="bonecraft" progression="skill_level" />
+    <effect id="frost_impact" name="Frost impact" operation="direct_damage" skill_id="frostcraft" progression="skill_level" />
+    <effect id="infernal_impact" name="Infernal impact" operation="direct_damage" skill_id="infernal" progression="skill_level" />
+    <effect id="venom_impact" name="Venom impact" operation="direct_damage" skill_id="venom" progression="skill_level" />
+    <effect id="ooze_impact" name="Ooze impact" operation="direct_damage" skill_id="ooze" progression="skill_level" />
   </effects>
   <actions>
-    <action id="strike" name="Strike" target="hostile" cast_s="0" cooldown_s="6.0"><effects><effect effect_id="slashing_damage" magnitude="8" application="single_target" range_m="1.8" /></effects></action>
-    <action id="fire_bolt" name="Fire Bolt" target="hostile" mana_cost="3" cast_s="1.2" cooldown_s="0"><effects><effect effect_id="fire_damage" magnitude="14" application="single_target" range_m="18" /></effects></action>
-    <action id="mend" name="Mend" target="friendly" mana_cost="20" cast_s="2.5" cooldown_s="0"><effects><effect effect_id="healing" magnitude="25" application="single_target" range_m="18" /></effects></action>
+    <action id="slash" name="Strike" description="" target="hostile" mana_cost="0" cast_s="0" cooldown_s="1" interruptible="false" reveals="true">
+      <effects>
+        <effect effect_id="melee_hit" magnitude="10" application="single_target" range_m="2" duration_s="0" movement_multiplier="1" />
+      </effects>
+    </action>
+    <action id="arrow" name="Fire Bolt" description="" target="hostile" mana_cost="0" cast_s="0.4" cooldown_s="1" interruptible="true" reveals="true">
+      <effects>
+        <effect effect_id="ranged_hit" magnitude="8" application="single_target" range_m="20" duration_s="0" movement_multiplier="1" />
+      </effects>
+    </action>
+    <action id="restore" name="Mend" description="" target="friendly" mana_cost="8" cast_s="1.2" cooldown_s="3" interruptible="true" reveals="false">
+      <effects>
+        <effect effect_id="healing_touch" magnitude="18" application="single_target" range_m="16" duration_s="0" movement_multiplier="1" />
+      </effects>
+    </action>
+    <action id="entangle" name="Entangle" description="" target="hostile" mana_cost="6" cast_s="0.8" cooldown_s="6" interruptible="true" reveals="true">
+      <effects>
+        <effect effect_id="root_bind" magnitude="1" application="single_target" range_m="16" duration_s="4" movement_multiplier="1" />
+      </effects>
+    </action>
+    <action id="stasis" name="Stasis" description="" target="hostile" mana_cost="10" cast_s="1.5" cooldown_s="10" interruptible="true" reveals="true">
+      <effects>
+        <effect effect_id="hold_bind" magnitude="1" application="single_target" range_m="14" duration_s="2.5" movement_multiplier="1" />
+      </effects>
+    </action>
+    <action id="hobble" name="Hobble" description="" target="hostile" mana_cost="5" cast_s="0.6" cooldown_s="5" interruptible="true" reveals="true">
+      <effects>
+        <effect effect_id="snare_bind" magnitude="1" application="single_target" range_m="18" duration_s="6" movement_multiplier="0.5" />
+      </effects>
+    </action>
+    <action id="befriend" name="Befriend" description="" target="hostile" mana_cost="14" cast_s="2" cooldown_s="14" interruptible="true" reveals="false">
+      <effects>
+        <effect effect_id="charm_bind" magnitude="1" application="single_target" range_m="12" duration_s="8" movement_multiplier="1" />
+      </effects>
+    </action>
+
+    <action id="skull_crush" name="Skull Crush" description="" target="hostile" mana_cost="0" cast_s="0.35" cooldown_s="2.4" interruptible="true" reveals="true"><effects><effect effect_id="ferocious_impact" magnitude="17" application="single_target" range_m="2.6" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="tribal_spear" name="Tribal Spear" description="" target="hostile" mana_cost="0" cast_s="0.2" cooldown_s="1.7" interruptible="true" reveals="true"><effects><effect effect_id="ferocious_impact" magnitude="12" application="single_target" range_m="3.5" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="veteran_barrage" name="Veteran Barrage" description="" target="hostile" mana_cost="0" cast_s="0.65" cooldown_s="3.2" interruptible="true" reveals="true"><effects><effect effect_id="ferocious_impact" magnitude="21" application="single_target" range_m="8" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="bone_cleave" name="Bone Cleave" description="" target="hostile" mana_cost="0" cast_s="0" cooldown_s="1.5" interruptible="false" reveals="true"><effects><effect effect_id="bone_impact" magnitude="14" application="single_target" range_m="2.4" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="bone_jab" name="Bone Jab" description="" target="hostile" mana_cost="0" cast_s="0" cooldown_s="1.1" interruptible="false" reveals="true"><effects><effect effect_id="bone_impact" magnitude="9" application="single_target" range_m="2.2" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="grave_lance" name="Grave Lance" description="" target="hostile" mana_cost="7" cast_s="1.1" cooldown_s="4" interruptible="true" reveals="true"><effects><effect effect_id="grave_force" magnitude="19" application="single_target" range_m="18" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="glacial_hammer" name="Glacial Hammer" description="" target="hostile" mana_cost="4" cast_s="0.8" cooldown_s="3" interruptible="true" reveals="true"><effects><effect effect_id="frost_impact" magnitude="24" application="single_target" range_m="3" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="hellbrand" name="Hellbrand" description="" target="hostile" mana_cost="5" cast_s="0.5" cooldown_s="2.5" interruptible="true" reveals="true"><effects><effect effect_id="infernal_impact" magnitude="22" application="single_target" range_m="3.2" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="azure_flare" name="Azure Flare" description="" target="hostile" mana_cost="8" cast_s="1" cooldown_s="3.5" interruptible="true" reveals="true"><effects><effect effect_id="infernal_impact" magnitude="18" application="single_target" range_m="15" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="venom_snap" name="Venom Snap" description="" target="hostile" mana_cost="0" cast_s="0.15" cooldown_s="1.8" interruptible="true" reveals="true"><effects><effect effect_id="venom_impact" magnitude="13" application="single_target" range_m="2.8" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="brood_lance" name="Brood Lance" description="" target="hostile" mana_cost="6" cast_s="0.9" cooldown_s="3.8" interruptible="true" reveals="true"><effects><effect effect_id="venom_impact" magnitude="16" application="single_target" range_m="12" duration_s="0" movement_multiplier="1" /></effects></action>
+    <action id="acid_surge" name="Acid Surge" description="" target="hostile" mana_cost="4" cast_s="0.55" cooldown_s="2.7" interruptible="true" reveals="true"><effects><effect effect_id="ooze_impact" magnitude="15" application="single_target" range_m="9" duration_s="0" movement_multiplier="1" /></effects></action>
   </actions>
   <players>
-    <profile id="default_player" name="Orrun Adventurer" faction="citizen"><skill id="slashing_damage" /><skill id="fire_damage" /><skill id="healing" /></profile>
+    <profile id="default_player" name="Orrun Adventurer" faction="citizen">
+      <skill id="melee" level="1" />
+      <skill id="ranged" level="1" />
+      <skill id="healing" level="1" />
+      <skill id="root" level="1" />
+      <skill id="hold" level="1" />
+      <skill id="snare" level="1" />
+      <skill id="charm" level="1" />
+      <action id="slash" />
+      <action id="arrow" />
+      <action id="restore" />
+      <action id="entangle" />
+      <action id="stasis" />
+      <action id="hobble" />
+      <action id="befriend" />
+    </profile>
   </players>
   <mobs>
-    <mob id="wolf" name="Wolf" faction="predator" mode="active" hp="70" armor="0" damage="10" movement_id="animal_run" species_id="wolf" speed_variance_ratio="0.08" endurance_s="28"><action id="strike" /></mob>
-    <mob id="deer" name="Deer" faction="prey" mode="passive" hp="55" armor="0" damage="7" movement_id="animal_run" species_id="deer" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
-    <mob id="stag" name="Stag" faction="prey" mode="passive" hp="80" armor="1" damage="12" movement_id="animal_run" species_id="stag" speed_variance_ratio="0.04" endurance_s="60"><action id="strike" /></mob>
-    <mob id="fox" name="Fox" faction="predator" mode="active" hp="40" armor="0" damage="6" movement_id="animal_run" species_id="fox" speed_variance_ratio="0.08" endurance_s="24"><action id="strike" /></mob>
-    <mob id="horse" name="Horse" faction="prey" mode="passive" hp="100" armor="1" damage="10" movement_id="animal_run" species_id="horse" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
-    <mob id="horse_white" name="White Horse" faction="prey" mode="passive" hp="100" armor="1" damage="10" movement_id="animal_run" species_id="horse_white" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
-    <mob id="cow" name="Cow" faction="citizen" mode="passive" hp="110" armor="1" damage="8" movement_id="animal_walk" species_id="cow" speed_variance_ratio="0.03" endurance_s="65"><action id="strike" /></mob>
-    <mob id="bull" name="Bull" faction="citizen" mode="passive" hp="145" armor="2" damage="15" movement_id="animal_run" species_id="bull" speed_variance_ratio="0.05" endurance_s="50"><action id="strike" /></mob>
-    <mob id="donkey" name="Donkey" faction="citizen" mode="passive" hp="90" armor="1" damage="9" movement_id="animal_run" species_id="donkey" speed_variance_ratio="0.04" endurance_s="60"><action id="strike" /></mob>
-    <mob id="alpaca" name="Alpaca" faction="citizen" mode="passive" hp="70" armor="0" damage="6" movement_id="animal_run" species_id="alpaca" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
-    <mob id="husky" name="Husky" faction="citizen" mode="passive" hp="65" armor="0" damage="9" movement_id="animal_run" species_id="husky" speed_variance_ratio="0.06" endurance_s="45"><action id="strike" /></mob>
-    <mob id="shiba" name="Shiba" faction="citizen" mode="passive" hp="50" armor="0" damage="7" movement_id="animal_run" species_id="shiba" speed_variance_ratio="0.06" endurance_s="40"><action id="strike" /></mob>
-    <mob id="crawler_scorpion" name="Scorpion" faction="wild" mode="active" hp="110" armor="2" damage="14" movement_id="walk" speed_variance_ratio="0.05" endurance_s="35"><action id="strike" /></mob>
-    <mob id="line_mother" name="Line-Mother" faction="wild" mode="active" hp="600" armor="8" damage="35" movement_id="walk" speed_variance_ratio="0.02" endurance_s="90"><action id="strike" /></mob>
-    <mob id="green_blob" name="Green Blob" faction="wild" mode="passive" hp="90" armor="1" damage="8" movement_id="walk" speed_variance_ratio="0.02" endurance_s="80"><action id="strike" /></mob>
-    <mob id="orc" name="Orc" faction="wild" mode="active" hp="150" armor="4" damage="20" movement_id="walk" speed_variance_ratio="0.05" endurance_s="45"><action id="strike" /></mob>
-    <mob id="tribal" name="Tribal" faction="wild" mode="active" hp="130" armor="3" damage="18" movement_id="walk" speed_variance_ratio="0.06" endurance_s="42"><action id="strike" /></mob>
-    <mob id="bandit" name="Bandit" faction="robber" mode="active" hp="120" armor="3" damage="17" movement_id="walk" speed_variance_ratio="0.06" endurance_s="40"><action id="strike" /></mob>
-    <mob id="orc_skull" name="Orc Skull" faction="wild" mode="active" hp="220" armor="6" damage="27" movement_id="walk" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /><action id="fire_bolt" /></mob>
-    <mob id="skeleton_warrior" name="Skeleton Warrior" faction="wild" mode="active" hp="160" armor="5" damage="22" movement_id="walk" speed_variance_ratio="0.03" endurance_s="60"><action id="strike" /></mob>
-    <mob id="skeleton_minion" name="Skeleton Minion" faction="wild" mode="active" hp="100" armor="3" damage="15" movement_id="walk" speed_variance_ratio="0.05" endurance_s="45"><action id="strike" /></mob>
-    <mob id="skeleton_mage" name="Skeleton Mage" faction="wild" mode="active" hp="130" armor="3" damage="20" movement_id="walk" speed_variance_ratio="0.04" endurance_s="40"><action id="strike" /><action id="fire_bolt" /></mob>
-    <mob id="yeti" name="Yeti" faction="wild" mode="active" hp="350" armor="8" damage="32" movement_id="walk" speed_variance_ratio="0.03" endurance_s="70"><action id="strike" /></mob>
-    <mob id="demon" name="Demon" faction="wild" mode="active" hp="480" armor="10" damage="40" movement_id="walk" speed_variance_ratio="0.05" endurance_s="65"><action id="strike" /></mob>
-    <mob id="blue_demon" name="Blue Demon" faction="wild" mode="active" hp="450" armor="9" damage="38" movement_id="walk" speed_variance_ratio="0.05" endurance_s="60"><action id="strike" /></mob>
-    <mob id="tribal_veteran" name="Tribal Veteran" faction="wild" mode="active" hp="250" armor="6" damage="30" movement_id="walk" speed_variance_ratio="0.04" endurance_s="55"><action id="strike" /></mob>
+    <mob id="wolf" name="Wolf" faction="predator" mode="active" hp="70" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="wolf">
+      <skill id="melee" level="1" />
+      <action id="slash" />
+    </mob>
+    <mob id="bandit" name="Bandit" faction="robber" mode="active" hp="100" armor="0" movement_id="walk" speed_variance_ratio="0.05" endurance_s="40">
+      <skill id="melee" level="1" />
+      <skill id="ranged" level="1" />
+      <action id="slash" />
+      <action id="arrow" />
+    </mob>
+    <mob id="shaman" name="Shaman" faction="wild" mode="active" hp="90" armor="0" movement_id="walk" speed_variance_ratio="0.05" endurance_s="40">
+      <skill id="melee" level="1" />
+      <skill id="healing" level="1" />
+      <skill id="root" level="1" />
+      <skill id="snare" level="1" />
+      <action id="slash" />
+      <action id="restore" />
+      <action id="entangle" />
+      <action id="hobble" />
+    </mob>
+    <mob id="hexer" name="Hexer" faction="wild" mode="active" hp="110" armor="0" movement_id="walk" speed_variance_ratio="0.05" endurance_s="40">
+      <skill id="ranged" level="2" />
+      <skill id="hold" level="2" />
+      <skill id="charm" level="2" />
+      <action id="arrow" />
+      <action id="stasis" />
+      <action id="befriend" />
+    </mob>
+    <mob id="orc" name="Orc" faction="robber" mode="active" hp="130" armor="8" movement_id="walk" speed_variance_ratio="0.05" endurance_s="40"><skill id="melee" level="2" /><action id="slash" /></mob>
+    <mob id="fox" name="Fox" faction="predator" mode="active" hp="45" armor="0" movement_id="run" speed_variance_ratio="0.08" endurance_s="35" species_id="fox"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="deer" name="Deer" faction="prey" mode="passive" hp="55" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="deer"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="stag" name="Stag" faction="prey" mode="passive" hp="85" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="stag"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="horse" name="Horse" faction="prey" mode="passive" hp="100" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="horse"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="horse_white" name="White Horse" faction="prey" mode="passive" hp="100" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="horse_white"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="cow" name="Cow" faction="citizen" mode="passive" hp="100" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="cow"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="bull" name="Bull" faction="citizen" mode="passive" hp="130" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="bull"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="donkey" name="Donkey" faction="citizen" mode="passive" hp="80" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="donkey"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="alpaca" name="Alpaca" faction="citizen" mode="passive" hp="65" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="alpaca"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="husky" name="Husky" faction="citizen" mode="passive" hp="55" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="husky"><skill id="melee" level="1" /><action id="slash" /></mob>
+    <mob id="shiba" name="Shiba" faction="citizen" mode="passive" hp="45" armor="0" movement_id="run" speed_variance_ratio="0.05" endurance_s="40" species_id="shiba"><skill id="melee" level="1" /><action id="slash" /></mob>
+
+    <mob id="tribal" name="Tribal Hunter" faction="tribal_clan" mode="active" hp="96" armor="3" movement_id="run" speed_variance_ratio="0.07" endurance_s="44"><skill id="ferocity" level="2" /><action id="tribal_spear" /></mob>
+    <mob id="tribal_veteran" name="Tribal Veteran" faction="tribal_clan" mode="active" hp="168" armor="12" movement_id="run" speed_variance_ratio="0.04" endurance_s="58"><skill id="ferocity" level="4" /><action id="tribal_spear" /><action id="veteran_barrage" /></mob>
+    <mob id="orc_skull" name="Skull Orc" faction="robber" mode="active" hp="182" armor="15" movement_id="walk" speed_variance_ratio="0.03" endurance_s="62"><skill id="ferocity" level="4" /><action id="skull_crush" /></mob>
+    <mob id="skeleton_warrior" name="Skeleton Warrior" faction="undead" mode="active" hp="116" armor="18" movement_id="walk" speed_variance_ratio="0.02" endurance_s="70"><skill id="bonecraft" level="3" /><action id="bone_cleave" /></mob>
+    <mob id="skeleton_minion" name="Skeleton Minion" faction="undead" mode="active" hp="58" armor="4" movement_id="run" speed_variance_ratio="0.08" endurance_s="48"><skill id="bonecraft" level="1" /><action id="bone_jab" /></mob>
+    <mob id="skeleton_mage" name="Skeleton Mage" faction="undead" mode="active" hp="82" armor="2" movement_id="walk" speed_variance_ratio="0.02" endurance_s="52"><skill id="bonecraft" level="3" /><action id="bone_jab" /><action id="grave_lance" /></mob>
+    <mob id="yeti" name="Yeti" faction="predator" mode="active" hp="244" armor="10" movement_id="run" speed_variance_ratio="0.03" endurance_s="68"><skill id="frostcraft" level="5" /><action id="glacial_hammer" /></mob>
+    <mob id="demon" name="Demon" faction="infernal_host" mode="active" hp="218" armor="14" movement_id="run" speed_variance_ratio="0.04" endurance_s="72"><skill id="infernal" level="5" /><action id="hellbrand" /></mob>
+    <mob id="blue_demon" name="Blue Demon" faction="infernal_host" mode="active" hp="196" armor="9" movement_id="run" speed_variance_ratio="0.05" endurance_s="64"><skill id="infernal" level="5" /><action id="hellbrand" /><action id="azure_flare" /></mob>
+    <mob id="crawler_scorpion" name="Crawler Scorpion" faction="aberrant" mode="active" hp="88" armor="11" movement_id="run" speed_variance_ratio="0.09" endurance_s="46"><skill id="venom" level="2" /><action id="venom_snap" /></mob>
+    <mob id="line_mother" name="Line Mother" faction="aberrant" mode="active" hp="205" armor="8" movement_id="walk" speed_variance_ratio="0.02" endurance_s="60"><skill id="venom" level="4" /><action id="venom_snap" /><action id="brood_lance" /></mob>
+    <mob id="green_blob" name="Green Blob" faction="aberrant" mode="active" hp="132" armor="1" movement_id="walk" speed_variance_ratio="0.01" endurance_s="90"><skill id="ooze" level="3" /><action id="acid_surge" /></mob>
   </mobs>
-  <movement><spec id="walk" speed_mps="2.5" /><spec id="animal_walk" speed_mps="2.0" /><spec id="animal_run" speed_mps="6.5" /></movement>
-  <hamlet enabled="true" width="32" depth="32" kit_catalog="catalogs/medieval.json"><layer id="terrain" /><layer id="roads" /><layer id="dwellings" /></hamlet>
-  <defaults><value key="player_faction" value="citizen" /><value key="neutral_faction" value="neutral" /><value key="default_player_profile" value="default_player" /><value key="mob_sight_m" value="24" /><value key="mob_hear_m" value="12" /><value key="mob_leash_m" value="48" /><value key="mob_social_m" value="10" /></defaults>
+  <movement>
+    <spec id="walk" speed_mps="2.5" />
+    <spec id="run" speed_mps="6.5" />
+  </movement>
+  <hamlet enabled="true" width="32" depth="32" kit_catalog="catalogs/medieval.json">
+    <layer id="terrain" />
+    <layer id="roads" />
+    <layer id="dwellings" />
+  </hamlet>
+  <defaults>
+    <value key="default_player_profile" value="default_player" />
+    <value key="neutral_faction" value="neutral" />
+    <value key="player_faction" value="citizen" />
+  </defaults>
 </OrrunGameData>

@@ -12,6 +12,22 @@ pub struct CombatMesh {
     pub weapon_node: Option<&'static str>, // Some("Orc_Weapon") orc only
 }
 
+pub const LIVE_COMBAT_MOB_IDS: &[&str] = &[
+    "orc",
+    "tribal",
+    "orc_skull",
+    "wolf",
+    "deer",
+    "skeleton_warrior",
+    "skeleton_minion",
+    "bandit",
+    "skeleton_mage",
+    "yeti",
+    "demon",
+    "blue_demon",
+    "tribal_veteran",
+];
+
 pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
     Some(match mob_id {
         "orc" => CombatMesh {
@@ -165,6 +181,24 @@ pub fn mesh_spec(mob_id: &str) -> Option<CombatMesh> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_live_combat_catalog_id_exists_in_canonical_game_data() {
+        let data = crate::gamedata::GameData::load(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+        )
+        .expect("canonical GameData");
+        for id in LIVE_COMBAT_MOB_IDS {
+            assert!(
+                data.mob(&crate::gamedata::MobId::new(*id)).is_some(),
+                "live combat catalog id {id} is missing from GameData"
+            );
+            assert!(
+                mesh_spec(id).is_some(),
+                "live combat catalog id {id} has no mesh"
+            );
+        }
+    }
 
     #[test]
     fn mesh_spec_big_roster_files_exist() {

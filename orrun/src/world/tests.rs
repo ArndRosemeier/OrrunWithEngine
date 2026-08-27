@@ -381,7 +381,7 @@ fn following_the_pond_window_does_not_scan_on_the_game_thread() {
     let mut window = PondWindow::new(Arc::clone(&surface));
     let focus = GlobalXZ::at(20_000.0, 20_000.0);
     let started = Instant::now();
-    window.follow(focus);
+    window.follow(focus).expect("pond worker remains healthy");
     let took = started.elapsed();
     assert!(
         took < Duration::from_millis(200),
@@ -2612,7 +2612,11 @@ fn turning_wraps_instead_of_drifting_off_the_compass() {
     session.begin_entry(&mut world, request).expect("entry");
     wait_until_world(&mut session, &mut world);
 
-    let start = session.player_heading().expect("heading").degrees();
+    let start = session
+        .player_heading()
+        .expect("valid heading")
+        .expect("heading")
+        .degrees();
     // Ten full turns: Heading rejects anything outside [0, 360).
     for _ in 0..100 {
         session
@@ -2624,9 +2628,16 @@ fn turning_wraps_instead_of_drifting_off_the_compass() {
                 },
             )
             .expect("turn");
-        session.player_heading().expect("yaw stayed on the compass");
+        session
+            .player_heading()
+            .expect("valid heading")
+            .expect("yaw stayed on the compass");
     }
-    let end = session.player_heading().expect("heading").degrees();
+    let end = session
+        .player_heading()
+        .expect("valid heading")
+        .expect("heading")
+        .degrees();
     assert!(
         (end - start).abs() < 0.01,
         "ten whole turns must come back to the same heading: {start} then {end}"

@@ -26,6 +26,7 @@ enum Paint {
     Pond,
 }
 
+#[derive(Debug)]
 struct Args {
     seed: i32,
     size: usize,
@@ -33,32 +34,64 @@ struct Args {
     span_m: f64,
 }
 
-fn parse_args(bounds_m: Option<f64>) -> Args {
-    let mut args = std::env::args().skip(1);
-    let seed = args.next().and_then(|s| s.parse().ok()).unwrap_or(20260809);
-    let size = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(256usize)
-        .clamp(32, 512);
+fn parse_value<T: std::str::FromStr>(
+    value: Option<&String>,
+    name: &str,
+    default: T,
+) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    match value {
+        Some(value) => value
+            .parse::<T>()
+            .map_err(|error| format!("invalid {name} '{value}': {error}")),
+        None => Ok(default),
+    }
+}
+
+fn parse_args_from(raw: &[String], bounds_m: Option<f64>) -> Result<Args, String> {
+    if raw.len() > 5 {
+        return Err(format!("expected at most 5 arguments, got {}", raw.len()));
+    }
+    let seed = parse_value(raw.first(), "seed", 20260809i32)?;
+    let size = parse_value(raw.get(1), "size", 256usize)?;
+    if !(32..=512).contains(&size) {
+        return Err(format!("size must be in 32..=512, got {size}"));
+    }
     let mid = bounds_m.unwrap_or(0.0) * 0.5;
-    let x = args.next().and_then(|s| s.parse().ok()).unwrap_or(mid);
-    let z = args.next().and_then(|s| s.parse().ok()).unwrap_or(mid);
-    let span_m = args.next().and_then(|s| s.parse().ok()).unwrap_or(3_000.0);
-    Args {
+    let x = parse_value(raw.get(2), "x coordinate", mid)?;
+    let z = parse_value(raw.get(3), "z coordinate", mid)?;
+    let span_m = parse_value(raw.get(4), "span", 3_000.0f64)?;
+    if !x.is_finite() || !z.is_finite() {
+        return Err(format!("coordinates must be finite, got ({x}, {z})"));
+    }
+    if !span_m.is_finite() || span_m <= 0.0 {
+        return Err(format!("span must be finite and positive, got {span_m}"));
+    }
+    if let Some(bounds_m) = bounds_m {
+        if x < 0.0 || z < 0.0 || x >= bounds_m || z >= bounds_m {
+            return Err(format!(
+                "centre ({x}, {z}) is outside atlas bounds [0, {bounds_m})"
+            ));
+        }
+    }
+    Ok(Args {
         seed,
         size,
         centre: GlobalXZ::at(x, z),
         span_m,
-    }
+    })
 }
 
 fn main() {
-    let head = parse_args(None);
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let head = parse_args_from(&raw, None).unwrap_or_else(|error| panic!("{error}"));
     let atlas = ContinentAtlas::generate(head.seed, head.size);
     let surface = Arc::new(ContinentalSurface::new(&atlas).expect("canonical surface"));
     // Re-read the arguments now that the atlas can supply a default centre.
-    let args = parse_args(Some(surface.bounds().metres()));
+    let args = parse_args_from(&raw, Some(surface.bounds().metres()))
+        .unwrap_or_else(|error| panic!("{error}"));
 
     let started = std::time::Instant::now();
     let field = PondField::build(&surface, args.centre);
@@ -131,8 +164,49 @@ fn main() {
         }
     }
 
-    let path = std::env::var("POND_MAP")
-        .unwrap_or_else(|_| "C:/Projekte/OrrunWithEngine/shots/pond-map.png".to_string());
+    let path = match std::env::var("POND_MAP") {
+        Ok(path) if path.trim().is_empty() => panic!("POND_MAP must not be empty"),
+        Ok(path) => path,
+        Err(std::env::VarError::NotPresent) => {
+            "C:/Projekte/OrrunWithEngine/shots/pond-map.png".to_string()
+        }
+        Err(error) => panic!("POND_MAP is not valid Unicode: {error}"),
+    };
     save_rgba8_png(&path, PIXELS as u32, PIXELS as u32, &rgba).expect("write the map");
     eprintln!("wrote {path} at {:.1} m per pixel", step);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_values_are_rejected() {
+        assert!(parse_args_from(&["seed".into()], None)
+            .unwrap_err()
+            .contains("invalid seed"));
+        assert!(parse_args_from(&["1".into(), "31".into()], None)
+            .unwrap_err()
+            .contains("32..=512"));
+        assert!(
+            parse_args_from(&["1".into(), "64".into(), "NaN".into()], Some(64_000.0))
+                .unwrap_err()
+                .contains("finite")
+        );
+        assert!(parse_args_from(
+            &["1".into(), "64".into(), "1".into(), "2".into(), "0".into()],
+            Some(64_000.0)
+        )
+        .unwrap_err()
+        .contains("positive"));
+    }
+
+    #[test]
+    fn absent_values_use_defaults() {
+        let args = parse_args_from(&[], Some(256_000.0)).expect("defaults");
+        assert_eq!(args.seed, 20260809);
+        assert_eq!(args.size, 256);
+        assert_eq!(args.centre, GlobalXZ::at(128_000.0, 128_000.0));
+        assert_eq!(args.span_m, 3_000.0);
+    }
 }
