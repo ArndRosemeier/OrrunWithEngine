@@ -38,7 +38,7 @@ use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CON
 use orrun::controls::{is_reserved, Action};
 use orrun::gamedata::GameData;
 use orrun::hud;
-use orrun::save::{SaveError, SavedStand};
+use orrun::save::SavedStand;
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, plan_overland_sites, Ambience,
@@ -667,7 +667,7 @@ fn parse_args(default_size: usize) -> (i32, usize) {
 /// the player on the map would hide that. A first launch uses the largest
 /// settlement — the same place the in-game map offers as a pin.
 fn opening_entry(
-    remembered: Option<SavedStand>,
+    remembered: Option<&SavedStand>,
     bounds: AtlasBounds,
     surface: &ContinentalSurface,
     ponds: &PondField,
@@ -711,19 +711,8 @@ fn main() {
     let game_data = Arc::new(GameData::load("data/OrrunGameData.xml").expect("canonical GameData"));
     let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
     let (seed, size) = parse_args(prefs.continent_size());
-    // Read before the window opens. FORMAT 1 migrates. Garbage JSON is
-    // skipped with a warning; other save errors still fail loud.
-    let remembered = match SavedStand::read(seed, size) {
-        Ok(stand) => stand,
-        Err(SaveError::Unreadable { path, source }) => {
-            eprintln!(
-                "warning: save {} is not readable Orrun state ({source}); starting without it",
-                path.display()
-            );
-            None
-        }
-        Err(err) => panic!("{err}"),
-    };
+    // A present save is authoritative: incompatible or malformed state fails loudly.
+    let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
 
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
@@ -761,7 +750,7 @@ fn main() {
         listening: None,
     };
 
-    let last_stand = Arc::new(Mutex::new(remembered));
+    let last_stand = Arc::new(Mutex::new(remembered.clone()));
     let stand_in_loop = Arc::clone(&last_stand);
 
     // Performance inspection default: allow the renderer to run uncapped.
@@ -799,8 +788,10 @@ fn main() {
                 let mut world_session =
                     WorldSession::with_game_data(surface, Arc::clone(&game_data));
                 world_session.attach_proxy(proxy);
-                if let Some(stand) = remembered {
-                    world_session.apply_save(&stand);
+                if let Some(stand) = remembered.as_ref() {
+                    world_session
+                        .apply_save(stand)
+                        .unwrap_or_else(|err| panic!("saved player state is invalid: {err}"));
                 }
                 session = Some(world_session);
             } else {
@@ -831,8 +822,12 @@ fn main() {
                 let session = session.as_mut().expect("atlas ready");
                 if session.state() == SessionState::Atlas {
                     let ponds = session.ponds();
-                    let request =
-                        opening_entry(remembered, bounds, session.surface(), ponds.as_ref());
+                    let request = opening_entry(
+                        remembered.as_ref(),
+                        bounds,
+                        session.surface(),
+                        ponds.as_ref(),
+                    );
                     if let Err(err) = session.begin_entry(world, request) {
                         if remembered.is_some() {
                             eprintln!(
@@ -917,7 +912,7 @@ fn main() {
             .unwrap_or_else(|err| panic!("{err}"));
     });
 
-    let stand = *last_stand.lock().expect("last stand");
+    let stand = last_stand.lock().expect("last stand").clone();
     if let Some(stand) = stand {
         let path = stand.write().unwrap_or_else(|err| panic!("{err}"));
         eprintln!(

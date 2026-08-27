@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::gamedata::{GameData, MobDefinition, PlayerProfile, Progression, SkillId};
@@ -114,6 +115,92 @@ pub struct LevelUpEvent {
 pub enum ProgressionError {
     #[error("actor does not know skill {0}")]
     UnknownSkill(SkillId),
+    #[error("saved {proficiency:?} level must be at least 1, got {level}")]
+    InvalidSavedLevel {
+        proficiency: Proficiency,
+        level: i32,
+    },
+    #[error("saved {proficiency:?} XP {xp} must be less than {xp_to_next} at level {level}")]
+    InvalidSavedXp {
+        proficiency: Proficiency,
+        level: i32,
+        xp: u64,
+        xp_to_next: u64,
+    },
+    #[error("saved progression contains duplicate skill {0}")]
+    DuplicateSavedSkill(SkillId),
+    #[error("saved progression contains unknown skill {0}")]
+    UnknownSavedSkill(SkillId),
+    #[error("saved progression omits known skill {0}")]
+    MissingSavedSkill(SkillId),
+}
+
+/// Immutable serialized state for one progression track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressionTrackSnapshot {
+    level: i32,
+    xp: u64,
+}
+
+impl ProgressionTrackSnapshot {
+    pub fn new(level: i32, xp: u64) -> Self {
+        Self { level, xp }
+    }
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+    pub fn xp(&self) -> u64 {
+        self.xp
+    }
+}
+
+/// Immutable serialized state for one known skill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillProgressionSnapshot {
+    skill_id: String,
+    track: ProgressionTrackSnapshot,
+}
+
+impl SkillProgressionSnapshot {
+    pub fn new(skill_id: impl Into<String>, track: ProgressionTrackSnapshot) -> Self {
+        Self {
+            skill_id: skill_id.into(),
+            track,
+        }
+    }
+    pub fn skill_id(&self) -> &str {
+        &self.skill_id
+    }
+    pub fn track(&self) -> ProgressionTrackSnapshot {
+        self.track
+    }
+}
+
+/// Immutable serialized state for all progression owned by one actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorProgressionSnapshot {
+    skills: Vec<SkillProgressionSnapshot>,
+    hp: ProgressionTrackSnapshot,
+    mana: ProgressionTrackSnapshot,
+}
+
+impl ActorProgressionSnapshot {
+    pub fn new(
+        skills: Vec<SkillProgressionSnapshot>,
+        hp: ProgressionTrackSnapshot,
+        mana: ProgressionTrackSnapshot,
+    ) -> Self {
+        Self { skills, hp, mana }
+    }
+    pub fn skills(&self) -> &[SkillProgressionSnapshot] {
+        &self.skills
+    }
+    pub fn hp(&self) -> ProgressionTrackSnapshot {
+        self.hp
+    }
+    pub fn mana(&self) -> ProgressionTrackSnapshot {
+        self.mana
+    }
 }
 
 /// Per-proficiency level and progress toward the next level.
@@ -205,6 +292,50 @@ impl ActorProgression {
             }
         }
         Self::from_levels(ids.into_iter().map(|id| (id, 1)))
+    }
+
+    /// Export exact progression state in stable skill-ID order.
+    pub fn export_snapshot(&self) -> ActorProgressionSnapshot {
+        ActorProgressionSnapshot::new(
+            self.skills
+                .iter()
+                .map(|(id, track)| {
+                    SkillProgressionSnapshot::new(
+                        id.as_str(),
+                        ProgressionTrackSnapshot::new(track.level, track.xp),
+                    )
+                })
+                .collect(),
+            ProgressionTrackSnapshot::new(self.hp.level, self.hp.xp),
+            ProgressionTrackSnapshot::new(self.mana.level, self.mana.xp),
+        )
+    }
+
+    /// Restore exact state, requiring the saved and initialized skill rosters to match.
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: &ActorProgressionSnapshot,
+    ) -> Result<(), ProgressionError> {
+        let hp = track_from_snapshot(Proficiency::Hp, snapshot.hp)?;
+        let mana = track_from_snapshot(Proficiency::Mana, snapshot.mana)?;
+        let mut skills = BTreeMap::new();
+        for saved in &snapshot.skills {
+            let id = SkillId::new(saved.skill_id.clone());
+            if !self.skills.contains_key(&id) {
+                return Err(ProgressionError::UnknownSavedSkill(id));
+            }
+            let track = track_from_snapshot(Proficiency::Skill(id.clone()), saved.track)?;
+            if skills.insert(id.clone(), track).is_some() {
+                return Err(ProgressionError::DuplicateSavedSkill(id));
+            }
+        }
+        if let Some(missing) = self.skills.keys().find(|id| !skills.contains_key(*id)) {
+            return Err(ProgressionError::MissingSavedSkill(missing.clone()));
+        }
+        self.skills = skills;
+        self.hp = hp;
+        self.mana = mana;
+        Ok(())
     }
 
     /// Train a skill because one of its effects executed. Errors loudly if the
@@ -310,6 +441,31 @@ impl ActorProgression {
     }
 }
 
+fn track_from_snapshot(
+    proficiency: Proficiency,
+    snapshot: ProgressionTrackSnapshot,
+) -> Result<Track, ProgressionError> {
+    if snapshot.level < 1 {
+        return Err(ProgressionError::InvalidSavedLevel {
+            proficiency,
+            level: snapshot.level,
+        });
+    }
+    let xp_to_next = balance::xp_to_next(snapshot.level);
+    if snapshot.xp >= xp_to_next {
+        return Err(ProgressionError::InvalidSavedXp {
+            proficiency,
+            level: snapshot.level,
+            xp: snapshot.xp,
+            xp_to_next,
+        });
+    }
+    Ok(Track {
+        level: snapshot.level,
+        xp: snapshot.xp,
+    })
+}
+
 /// Convert a continuous training amount into whole XP, rounded up so any
 /// positive amount trains at least one XP.
 fn xp_from_amount(amount: f64, per_unit: u64) -> u64 {
@@ -325,6 +481,113 @@ mod tests {
         ActorProgression::from_levels(skills.iter().map(|(id, lvl)| (SkillId::new(*id), *lvl)))
     }
 
+    #[test]
+    fn snapshot_round_trips_exact_levels_and_xp_through_serde() {
+        let mut source = prog(&[("a", 2), ("b", 3)]);
+        for _ in 0..17 {
+            source.record_effect_use(&SkillId::new("a")).unwrap();
+        }
+        source.record_damage_taken(135.0);
+        source.record_mana_spent(73.0);
+        let json = serde_json::to_string(&source.export_snapshot()).unwrap();
+        let snapshot: ActorProgressionSnapshot = serde_json::from_str(&json).unwrap();
+        let mut restored = prog(&[("a", 1), ("b", 1)]);
+        restored.restore_snapshot(&snapshot).unwrap();
+        assert_eq!(restored, source);
+        assert_eq!(restored.export_snapshot(), snapshot);
+    }
+
+    #[test]
+    fn restore_rejects_level_below_one() {
+        let mut p = prog(&[]);
+        let snapshot = ActorProgressionSnapshot::new(
+            vec![],
+            ProgressionTrackSnapshot::new(0, 0),
+            ProgressionTrackSnapshot::new(1, 0),
+        );
+        assert!(matches!(
+            p.restore_snapshot(&snapshot),
+            Err(ProgressionError::InvalidSavedLevel { level: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn restore_rejects_xp_at_or_above_next_level_cost() {
+        for xp in [100, 101] {
+            let mut p = prog(&[]);
+            let snapshot = ActorProgressionSnapshot::new(
+                vec![],
+                ProgressionTrackSnapshot::new(1, xp),
+                ProgressionTrackSnapshot::new(1, 0),
+            );
+            assert!(
+                matches!(p.restore_snapshot(&snapshot), Err(ProgressionError::InvalidSavedXp { xp: saved, xp_to_next: 100, .. }) if saved == xp)
+            );
+        }
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_skill_ids() {
+        let mut p = prog(&[("a", 1)]);
+        let saved = SkillProgressionSnapshot::new("a", ProgressionTrackSnapshot::new(1, 0));
+        let snapshot = ActorProgressionSnapshot::new(
+            vec![saved.clone(), saved],
+            ProgressionTrackSnapshot::new(1, 0),
+            ProgressionTrackSnapshot::new(1, 0),
+        );
+        assert_eq!(
+            p.restore_snapshot(&snapshot),
+            Err(ProgressionError::DuplicateSavedSkill(SkillId::new("a")))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_saved_unknown_skill() {
+        let mut p = prog(&[("a", 1)]);
+        let snapshot = ActorProgressionSnapshot::new(
+            vec![SkillProgressionSnapshot::new(
+                "other",
+                ProgressionTrackSnapshot::new(1, 0),
+            )],
+            ProgressionTrackSnapshot::new(1, 0),
+            ProgressionTrackSnapshot::new(1, 0),
+        );
+        assert_eq!(
+            p.restore_snapshot(&snapshot),
+            Err(ProgressionError::UnknownSavedSkill(SkillId::new("other")))
+        );
+    }
+
+    #[test]
+    fn restore_rejects_omitted_known_skill() {
+        let mut p = prog(&[("a", 1), ("b", 1)]);
+        let snapshot = ActorProgressionSnapshot::new(
+            vec![SkillProgressionSnapshot::new(
+                "a",
+                ProgressionTrackSnapshot::new(1, 0),
+            )],
+            ProgressionTrackSnapshot::new(1, 0),
+            ProgressionTrackSnapshot::new(1, 0),
+        );
+        assert_eq!(
+            p.restore_snapshot(&snapshot),
+            Err(ProgressionError::MissingSavedSkill(SkillId::new("b")))
+        );
+    }
+
+    #[test]
+    fn failed_restore_does_not_mutate_actor() {
+        let mut p = prog(&[("a", 1)]);
+        p.record_damage_taken(25.0);
+        let before = p.clone();
+        let snapshot = ActorProgressionSnapshot::new(
+            vec![],
+            ProgressionTrackSnapshot::new(2, 3),
+            ProgressionTrackSnapshot::new(2, 4),
+        );
+        assert!(p.restore_snapshot(&snapshot).is_err());
+        assert_eq!(p, before);
+    }
     #[test]
     fn level_cost_is_strictly_increasing() {
         let mut prev = 0;

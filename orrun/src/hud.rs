@@ -543,6 +543,8 @@ pub fn draw_loot_windows(session: &mut WorldSession, world: &mut World, frame: &
 
 pub fn draw_summon_window(session: &mut WorldSession, world: &mut World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
+    draw_skill_window(session, world, frame);
+    draw_level_up_notice(&ctx, session);
     if ctx.input(|input| input.key_pressed(egui::Key::O)) {
         let open = !session.summon_open();
         session.set_summon_open(open);
@@ -595,4 +597,158 @@ pub fn draw_summon_window(session: &mut WorldSession, world: &mut World, frame: 
 
 pub fn draw_world_loot(session: &mut WorldSession, world: &mut World, frame: &Frame) {
     draw_loot_windows(session, world, frame);
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressionRow {
+    label: String,
+    level: i32,
+    xp: u64,
+    xp_total: u64,
+}
+
+impl ProgressionRow {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+    pub fn xp(&self) -> u64 {
+        self.xp
+    }
+    pub fn xp_total(&self) -> u64 {
+        self.xp_total
+    }
+    pub fn progress(&self) -> f32 {
+        self.xp as f32 / self.xp_total as f32
+    }
+}
+
+pub fn progression_report(session: &WorldSession) -> Vec<ProgressionRow> {
+    let progression = session.combat().player_progression();
+    let data = session.game_data();
+    let mut rows = Vec::new();
+    for id in progression.skills() {
+        let skill = data
+            .skill(id)
+            .unwrap_or_else(|| panic!("player knows unknown skill {id}"));
+        let level = progression.skill_level(id).expect("known skill level");
+        let xp = progression.skill_xp(id).expect("known skill XP");
+        let remaining = progression
+            .skill_xp_to_next(id)
+            .expect("known skill XP threshold");
+        rows.push(ProgressionRow {
+            label: skill.name().to_string(),
+            level,
+            xp,
+            xp_total: xp + remaining,
+        });
+    }
+    let hp_xp = progression.hp_xp();
+    rows.push(ProgressionRow {
+        label: "HP".to_string(),
+        level: progression.hp_level(),
+        xp: hp_xp,
+        xp_total: hp_xp + progression.hp_xp_to_next(),
+    });
+    let mana_xp = progression.mana_xp();
+    rows.push(ProgressionRow {
+        label: "Mana".to_string(),
+        level: progression.mana_level(),
+        xp: mana_xp,
+        xp_total: mana_xp + progression.mana_xp_to_next(),
+    });
+    rows
+}
+
+fn paint_progression_row(ui: &mut egui::Ui, row: &ProgressionRow) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(row.label()).size(15.0).color(INK));
+        ui.label(
+            egui::RichText::new(format!("Level {}", row.level()))
+                .size(14.0)
+                .color(MUTED),
+        );
+    });
+    ui.add(
+        egui::ProgressBar::new(row.progress())
+            .desired_width(320.0)
+            .text(format!("{} / {} XP", row.xp(), row.xp_total())),
+    );
+    ui.add_space(5.0);
+}
+
+pub fn draw_skill_window(session: &mut WorldSession, world: &mut World, frame: &Frame) {
+    let ctx = frame.ui.ctx().clone();
+    if ctx.input(|input| input.key_pressed(egui::Key::K)) {
+        session.set_skill_open(!session.skill_open());
+        world.set_pointer_lock(false);
+    }
+    if !session.skill_open() {
+        return;
+    }
+    let rows = progression_report(session);
+    let mut open = true;
+    frame.ui.modal("Skills", &mut open, |panel, modal_open| {
+        let ui = panel.ui();
+        ui.label(
+            egui::RichText::new("Known skills and resource proficiencies")
+                .size(13.0)
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+        for row in &rows {
+            paint_progression_row(ui, row);
+        }
+        if ui.button("Close").clicked() {
+            *modal_open = false;
+        }
+    });
+    session.set_skill_open(open);
+}
+
+pub fn draw_level_up_notice(ctx: &egui::Context, session: &WorldSession) {
+    let Some(notice) = session.current_level_up_notice() else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    egui::Area::new(egui::Id::new("level_up_notice"))
+        .fixed_pos(egui::pos2(
+            screen.width() * 0.5 - 130.0,
+            screen.height() * 0.28,
+        ))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} reached level {}",
+                    notice.name(),
+                    notice.level()
+                ))
+                .size(24.0)
+                .color(Color32::from_rgb(240, 210, 100)),
+            );
+        });
+}
+
+#[cfg(test)]
+mod progression_view_tests {
+    use super::ProgressionRow;
+
+    #[test]
+    fn progression_row_reports_exact_progress() {
+        let row = ProgressionRow {
+            label: "Pyromancy".to_string(),
+            level: 3,
+            xp: 225,
+            xp_total: 900,
+        };
+        assert_eq!(row.label(), "Pyromancy");
+        assert_eq!(row.level(), 3);
+        assert_eq!(row.xp(), 225);
+        assert_eq!(row.xp_total(), 900);
+        assert_eq!(row.progress(), 0.25);
+    }
 }

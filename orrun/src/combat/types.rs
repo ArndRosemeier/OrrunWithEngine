@@ -2,12 +2,87 @@
 
 use std::collections::BTreeMap;
 
+use thiserror::Error;
+
 use super::log::CombatLog;
 use super::math::*;
 use super::sheets::{player_stats, PlayerStats};
 use crate::gamedata::{ActionId, FactionId, MobId, MobMode};
-use crate::progression::ActorProgression;
+use crate::progression::{ActorProgression, ActorProgressionSnapshot, ProgressionError};
 use crate::resolution::{Actor, Resolution, Resolver, TargetSelection};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerSaveSnapshot {
+    progression: ActorProgressionSnapshot,
+    hp: f64,
+    mana: f64,
+}
+
+impl PlayerSaveSnapshot {
+    pub fn new(progression: ActorProgressionSnapshot, hp: f64, mana: f64) -> Self {
+        Self {
+            progression,
+            hp,
+            mana,
+        }
+    }
+    pub fn progression(&self) -> &ActorProgressionSnapshot {
+        &self.progression
+    }
+    pub fn hp(&self) -> f64 {
+        self.hp
+    }
+    pub fn mana(&self) -> f64 {
+        self.mana
+    }
+}
+
+impl serde::Serialize for PlayerSaveSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Dto<'a> {
+            progression: &'a ActorProgressionSnapshot,
+            hp: f64,
+            mana: f64,
+        }
+        Dto {
+            progression: &self.progression,
+            hp: self.hp,
+            mana: self.mana,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PlayerSaveSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Dto {
+            progression: ActorProgressionSnapshot,
+            hp: f64,
+            mana: f64,
+        }
+        let dto = Dto::deserialize(deserializer)?;
+        Ok(Self::new(dto.progression, dto.hp, dto.mana))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum PlayerSaveError {
+    #[error(transparent)]
+    Progression(#[from] ProgressionError),
+    #[error("saved player {resource} must be finite, got {value}")]
+    NonFiniteResource { resource: &'static str, value: f64 },
+    #[error("saved player HP must be greater than zero, got {0}")]
+    DeadPlayer(f64),
+    #[error("saved player {resource} {value} is outside 0..={maximum}")]
+    ResourceOutOfRange {
+        resource: &'static str,
+        value: f64,
+        maximum: f64,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct CombatResources {
@@ -628,6 +703,28 @@ fn detection_probability(a: &WorldHostile, x: f64, z: f64) -> f64 {
     sight.max(hearing).clamp(0.0, 1.0)
 }
 
+fn validate_resource(
+    resource: &'static str,
+    value: f64,
+    maximum: f64,
+    reject_zero: bool,
+) -> Result<(), PlayerSaveError> {
+    if !value.is_finite() {
+        return Err(PlayerSaveError::NonFiniteResource { resource, value });
+    }
+    if reject_zero && value <= 0.0 {
+        return Err(PlayerSaveError::DeadPlayer(value));
+    }
+    if value < 0.0 || value > maximum {
+        return Err(PlayerSaveError::ResourceOutOfRange {
+            resource,
+            value,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 impl WorldCombat {
     pub fn game_data(&self) -> Option<&std::sync::Arc<crate::gamedata::GameData>> {
         self.game_data.as_ref()
@@ -649,6 +746,47 @@ impl WorldCombat {
 
     pub fn player_progression(&self) -> &ActorProgression {
         &self.player.progression
+    }
+
+    /// Export one internally consistent player snapshot. Dead players are not saveable.
+    pub fn export_player_save(&self) -> Result<PlayerSaveSnapshot, PlayerSaveError> {
+        validate_resource(
+            "HP",
+            self.player.resources.hp,
+            self.player.progression.hp_max(),
+            true,
+        )?;
+        validate_resource(
+            "mana",
+            self.player.resources.mana,
+            self.player.progression.mana_max(),
+            false,
+        )?;
+        Ok(PlayerSaveSnapshot::new(
+            self.player.progression.export_snapshot(),
+            self.player.resources.hp,
+            self.player.resources.mana,
+        ))
+    }
+
+    /// Validate progression and resources on temporary state, then commit atomically.
+    pub fn restore_player_save(
+        &mut self,
+        snapshot: &PlayerSaveSnapshot,
+    ) -> Result<(), PlayerSaveError> {
+        let mut progression = self.player.progression.clone();
+        progression.restore_snapshot(snapshot.progression())?;
+        let hp_max = progression.hp_max();
+        let mana_max = progression.mana_max();
+        validate_resource("HP", snapshot.hp(), hp_max, true)?;
+        validate_resource("mana", snapshot.mana(), mana_max, false)?;
+        self.player.progression = progression;
+        self.player.resources.hp_max = hp_max;
+        self.player.resources.mana_max = mana_max;
+        self.player.resources.hp = snapshot.hp();
+        self.player.resources.mana = snapshot.mana();
+        self.dead = false;
+        Ok(())
     }
 
     fn initialize_canonical_player(&mut self) {
@@ -2477,5 +2615,95 @@ mod tests {
         c.finish_death_respawn();
         assert!(c.slain_by.is_none());
         assert!(!c.dead);
+    }
+
+    #[test]
+    fn player_save_restore_is_exact_and_atomic() {
+        let mut combat = canonical_combat();
+        let before = combat.export_player_save().unwrap();
+        let progression = ActorProgressionSnapshot::new(
+            before.progression().skills().to_vec(),
+            crate::progression::ProgressionTrackSnapshot::new(2, 9),
+            crate::progression::ProgressionTrackSnapshot::new(3, 11),
+        );
+        let snapshot = PlayerSaveSnapshot::new(progression, 81.0, 42.0);
+        combat.restore_player_save(&snapshot).unwrap();
+        assert_eq!(combat.export_player_save().unwrap(), snapshot);
+
+        let invalid = PlayerSaveSnapshot::new(snapshot.progression().clone(), 10_000.0, 1.0);
+        assert!(matches!(
+            combat.restore_player_save(&invalid),
+            Err(PlayerSaveError::ResourceOutOfRange { .. })
+        ));
+        assert_eq!(combat.export_player_save().unwrap(), snapshot);
+    }
+
+    #[test]
+    fn invalid_player_snapshots_are_rejected_without_mutation() {
+        let mut combat = canonical_combat();
+        let before = combat.export_player_save().unwrap();
+        let tracks = before.progression().skills();
+        let cases = vec![
+            ActorProgressionSnapshot::new(
+                tracks[..tracks.len() - 1].to_vec(),
+                before.progression().hp(),
+                before.progression().mana(),
+            ),
+            ActorProgressionSnapshot::new(
+                [tracks.to_vec(), vec![tracks[0].clone()]].concat(),
+                before.progression().hp(),
+                before.progression().mana(),
+            ),
+            ActorProgressionSnapshot::new(
+                vec![crate::progression::SkillProgressionSnapshot::new(
+                    "unknown",
+                    crate::progression::ProgressionTrackSnapshot::new(1, 0),
+                )],
+                before.progression().hp(),
+                before.progression().mana(),
+            ),
+            ActorProgressionSnapshot::new(
+                tracks.to_vec(),
+                crate::progression::ProgressionTrackSnapshot::new(0, 0),
+                before.progression().mana(),
+            ),
+            ActorProgressionSnapshot::new(
+                tracks.to_vec(),
+                crate::progression::ProgressionTrackSnapshot::new(
+                    1,
+                    crate::progression::balance::xp_to_next(1),
+                ),
+                before.progression().mana(),
+            ),
+        ];
+        for progression in cases {
+            assert!(combat
+                .restore_player_save(&PlayerSaveSnapshot::new(
+                    progression,
+                    before.hp(),
+                    before.mana()
+                ))
+                .is_err());
+            assert_eq!(combat.export_player_save().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn dead_and_non_finite_resources_are_not_saveable() {
+        let mut combat = canonical_combat();
+        combat.player.resources.hp = 0.0;
+        assert!(matches!(
+            combat.export_player_save(),
+            Err(PlayerSaveError::DeadPlayer(0.0))
+        ));
+        combat.player.resources.hp = 1.0;
+        combat.player.resources.mana = f64::NAN;
+        assert!(matches!(
+            combat.export_player_save(),
+            Err(PlayerSaveError::NonFiniteResource {
+                resource: "mana",
+                ..
+            })
+        ));
     }
 }

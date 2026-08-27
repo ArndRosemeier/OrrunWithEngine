@@ -24,7 +24,8 @@ pub use sheets::{
 pub use sim::{fixture_scenario_1, match_published_rows, run_all, run_scenario, simulate_fight};
 pub use types::{
     melee_auto_legal, tab_candidates, ActorId, Aggro, CanonicalHeading, CombatResources,
-    HostileState, LivePlayer, Shaken, SpawnSeed, TargetLock, WorldCombat, WorldHostile,
+    HostileState, LivePlayer, PlayerSaveError, PlayerSaveSnapshot, Shaken, SpawnSeed, TargetLock,
+    WorldCombat, WorldHostile,
 };
 pub use verbs::CombatVerb;
 

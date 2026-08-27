@@ -11,7 +11,7 @@
 //! player. The mouse is captured only once they click in the world, and the
 //! window gives it back on Escape or when it loses focus.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -326,6 +326,41 @@ struct TravelState {
     handoffs: u32,
 }
 
+const LEVEL_UP_NOTICE_S: f32 = 2.4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LevelUpNotice {
+    name: String,
+    level: i32,
+}
+
+impl LevelUpNotice {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn level(&self) -> i32 {
+        self.level
+    }
+}
+
+fn level_up_notice(
+    data: &crate::gamedata::GameData,
+    event: crate::progression::LevelUpEvent,
+) -> LevelUpNotice {
+    let name = match event.proficiency {
+        crate::progression::Proficiency::Skill(id) => data
+            .skill(&id)
+            .unwrap_or_else(|| panic!("level-up references unknown skill {id}"))
+            .name()
+            .to_string(),
+        crate::progression::Proficiency::Hp => "HP".to_string(),
+        crate::progression::Proficiency::Mana => "Mana".to_string(),
+    };
+    LevelUpNotice {
+        name,
+        level: event.new_level,
+    }
+}
 pub struct WorldSession {
     game_data: Arc<crate::gamedata::GameData>,
     surface: Arc<ContinentalSurface>,
@@ -371,6 +406,9 @@ pub struct WorldSession {
     loot_open: bool,
     loot_target: Option<i32>,
     summon_open: bool,
+    skill_open: bool,
+    level_up_queue: VecDeque<LevelUpNotice>,
+    current_level_up: Option<(LevelUpNotice, f32)>,
     pending_held_fixture: Option<HeldFixtureRequest>,
     last_shrine: Option<GlobalPlace>,
     key_binds: KeyBinds,
@@ -439,6 +477,9 @@ impl WorldSession {
             loot_open: false,
             loot_target: None,
             summon_open: false,
+            skill_open: false,
+            level_up_queue: VecDeque::new(),
+            current_level_up: None,
             pending_held_fixture: None,
             last_shrine: None,
             key_binds: KeyBinds::default(),
@@ -515,6 +556,37 @@ impl WorldSession {
         self.loot_target.filter(|_| self.loot_open)
     }
 
+    pub fn skill_open(&self) -> bool {
+        self.skill_open
+    }
+    pub fn set_skill_open(&mut self, open: bool) {
+        self.skill_open = open;
+    }
+    pub fn current_level_up_notice(&self) -> Option<&LevelUpNotice> {
+        self.current_level_up.as_ref().map(|(notice, _)| notice)
+    }
+    fn queue_level_ups(&mut self, events: Vec<crate::progression::LevelUpEvent>) {
+        self.level_up_queue.extend(
+            events
+                .into_iter()
+                .map(|event| level_up_notice(&self.game_data, event)),
+        );
+        self.start_next_level_up_notice();
+    }
+    fn advance_level_up_notices(&mut self, dt: f32) {
+        if let Some((_, elapsed)) = &mut self.current_level_up {
+            *elapsed += dt;
+            if *elapsed >= LEVEL_UP_NOTICE_S {
+                self.current_level_up = None;
+            }
+        }
+        self.start_next_level_up_notice();
+    }
+    fn start_next_level_up_notice(&mut self) {
+        if self.current_level_up.is_none() {
+            self.current_level_up = self.level_up_queue.pop_front().map(|notice| (notice, 0.0));
+        }
+    }
     pub fn summon_open(&self) -> bool {
         self.summon_open
     }
@@ -1061,38 +1133,28 @@ impl WorldSession {
         self.key_binds = binds;
     }
 
-    pub fn apply_save(&mut self, stand: &crate::save::SavedStand) {
-        self.combat.player_mut().stats.level = stand.level;
-        self.combat.player_mut().xp = stand.xp;
-        self.combat.player_mut().resources.set_hp(stand.hp);
-        self.combat.player_mut().resources.set_mana(stand.mana);
-        self.combat.player_mut().stats.attrs = stand.attrs;
-        self.combat.player_mut().stats.ranks = stand.ranks;
-        if stand.shaken_until > 0.0 {
-            self.combat.player_mut().shaken = Some(crate::combat::Shaken {
-                remaining_s: stand.shaken_until,
-            });
-        } else {
-            self.combat.player_mut().shaken = None;
-        }
-        self.last_shrine = stand.last_shrine.map(|s| s.to_place());
+    pub fn apply_save(
+        &mut self,
+        stand: &crate::save::SavedStand,
+    ) -> Result<(), crate::combat::PlayerSaveError> {
+        self.combat.restore_player_save(&stand.player)?;
+        self.last_shrine = stand.last_shrine.map(crate::save::SavedShrine::to_place);
         self.inventory = stand.inventory;
+        Ok(())
     }
 
     pub fn saved_full(&self, seed: i32, size: usize) -> Option<crate::save::SavedStand> {
         let (at, heading) = self.saved_stand()?;
-        let p = self.combat.player();
-        let mut stand = crate::save::SavedStand::new(seed, size, at, heading);
-        stand.level = p.stats.level;
-        stand.xp = p.xp;
-        stand.hp = p.resources.hp();
-        stand.mana = p.resources.mana();
-        stand.attrs = p.stats.attrs;
-        stand.ranks = p.stats.ranks;
-        stand.shaken_until = p.shaken.as_ref().map(|s| s.remaining_s).unwrap_or(0.0);
-        stand.last_shrine = self.last_shrine().map(crate::save::SavedShrine::from_place);
-        stand.inventory = self.inventory;
-        Some(stand)
+        let player = self.combat.export_player_save().ok()?;
+        Some(crate::save::SavedStand::new(
+            seed,
+            size,
+            at,
+            heading,
+            player,
+            self.last_shrine().map(crate::save::SavedShrine::from_place),
+            self.inventory,
+        ))
     }
 
     pub fn surface(&self) -> &ContinentalSurface {
@@ -1334,7 +1396,7 @@ impl WorldSession {
                     world.set_pointer_lock(false);
                 }
             }
-            let ui_open = self.bag_open || self.loot_open;
+            let ui_open = self.bag_open || self.loot_open || self.skill_open || self.summon_open;
             if ui_open {
                 world.set_pointer_lock(false);
             } else if input.capture_look {
@@ -2003,6 +2065,7 @@ impl WorldSession {
     }
 
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
+        self.advance_level_up_notices(input.dt);
         self.seat_pending_held_fixture(world)?;
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
@@ -2207,6 +2270,8 @@ impl WorldSession {
                 facing.z as f64,
                 f64::from(input.dt),
             );
+            let level_ups = self.combat_layer.take_player_level_ups();
+            self.queue_level_ups(level_ups);
             let py = player.position.y;
             let feet: Vec<(f64, f64, f64)> = self
                 .combat
@@ -3040,5 +3105,49 @@ fn apply_walk_height(player: &mut Player, ground: Option<f32>, jump: bool, dt: f
             player.vy = 0.0;
             player.airborne = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod level_up_notice_tests {
+    use super::*;
+    use crate::progression::{LevelUpEvent, LevelUpResult, Proficiency};
+
+    fn canonical_data() -> crate::gamedata::GameData {
+        crate::gamedata::GameData::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml"),
+        )
+        .expect("canonical GameData")
+    }
+
+    #[test]
+    fn typed_events_use_player_facing_notice_names() {
+        let data = canonical_data();
+        let skill = data.skills().first().expect("canonical skill");
+        let skill_notice = level_up_notice(
+            &data,
+            LevelUpEvent {
+                proficiency: Proficiency::Skill(skill.id().clone()),
+                old_level: 1,
+                new_level: 2,
+                result: LevelUpResult::Skill,
+            },
+        );
+        assert_eq!(skill_notice.name(), skill.name());
+        assert_eq!(skill_notice.level(), 2);
+
+        let hp_notice = level_up_notice(
+            &data,
+            LevelUpEvent {
+                proficiency: Proficiency::Hp,
+                old_level: 2,
+                new_level: 3,
+                result: LevelUpResult::Resource {
+                    max_before: 112.0,
+                    max_after: 124.0,
+                },
+            },
+        );
+        assert_eq!(hp_notice.name(), "HP");
     }
 }

@@ -137,6 +137,42 @@ pub struct AppliedEffect {
     pub applied: Vec<f64>,
 }
 
+/// Stable canonical identity for an actor referenced by resolution events.
+///
+/// This is deliberately distinct from the transient index used to address the
+/// `actors` slice during one resolver call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct ResolutionActorId {
+    canonical: u32,
+}
+
+impl ResolutionActorId {
+    pub const fn new(canonical: u32) -> Self {
+        Self { canonical }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.canonical
+    }
+}
+
+/// A progression event attributed to the actor whose progression changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributedLevelUpEvent {
+    actor: ResolutionActorId,
+    event: LevelUpEvent,
+}
+
+impl AttributedLevelUpEvent {
+    pub const fn actor(&self) -> ResolutionActorId {
+        self.actor
+    }
+
+    pub const fn event(&self) -> &LevelUpEvent {
+        &self.event
+    }
+}
+
 /// The complete, typed result of resolving one action.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
@@ -145,7 +181,7 @@ pub struct Resolution {
     pub effects: Vec<AppliedEffect>,
     pub mana_spent: f64,
     pub deaths: Vec<usize>,
-    pub level_ups: Vec<LevelUpEvent>,
+    pub level_ups: Vec<AttributedLevelUpEvent>,
 }
 
 struct PlannedEffect {
@@ -269,22 +305,26 @@ impl<'a> Resolver<'a> {
         }
 
         let mut level_ups = Vec::new();
+        let caster_id = ResolutionActorId::new(actors[caster].id);
         if mana_spent > 0.0 {
-            level_ups.extend(actors[caster].progression.record_mana_spent(mana_spent));
+            append_level_ups(
+                &mut level_ups,
+                caster_id,
+                actors[caster].progression.record_mana_spent(mana_spent),
+            );
         }
 
         // Phase 3 â€” apply and record.
         let mut effects = Vec::with_capacity(planned.len());
         let mut deaths = Vec::new();
         for p in planned {
-            level_ups.extend(
-                actors[caster]
-                    .progression
-                    .record_effect_use(&p.skill_id)
-                    .map_err(|_| {
-                        ResolutionError::UnknownSkill(actors[caster].id, p.skill_id.clone())
-                    })?,
-            );
+            let skill_events = actors[caster]
+                .progression
+                .record_effect_use(&p.skill_id)
+                .map_err(|_| {
+                    ResolutionError::UnknownSkill(actors[caster].id, p.skill_id.clone())
+                })?;
+            append_level_ups(&mut level_ups, caster_id, skill_events);
             let mut applied = Vec::with_capacity(p.targets.len());
             for &target in &p.targets {
                 let amount = match p.kind {
@@ -292,7 +332,9 @@ impl<'a> Resolver<'a> {
                         let raw = mitigate(p.magnitude, actors[target].armor);
                         let dealt = actors[target].take_damage(raw);
                         if dealt > 0.0 {
-                            level_ups.extend(actors[target].progression.record_damage_taken(dealt));
+                            let target_id = ResolutionActorId::new(actors[target].id);
+                            let hp_events = actors[target].progression.record_damage_taken(dealt);
+                            append_level_ups(&mut level_ups, target_id, hp_events);
                         }
                         if !actors[target].alive && !deaths.contains(&target) {
                             deaths.push(target);
@@ -324,6 +366,18 @@ impl<'a> Resolver<'a> {
             level_ups,
         })
     }
+}
+
+fn append_level_ups(
+    attributed: &mut Vec<AttributedLevelUpEvent>,
+    actor: ResolutionActorId,
+    events: Vec<LevelUpEvent>,
+) {
+    attributed.extend(
+        events
+            .into_iter()
+            .map(|event| AttributedLevelUpEvent { actor, event }),
+    );
 }
 
 fn class_matches(
@@ -457,6 +511,7 @@ fn select_targets(
 mod tests {
     use super::*;
     use crate::gamedata::{FactionId, MobId, ProfileId};
+    use crate::progression::Proficiency;
 
     fn data() -> GameData {
         let path =
@@ -598,6 +653,107 @@ mod tests {
                 .skill_xp(&SkillId::new("slashing_damage")),
             Some(10)
         );
+    }
+
+    #[test]
+    fn player_mana_skill_and_target_hp_level_ups_have_canonical_owners() {
+        let data = data();
+        let mut actors = vec![player(&data), wolf(&data, 10.0, 0.0)];
+        actors[0].id = 700;
+        actors[1].id = 42;
+        for _ in 0..9 {
+            actors[0]
+                .progression
+                .record_effect_use(&SkillId::new("fire_damage"))
+                .expect("player knows fire damage");
+        }
+        actors[0].progression.record_mana_spent(97.0);
+        actors[1].progression.record_damage_taken(86.0);
+
+        let resolution = Resolver::new(&data)
+            .execute(
+                &mut actors,
+                0,
+                &ActionId::new("fire_bolt"),
+                TargetSelection::Single(1),
+            )
+            .expect("fire bolt resolves");
+
+        let ownership: Vec<(u32, Proficiency)> = resolution
+            .level_ups
+            .iter()
+            .map(|attributed| {
+                (
+                    attributed.actor().get(),
+                    attributed.event().proficiency.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ownership,
+            vec![
+                (700, Proficiency::Mana),
+                (700, Proficiency::Skill(SkillId::new("fire_damage"))),
+                (42, Proficiency::Hp),
+            ]
+        );
+    }
+
+    #[test]
+    fn hostile_action_events_for_both_actors_are_unambiguous() {
+        let data = data();
+        let mut actors = vec![player(&data), wolf(&data, 1.5, 0.0)];
+        actors[0].id = 9001;
+        actors[1].id = 73;
+        for _ in 0..9 {
+            actors[1]
+                .progression
+                .record_effect_use(&SkillId::new("slashing_damage"))
+                .expect("wolf knows slashing damage");
+        }
+        actors[0].progression.record_damage_taken(92.0);
+
+        let resolution = Resolver::new(&data)
+            .execute(
+                &mut actors,
+                1,
+                &ActionId::new("strike"),
+                TargetSelection::Single(0),
+            )
+            .expect("wolf strike resolves");
+
+        assert_eq!(resolution.level_ups.len(), 2);
+        assert_eq!(resolution.level_ups[0].actor().get(), 73);
+        assert_eq!(
+            resolution.level_ups[0].event().proficiency,
+            Proficiency::Skill(SkillId::new("slashing_damage"))
+        );
+        assert_eq!(resolution.level_ups[1].actor().get(), 9001);
+        assert_eq!(resolution.level_ups[1].event().proficiency, Proficiency::Hp);
+    }
+
+    #[test]
+    fn failed_request_records_no_progression_events() {
+        let data = data();
+        let mut actors = vec![player(&data), wolf(&data, 40.0, 0.0)];
+        let player_progression_before = actors[0].progression.clone();
+        let target_progression_before = actors[1].progression.clone();
+
+        let error = Resolver::new(&data)
+            .execute(
+                &mut actors,
+                0,
+                &ActionId::new("fire_bolt"),
+                TargetSelection::Single(1),
+            )
+            .expect_err("out-of-range request must fail");
+
+        assert_eq!(
+            error,
+            ResolutionError::OutOfRange(ActionId::new("fire_bolt"))
+        );
+        assert_eq!(actors[0].progression, player_progression_before);
+        assert_eq!(actors[1].progression, target_progression_before);
     }
 
     #[test]

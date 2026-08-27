@@ -18,9 +18,14 @@ use engine::space::GlobalXZ;
 use glam::{Vec2, Vec3};
 use orrun::atlas::ContinentAtlas;
 use orrun::combat::HostileState;
+use orrun::combat::PlayerSaveSnapshot;
 use orrun::controls::{self, Action, PressedActions};
 use orrun::gamedata::{MobId, SkillId};
 use orrun::hud;
+use orrun::progression::{
+    ActorProgressionSnapshot, ProgressionTrackSnapshot, SkillProgressionSnapshot,
+};
+use orrun::save::{SaveError, SavedStand};
 use orrun::settings::Settings;
 use orrun::world::{
     install_daylight, install_materials, plan_overland_sites, resolve_spawn, Ambience, DungeonPin,
@@ -72,6 +77,8 @@ fn main() {
         "combat.png",
         "m3_wolf.json",
         "m3_animals.json",
+        "m4_progression.json",
+        "m4_progression.png",
         "hurt.png",
         "slain.png",
         "controls.json",
@@ -141,6 +148,7 @@ fn main() {
     let mut driver = Driver {
         session,
         seed: args.seed,
+        size: args.size,
         shots: shots.clone(),
         hooks: args.hooks,
         hook_i: 0,
@@ -173,6 +181,7 @@ fn main() {
         combat_tab_sent: false,
         m3_wolf: M3WolfRun::default(),
         m3_animals: M3AnimalsRun::default(),
+        m4_progression: M4ProgressionRun::default(),
         combat_shot_sent: false,
         combat_hurt_sent: false,
         combat_cd_sweep_at: None,
@@ -385,6 +394,7 @@ enum Phase {
     CombatLive,
     M3WolfLive,
     M3AnimalsLive,
+    M4ProgressionLive,
     CombatOrcLive,
     CombatDeathLive,
     LootSparkleLive,
@@ -417,6 +427,7 @@ enum Phase {
 struct Driver {
     session: WorldSession,
     seed: i32,
+    size: usize,
     shots: PathBuf,
     hooks: Vec<String>,
     hook_i: usize,
@@ -449,6 +460,7 @@ struct Driver {
     combat_tab_sent: bool,
     m3_wolf: M3WolfRun,
     m3_animals: M3AnimalsRun,
+    m4_progression: M4ProgressionRun,
     combat_shot_sent: bool,
     combat_hurt_sent: bool,
     combat_cd_sweep_at: Option<f32>,
@@ -542,6 +554,27 @@ struct M3AnimalsRun {
     observe_from: Vec<(String, f64, f64)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum M4ProgressionStage {
+    #[default]
+    Ready,
+    Tab,
+    FireBolt,
+    WaitNotices,
+}
+
+#[derive(Clone, Debug, Default)]
+struct M4ProgressionRun {
+    stage: M4ProgressionStage,
+    action_sent: bool,
+    notices: Vec<(String, i32)>,
+    last_notice: Option<(String, i32)>,
+    initial_rows: Vec<(String, i32, u64, u64)>,
+    final_rows: Vec<(String, i32, u64, u64)>,
+    round_trip: bool,
+    legacy_error: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ControlsStage {
     Tab,
@@ -595,6 +628,7 @@ impl Driver {
                 | Phase::CombatDemonLive
                 | Phase::CombatBlueDemonLive
                 | Phase::CombatTribalVeteranLive
+                | Phase::M4ProgressionLive
         ) || matches!(
             self.awaiting_shot.as_deref(),
             Some("combat")
@@ -630,6 +664,10 @@ impl Driver {
             Some("loot_sparkle") | Some("loot_modal") | Some("bag")
         ) {
             hud::draw_loot_windows(&mut self.session, world, frame);
+        }
+        if self.phase == Phase::M4ProgressionLive {
+            hud::draw_skill_window(&mut self.session, world, frame);
+            hud::draw_level_up_notice(&frame.ui.ctx().clone(), &self.session);
         }
 
         if let Some(name) = self.awaiting_shot.clone() {
@@ -725,6 +763,19 @@ impl Driver {
                 if let Some(action) = action.filter(|_| !self.m3_wolf.action_sent) {
                     input.actions = pressed(action);
                     self.m3_wolf.action_sent = true;
+                }
+            }
+            Phase::M4ProgressionLive => {
+                if self.m4_progression.stage == M4ProgressionStage::Tab
+                    && !self.m4_progression.action_sent
+                {
+                    input.tab = true;
+                    self.m4_progression.action_sent = true;
+                } else if self.m4_progression.stage == M4ProgressionStage::FireBolt
+                    && !self.m4_progression.action_sent
+                {
+                    input.actions = pressed(Action::Ember);
+                    self.m4_progression.action_sent = true;
                 }
             }
             Phase::M3AnimalsLive => {
@@ -1138,6 +1189,7 @@ impl Driver {
             Phase::CombatLive => self.tick_combat_live(world, frame),
             Phase::M3WolfLive => self.tick_m3_wolf(world, frame),
             Phase::M3AnimalsLive => self.tick_m3_animals(world, frame),
+            Phase::M4ProgressionLive => self.tick_m4_progression(world, frame),
             Phase::CombatOrcLive => self.tick_combat_orc(world, frame),
             Phase::CombatDeathLive => self.tick_combat_death(world, frame),
             Phase::LootSparkleLive => self.tick_loot_sparkle(world, frame),
@@ -1185,6 +1237,7 @@ impl Driver {
             "bind" => self.start_bind(world, frame),
             "combat" | "m3_wolf" => self.start_m3_wolf(world, frame),
             "m3_animals" => self.start_m3_animals(world, frame),
+            "m4_progression" => self.start_m4_progression(world, frame),
             "combat_presentation"
             | "cd_sweep"
             | "cast_bar"
@@ -3783,6 +3836,206 @@ impl Driver {
                     "loot_coin":self.m3_wolf.loot_coin, "one_time_loot_transfer":true
                 }));
                 self.ok_hook(&hook);
+                self.phase = Phase::NextHook;
+            }
+        }
+    }
+
+    fn progression_rows(&self) -> Vec<(String, i32, u64, u64)> {
+        hud::progression_report(&self.session)
+            .into_iter()
+            .map(|row| {
+                (
+                    row.label().to_string(),
+                    row.level(),
+                    row.xp(),
+                    row.xp_total(),
+                )
+            })
+            .collect()
+    }
+
+    fn start_m4_progression(&mut self, world: &mut World, frame: &Frame) {
+        self.session.rearm_held_mob_fixture(
+            world,
+            vec![HeldMobFixture::new(MobId::new("wolf"), 1.5, 0.0)],
+        );
+        let before = self
+            .session
+            .combat()
+            .export_player_save()
+            .expect("M4 player snapshot");
+        let skills = before
+            .progression()
+            .skills()
+            .iter()
+            .map(|skill| {
+                let xp = if skill.skill_id() == "fire_damage" {
+                    90
+                } else {
+                    skill.track().xp()
+                };
+                SkillProgressionSnapshot::new(
+                    skill.skill_id(),
+                    ProgressionTrackSnapshot::new(skill.track().level(), xp),
+                )
+            })
+            .collect();
+        let seeded = PlayerSaveSnapshot::new(
+            ActorProgressionSnapshot::new(
+                skills,
+                ProgressionTrackSnapshot::new(before.progression().hp().level(), 92),
+                ProgressionTrackSnapshot::new(before.progression().mana().level(), 97),
+            ),
+            before.hp(),
+            before.mana(),
+        );
+        self.session
+            .combat_mut()
+            .restore_player_save(&seeded)
+            .expect("valid M4 near-threshold snapshot");
+        self.session.set_skill_open(true);
+        self.m4_progression = M4ProgressionRun::default();
+        self.m4_progression.initial_rows = self.progression_rows();
+        self.phase = Phase::M4ProgressionLive;
+        self.phase_t0 = frame.time;
+    }
+
+    fn record_m4_notice(&mut self) {
+        let Some(notice) = self.session.current_level_up_notice() else {
+            return;
+        };
+        let current = (notice.name().to_string(), notice.level());
+        if self.m4_progression.last_notice.as_ref() != Some(&current) {
+            self.m4_progression.notices.push(current.clone());
+            self.m4_progression.last_notice = Some(current);
+        }
+    }
+
+    fn tick_m4_progression(&mut self, world: &mut World, frame: &Frame) {
+        if frame.time - self.phase_t0 > M3_HOOK_TIMEOUT_S {
+            self.fail_current("m4_progression timed out");
+            self.advance_after_fail(world, frame);
+            return;
+        }
+        self.record_m4_notice();
+        match self.m4_progression.stage {
+            M4ProgressionStage::Ready => {
+                let Some(pos) = self.session.player_position() else {
+                    return;
+                };
+                if self.session.state() != SessionState::World
+                    || !self.session.stream().required_ready(pos.horizontal())
+                    || !self.session.fixture_mesh_visible(world)
+                {
+                    return;
+                }
+                self.session.start_fixture_encounter();
+                self.m4_progression.stage = M4ProgressionStage::Tab;
+                self.m4_progression.action_sent = false;
+            }
+            M4ProgressionStage::Tab => {
+                if !self.m4_progression.action_sent || self.session.lock_id().is_none() {
+                    return;
+                }
+                self.m4_progression.stage = M4ProgressionStage::FireBolt;
+                self.m4_progression.action_sent = false;
+            }
+            M4ProgressionStage::FireBolt => {
+                if !self.m4_progression.action_sent
+                    || self.session.combat().casting_action_id().is_some()
+                {
+                    return;
+                }
+                let p = self.session.player_progression();
+                if p.skill_level(&SkillId::new("fire_damage")) != Some(2)
+                    || p.mana_level() != 2
+                    || p.hp_level() != 2
+                {
+                    return;
+                }
+                self.m4_progression.final_rows = self.progression_rows();
+                self.m4_progression.stage = M4ProgressionStage::WaitNotices;
+                self.phase_t0 = frame.time;
+                world.mark_ready();
+                self.queue_shot(world, frame, "m4_progression");
+            }
+            M4ProgressionStage::WaitNotices => {
+                if self.awaiting_shot.is_some() || self.m4_progression.notices.len() < 3 {
+                    return;
+                }
+                let expected = vec![
+                    ("HP".to_string(), 2),
+                    ("Mana".to_string(), 2),
+                    ("Fire Damage".to_string(), 2),
+                ];
+                if self.m4_progression.notices != expected {
+                    self.fail_current(&format!(
+                        "M4 notices {:?}, expected {:?}",
+                        self.m4_progression.notices, expected
+                    ));
+                    self.advance_after_fail(world, frame);
+                    return;
+                }
+                let stand = self
+                    .session
+                    .saved_full(self.seed, self.size)
+                    .expect("M4 SavedStand");
+                let save_path = self.shots.join("m4-round-trip.json");
+                stand.write_at(&save_path).expect("isolated M4 save write");
+                let read = SavedStand::read_at(&save_path, self.seed, self.size)
+                    .expect("isolated M4 save read")
+                    .expect("M4 save exists");
+                let fresh_atlas = ContinentAtlas::generate(self.seed, self.size);
+                let fresh_surface = Arc::new(
+                    orrun::world::ContinentalSurface::new(&fresh_atlas)
+                        .expect("fresh M4 canonical surface"),
+                );
+                let mut fresh = WorldSession::new(fresh_surface).with_instant_travel();
+                fresh.apply_save(&read).expect("fresh M4 apply");
+                let fresh_saved = fresh.combat().export_player_save().expect("fresh player");
+                let shrine_round_trip = match (fresh.last_shrine(), read.last_shrine) {
+                    (None, None) => true,
+                    (Some(actual), Some(expected)) => {
+                        actual.position.x == expected.x
+                            && actual.position.y == expected.y
+                            && actual.position.z == expected.z
+                            && actual.yaw_degrees == expected.yaw_degrees
+                    }
+                    _ => false,
+                };
+                self.m4_progression.round_trip = fresh_saved == read.player
+                    && fresh.inventory() == &read.inventory
+                    && shrine_round_trip
+                    && read == stand;
+                let legacy_path = self.shots.join("m4-legacy-3.json");
+                fs::write(
+                    &legacy_path,
+                    format!(
+                        r#"{{"format":3,"seed":{},"size":{}}}"#,
+                        self.seed, self.size
+                    ),
+                )
+                .expect("legacy fixture");
+                self.m4_progression.legacy_error =
+                    match SavedStand::read_at(&legacy_path, self.seed, self.size) {
+                        Err(SaveError::IncompatibleFormat { found, .. }) if found == "3" => {
+                            "incompatible format 3".to_string()
+                        }
+                        other => panic!("legacy format 3 did not fail clearly: {other:?}"),
+                    };
+                let _ = fs::remove_file(save_path);
+                let _ = fs::remove_file(legacy_path);
+                if !self.m4_progression.round_trip {
+                    panic!("M4 save/apply round-trip mismatch");
+                }
+                self.write_json("m4_progression", json!({
+                    "status":"ok", "window":"Skills", "rows_before":self.m4_progression.initial_rows,
+                    "rows_after":self.m4_progression.final_rows, "notices":self.m4_progression.notices,
+                    "hostile_notices":false, "saved_stand_round_trip":true,
+                    "legacy_format_3":self.m4_progression.legacy_error, "shot":"m4_progression.png"
+                }));
+                self.ok_hook("m4_progression");
                 self.phase = Phase::NextHook;
             }
         }

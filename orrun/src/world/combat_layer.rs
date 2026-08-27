@@ -17,6 +17,7 @@ use crate::combat::sheets::{
 use crate::combat::types::{SpecialAttackCue, SpecialAttackEvent, WorldCombat, WorldHostile};
 use crate::combat::Discipline;
 use crate::gamedata::EffectKind;
+use crate::progression::LevelUpEvent;
 use crate::resolution::Resolution;
 use engine::anim::{AnimatedModel, AnimationAction, AnimationProfile, Locomotion};
 use engine::color::Color;
@@ -151,6 +152,7 @@ pub struct CombatLayer {
     swing_whoosh: bool,
     hit_flash: bool,
     pending_sfx: Vec<CombatSfx>,
+    pending_level_ups: Vec<LevelUpEvent>,
     pending_flinch: Option<i32>,
     pending_fire_bolts: Vec<i32>,
     vfx: VfxSystem,
@@ -188,6 +190,7 @@ impl CombatLayer {
             swing_whoosh: false,
             hit_flash: false,
             pending_sfx: Vec::new(),
+            pending_level_ups: Vec::new(),
             pending_flinch: None,
             pending_fire_bolts: Vec::new(),
             vfx: VfxSystem::new(),
@@ -202,6 +205,11 @@ impl CombatLayer {
             death_posed: HashSet::new(),
             sparkles: HashMap::new(),
         }
+    }
+
+    /// Drain player-facing typed level-up events produced while presenting resolutions.
+    pub fn take_player_level_ups(&mut self) -> Vec<LevelUpEvent> {
+        std::mem::take(&mut self.pending_level_ups)
     }
 
     pub fn fixture_ready(&self) -> bool {
@@ -1258,8 +1266,15 @@ impl CombatLayer {
     }
 
     fn present_resolutions(&mut self, combat: &mut WorldCombat, resolutions: Vec<Resolution>) {
-        for resolution in resolutions {
+        for mut resolution in resolutions {
             let caster_is_player = resolution.caster == 0;
+            self.pending_level_ups.extend(
+                resolution
+                    .level_ups
+                    .drain(..)
+                    .filter(|attributed| attributed.actor().get() == 0)
+                    .map(|attributed| attributed.event().clone()),
+            );
             for effect in resolution.effects {
                 for (&target, &applied) in effect.targets.iter().zip(&effect.applied) {
                     if applied <= 0.0 {
