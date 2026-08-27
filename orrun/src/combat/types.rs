@@ -1717,9 +1717,13 @@ impl WorldCombat {
                             actor.state = HostileState::Alerted;
                         }
                         MobMode::Passive if mode == MobMode::Active => {
-                            actor.flee_threat = Some(id);
-                            actor.target = None;
-                            actor.state = HostileState::Fleeing;
+                            // A damaged passive actor has committed to retaliation.
+                            // Ambient prey perception must not overwrite that combat state.
+                            if actor.provoked_by.is_none() {
+                                actor.flee_threat = Some(id);
+                                actor.target = None;
+                                actor.state = HostileState::Fleeing;
+                            }
                         }
                         MobMode::Passive => {}
                     }
@@ -2241,6 +2245,27 @@ mod tests {
         assert_eq!(neutral_threat.hostiles[0].state, HostileState::Idle);
         assert_eq!(neutral_threat.hostiles[0].flee_threat, None);
     }
+    #[test]
+    fn provoked_passive_actor_does_not_replace_retaliation_with_flight() {
+        let mut c = canonical_combat();
+        c.clear_hostiles();
+        let deer_sheet = c.mob_sheet("deer");
+        let mut deer = WorldHostile::from_sheet(0, 3.0, 0.0, &deer_sheet, "deer", 3.0, 0.0);
+        deer.aggro.sight_m = 100.0;
+        deer.spawn_seed = SpawnSeed::new(0);
+        deer.detection_left_s = 0.0;
+        c.add_hostile(deer);
+        c.apply_damage_to_hostile(0, 1);
+
+        for _ in 0..32 {
+            c.tick_hostile_ai(0.0, 0.0, DETECTION_INTERVAL_S);
+            assert_eq!(c.hostiles[0].provoked_by, Some(ActorId::PLAYER));
+            assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
+            assert_eq!(c.hostiles[0].flee_threat, None);
+            assert_ne!(c.hostiles[0].state, HostileState::Fleeing);
+        }
+    }
+
     #[test]
     fn passive_actor_retaliates_through_authoritative_damage_api() {
         let mut c = canonical_combat();
