@@ -50,6 +50,10 @@ pub struct Settings {
     pub hitch_log: bool,
     #[serde(default = "default_continent_size")]
     pub continent_size: usize,
+    /// Present uncapped. Off is the default: the game targets headroom and
+    /// most desktop compositors already throttle uncapped frames.
+    #[serde(default)]
+    pub vsync: bool,
     /// Combat verb binds. Missing map (old FORMAT 1 files) gets defaults.
     #[serde(default)]
     pub keys: KeyBinds,
@@ -67,6 +71,7 @@ impl Default for Settings {
             format: FORMAT,
             hitch_log: false,
             continent_size: DEFAULT_CONTINENT_SIZE,
+            vsync: false,
             keys: KeyBinds::default(),
         }
     }
@@ -176,11 +181,19 @@ mod tests {
             format: FORMAT,
             hitch_log: true,
             continent_size: 512,
+            vsync: true,
             keys: KeyBinds::default(),
         };
         let text = serde_json::to_string(&settings).expect("write");
         let back: Settings = serde_json::from_str(&text).expect("read");
         assert_eq!(settings, back);
+    }
+
+    #[test]
+    fn vsync_defaults_off_for_old_settings_files() {
+        let text = r#"{"format":1,"hitch_log":false}"#;
+        let settings: Settings = serde_json::from_str(text).expect("read old settings");
+        assert!(!settings.vsync, "vsync must default to off");
     }
 
     #[test]

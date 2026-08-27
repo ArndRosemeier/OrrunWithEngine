@@ -813,6 +813,7 @@ fn main() -> EngineResult<()> {
         }
         if !settings_ui.applied {
             apply_hitch_log(world, settings_ui.prefs.hitch_log, false);
+            world.set_vsync(settings_ui.prefs.vsync);
             world.set_instance_submit(InstanceSubmit::GpuIndirect);
             settings_ui.applied = true;
         }
@@ -1775,10 +1776,35 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
         });
 
     let mut hitch = ui_state.prefs.hitch_log;
+    let mut vsync = ui_state.prefs.vsync;
     let mut continent_size = ui_state.prefs.continent_size as i32;
     let log_path = Some(settings::hitch_log_path().unwrap_or_else(|error| panic!("{error}")));
     frame.ui.modal("Settings", &mut ui_state.open, |panel, open| {
         let ui = panel.ui();
+        if ui.checkbox(&mut vsync, "VSync").changed() {
+            world.set_vsync(vsync);
+            ui_state.prefs.vsync = vsync;
+            ui_state
+                .prefs
+                .write()
+                .unwrap_or_else(|err| panic!("{err}"));
+        }
+        if vsync {
+            ui.label(
+                egui::RichText::new("On. Frames wait for the display refresh.")
+                    .size(13.0)
+                    .color(Color32::from_rgb(180, 188, 196)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "Off. Frames present immediately; tearing is possible.",
+                )
+                .size(13.0)
+                .color(Color32::from_rgb(180, 188, 196)),
+            );
+        }
+        ui.add_space(8.0);
         if ui.checkbox(&mut hitch, "Hitch log").changed() {
             apply_hitch_log(world, hitch, hitch);
             ui_state.prefs.hitch_log = hitch;
@@ -1885,6 +1911,7 @@ fn draw_settings(ui_state: &mut SettingsUi, world: &mut World, frame: &Frame) {
 
 fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) {
     let ctx = frame.ui.ctx().clone();
+    let combat_hud = session.combat_hud_snapshot();
     if ctx.input(|i| i.key_pressed(egui::Key::M)) {
         session.return_to_atlas();
         world.set_pointer_lock(false);
@@ -1960,34 +1987,33 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                         );
                     }
                     // Player HP / mana + attack pip stay in this same world_hud popup.
-                    let combat = session.combat();
-                    let res = &combat.player().resources;
-                    let hp_frac = if res.hp_max() > 0.0 {
-                        (res.hp() / res.hp_max()).clamp(0.0, 1.0) as f32
+                    let hp_frac = if combat_hud.hp_max() > 0.0 {
+                        (combat_hud.hp() / combat_hud.hp_max()).clamp(0.0, 1.0) as f32
                     } else {
                         0.0
                     };
-                    let mana_frac = if res.mana_max() > 0.0 {
-                        (res.mana() / res.mana_max()).clamp(0.0, 1.0) as f32
+                    let mana_frac = if combat_hud.mana_max() > 0.0 {
+                        (combat_hud.mana() / combat_hud.mana_max()).clamp(0.0, 1.0) as f32
                     } else {
                         0.0
                     };
-                    let hp_color = if session.hp_ghost_frac().is_none() && session.hurt_flash() {
-                        Color32::from_rgb(220, 24, 24)
-                    } else if hp_frac <= 0.20 {
-                        Color32::from_rgb(200, 32, 32)
-                    } else if hp_frac <= 0.50 {
-                        Color32::from_rgb(220, 190, 32)
-                    } else {
-                        Color32::from_rgb(40, 180, 64)
-                    };
+                    let hp_color =
+                        if combat_hud.hp_ghost_fraction().is_none() && combat_hud.hurt_flash() {
+                            Color32::from_rgb(220, 24, 24)
+                        } else if hp_frac <= 0.20 {
+                            Color32::from_rgb(200, 32, 32)
+                        } else if hp_frac <= 0.50 {
+                            Color32::from_rgb(220, 190, 32)
+                        } else {
+                            Color32::from_rgb(40, 180, 64)
+                        };
                     ui.horizontal(|ui| {
                         let bar_h = ui.spacing().interact_size.y;
                         let (hp_rect, _) =
                             ui.allocate_exact_size(egui::vec2(160.0, bar_h), Sense::hover());
                         ui.painter()
                             .rect_filled(hp_rect, 2.0, Color32::from_rgb(40, 40, 40));
-                        if let Some(ghost) = session.hp_ghost_frac() {
+                        if let Some(ghost) = combat_hud.hp_ghost_fraction() {
                             if ghost > hp_frac {
                                 let ghost_w = hp_rect.width() * ghost.clamp(0.0, 1.0);
                                 ui.painter().rect_filled(
@@ -2011,11 +2037,11 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                                 hp_color,
                             );
                         }
-                        if session.is_shaken() {
+                        if combat_hud.is_shaken() {
                             hud::paint_shaken_icon(ui);
                         }
                     });
-                    if let Some(slain) = session.slain_line() {
+                    if let Some(slain) = combat_hud.slain_line() {
                         ui.label(
                             egui::RichText::new(slain)
                                 .size(16.0)
@@ -2027,7 +2053,7 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                             .fill(Color32::from_rgb(48, 120, 210))
                             .desired_width(160.0),
                     );
-                    let pip_on = session.attack_pip();
+                    let pip_on = combat_hud.attack_pip();
                     let pip = if pip_on {
                         Color32::from_rgb(240, 230, 180)
                     } else {
@@ -2038,17 +2064,17 @@ fn draw_world_hud(session: &mut WorldSession, world: &mut World, frame: &Frame) 
                     ui.painter().rect_filled(pip_rect, 2.0, pip);
                 });
         });
-    hud::draw_target_frame(&ctx, session.combat());
+    hud::draw_target_frame(&ctx, combat_hud);
     if let Some(pos) = session.player_position() {
         let eye = glam::Vec3::new(pos.x as f32, pos.y as f32 + 1.7, pos.z as f32);
         let aspect = (frame.width.max(1) as f32) / (frame.height.max(1) as f32);
         let view_proj = world.camera().view_projection(aspect);
-        hud::draw_nameplates(&ctx, session.combat(), eye, view_proj);
+        hud::draw_nameplates(&ctx, combat_hud, eye, view_proj);
     }
-    hud::draw_hotbar(&ctx, session.combat(), session.key_binds());
-    hud::draw_cast_bar(&ctx, session.combat());
-    hud::draw_combat_log(&ctx, session.combat());
-    hud::draw_fail_toast(&ctx, session.combat());
+    hud::draw_hotbar(&ctx, combat_hud, session.key_binds());
+    hud::draw_cast_bar(&ctx, combat_hud);
+    hud::draw_combat_log(&ctx, combat_hud);
+    hud::draw_fail_toast(&ctx, combat_hud);
     hud::draw_loot_windows(session, world, frame);
     hud::draw_summon_window(session, world, frame);
 }

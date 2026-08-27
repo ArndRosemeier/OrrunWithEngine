@@ -11,7 +11,7 @@
 //! player. The mouse is captured only once they click in the world, and the
 //! window gives it back on Escape or when it loses focus.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -462,18 +462,16 @@ pub struct WorldSession {
     overworld: Option<(GlobalXZ, Heading)>,
     /// Target lock and canonical combat state.
     combat: crate::combat::WorldCombat,
+    combat_hud: crate::combat::CombatHudSnapshot,
     combat_layer: super::combat_layer::CombatLayer,
+    encounter: super::encounter::EncounterDirector,
     inventory: crate::inventory::Inventory,
-    ground_loot: Vec<crate::loot::GroundPile>,
-    looted_hostiles: HashSet<i32>,
+    corpses: super::corpse::CorpseLifecycle,
     bag_open: bool,
-    loot_open: bool,
-    loot_target: Option<i32>,
     summon_open: bool,
     skill_open: bool,
     level_up_queue: VecDeque<LevelUpNotice>,
     current_level_up: Option<(LevelUpNotice, f32)>,
-    pending_held_fixture: Option<HeldFixtureRequest>,
     last_shrine: Option<GlobalPlace>,
     key_binds: KeyBinds,
     /// Overland SettlementPin roster mobs are seated once after the default L1 wolves.
@@ -504,6 +502,8 @@ impl WorldSession {
     ) -> Self {
         let ponds = PondWindow::new(Arc::clone(&surface));
         let stream = WorldStream::new(Arc::clone(&surface), ponds.shared());
+        let combat = crate::combat::WorldCombat::with_game_data(Arc::clone(&game_data));
+        let combat_hud = combat.hud_snapshot();
         Self {
             surface,
             ponds,
@@ -528,20 +528,17 @@ impl WorldSession {
             proxy: None,
             overworld: None,
             game_data: Arc::clone(&game_data),
-            combat: crate::combat::WorldCombat::with_game_data(Arc::clone(&game_data)),
-
+            combat,
+            combat_hud,
             combat_layer: super::combat_layer::CombatLayer::install(),
+            encounter: super::encounter::EncounterDirector::default(),
             inventory: crate::inventory::Inventory::create_kit(),
-            ground_loot: Vec::new(),
-            looted_hostiles: HashSet::new(),
+            corpses: super::corpse::CorpseLifecycle::default(),
             bag_open: false,
-            loot_open: false,
-            loot_target: None,
             summon_open: false,
             skill_open: false,
             level_up_queue: VecDeque::new(),
             current_level_up: None,
-            pending_held_fixture: None,
             last_shrine: None,
             key_binds: KeyBinds::for_default_profile(&game_data),
             roster_pins_seated: false,
@@ -570,6 +567,10 @@ impl WorldSession {
         &self.game_data
     }
 
+    pub fn combat_hud_snapshot(&self) -> &crate::combat::CombatHudSnapshot {
+        &self.combat_hud
+    }
+
     pub fn combat(&self) -> &crate::combat::WorldCombat {
         &self.combat
     }
@@ -590,7 +591,7 @@ impl WorldSession {
         if h.name.is_empty() {
             return None;
         }
-        Some((h.name.as_str(), h.hp()))
+        Some((h.name.as_str(), self.combat.hostile_hp(h.actor_id())))
     }
 
     pub fn inventory(&self) -> &crate::inventory::Inventory {
@@ -610,11 +611,11 @@ impl WorldSession {
     }
 
     pub fn loot_open(&self) -> bool {
-        self.loot_open
+        self.corpses.is_open()
     }
 
-    pub fn loot_target(&self) -> Option<i32> {
-        self.loot_target.filter(|_| self.loot_open)
+    pub fn loot_target(&self) -> Option<crate::combat::ActorId> {
+        self.corpses.selected()
     }
 
     pub fn skill_open(&self) -> bool {
@@ -667,18 +668,20 @@ impl WorldSession {
 
     /// Queue one typed canonical mob for held fixture seating after world availability.
     pub fn request_held_fixture(&mut self, request: HeldFixtureRequest) {
-        if self.pending_held_fixture.is_some() || self.combat_layer.fixture_encounter_held() {
-            panic!("held fixture request already pending or seated");
-        }
-        let mob_id = request.mob_id();
-        let definition = self
-            .game_data
+        let mob_id = request.mob_id().clone();
+        self.validate_encounter_mob(&mob_id);
+        self.encounter
+            .plan(super::encounter::EncounterPlan::Single { mob_id, held: true });
+    }
+
+    fn validate_encounter_mob(&self, mob_id: &crate::gamedata::MobId) {
+        self.game_data
             .mob(mob_id)
-            .unwrap_or_else(|| panic!("held fixture requested unknown mob {mob_id}"));
-        if crate::combat::catalog::mesh_spec(definition.id().as_str()).is_none() {
-            panic!("held fixture requested mob without combat mesh {mob_id}");
-        }
-        self.pending_held_fixture = Some(request);
+            .unwrap_or_else(|| panic!("encounter requested unknown mob {mob_id}"));
+        assert!(
+            crate::combat::catalog::mesh_spec(mob_id.as_str()).is_some(),
+            "encounter requested mob without combat mesh {mob_id}"
+        );
     }
 
     pub fn summon_mob(
@@ -707,97 +710,88 @@ impl WorldSession {
             + 1;
         let hostile = self
             .combat
-            .canonical_hostile(definition.id(), idx, x, z, x, z);
+            .hostile_metadata(definition.id(), idx, x, z, x, z);
         self.combat.add_hostile(hostile);
-        self.combat_layer.hold_fixture();
+        self.combat_layer.mark_presentation_ready();
         self.respawn_hostile_meshes(world, &player)?;
         Ok(idx)
     }
 
     pub fn ground_pile(&self) -> Option<&crate::loot::GroundPile> {
-        let idx = self.loot_target?;
-        self.ground_loot
-            .iter()
-            .find(|p| p.actor_id.runtime_index() == Some(idx))
+        self.corpses.pile()
     }
 
     pub fn sparkle_visible(&self, world: &World) -> bool {
-        self.combat_layer.sparkle_visible(world)
+        self.corpses.marker_visible(world)
     }
 
     pub fn close_loot(&mut self) {
-        self.loot_open = false;
-        self.loot_target = None;
+        self.corpses.close();
     }
 
     pub fn take_loot_item(&mut self, world: &mut World, item_i: usize) {
-        let Some(idx) = self.loot_target else {
+        let Some(actor_id) = self.corpses.selected() else {
             return;
         };
-        let Some(pos) = self
-            .ground_loot
-            .iter()
-            .position(|p| p.actor_id.runtime_index() == Some(idx))
-        else {
-            return;
-        };
-        let mut pile = self.ground_loot[pos].clone();
+        let mut pile = self.corpses.pile().expect("selected corpse pile").clone();
         crate::loot::take_one(&mut self.inventory, &mut pile, item_i)
             .unwrap_or_else(|error| panic!("taking loot item {item_i} failed: {error}"));
-        self.finish_loot_take(world, pos, pile);
+        self.finish_loot_take(world, actor_id, pile);
     }
 
     pub fn take_all_loot(&mut self, world: &mut World) {
-        let Some(idx) = self.loot_target else {
+        let Some(actor_id) = self.corpses.selected() else {
             return;
         };
-        let Some(pos) = self
-            .ground_loot
-            .iter()
-            .position(|p| p.actor_id.runtime_index() == Some(idx))
-        else {
-            return;
-        };
-        let mut pile = self.ground_loot[pos].clone();
+        let mut pile = self.corpses.pile().expect("selected corpse pile").clone();
         crate::loot::take_all(&mut self.inventory, &mut pile)
             .unwrap_or_else(|error| panic!("taking all loot failed: {error}"));
-        self.finish_loot_take(world, pos, pile);
+        self.finish_loot_take(world, actor_id, pile);
     }
 
-    fn finish_loot_take(&mut self, world: &mut World, pos: usize, pile: crate::loot::GroundPile) {
-        let idx = pile.actor_id.runtime_index().expect("loot actor id");
+    fn finish_loot_take(
+        &mut self,
+        world: &mut World,
+        actor_id: crate::combat::ActorId,
+        pile: crate::loot::GroundPile,
+    ) {
         if pile.empty() {
-            self.ground_loot.remove(pos);
-            self.looted_hostiles.insert(idx);
-            self.combat_layer.strip_sparkle(world, idx);
+            self.corpses.finish_loot(world, actor_id);
             self.close_loot();
         } else {
-            self.ground_loot[pos] = pile;
+            self.corpses.override_reconciled_pile(pile);
         }
     }
 
     /// Playtester: force a visible family so sparkle is not coin-only.
     pub fn open_first_loot(&mut self) -> bool {
-        let Some(idx) = self
-            .ground_loot
-            .first()
-            .map(|p| p.actor_id.runtime_index().expect("loot actor id"))
-        else {
+        let Some(actor_id) = self.corpses.first_actor_id() else {
             return false;
         };
-        self.loot_open = true;
-        self.loot_target = Some(idx);
+        self.corpses
+            .open(actor_id)
+            .expect("selected known corpse pile");
         true
     }
 
-    pub fn force_visible_loot(&mut self, idx: i32) {
-        if let Some(h) = self.combat.hostiles().iter().find(|h| h.idx == idx) {
-            let site = self.loot_site_for(h.x, h.z);
-            let pile = crate::loot::force_visible_pile(&h.mob_id, h.actor_id(), site);
-            self.ground_loot
-                .retain(|p| p.actor_id.runtime_index() != Some(idx));
-            self.ground_loot.push(pile);
-        }
+    pub fn force_visible_loot(&mut self, actor_id: crate::combat::ActorId) {
+        let hostile = self
+            .combat
+            .hostiles()
+            .iter()
+            .find(|hostile| hostile.actor_id() == actor_id)
+            .unwrap_or_else(|| panic!("force-visible loot requested missing actor {actor_id:?}"));
+        assert!(
+            !self.combat.hostile_is_alive(actor_id),
+            "force-visible loot requires dead actor {actor_id:?}"
+        );
+        assert!(
+            self.corpses.contains(actor_id),
+            "force-visible loot requires reconciled corpse {actor_id:?}"
+        );
+        let site = self.loot_site_for(hostile.x, hostile.z);
+        let pile = crate::loot::force_visible_pile(&hostile.mob_id, actor_id, site);
+        self.corpses.override_reconciled_pile(pile);
     }
 
     /// Dead-cone on the same left click. Not Tab. Sparkle must still be up.
@@ -808,33 +802,32 @@ impl WorldSession {
         facing_x: f64,
         facing_z: f64,
     ) -> bool {
-        let sparkle_ids: Vec<i32> = self
-            .ground_loot
-            .iter()
-            .filter(|p| {
-                !p.empty()
-                    && !self
-                        .looted_hostiles
-                        .contains(&p.actor_id.runtime_index().expect("loot actor id"))
-                    && self
-                        .combat_layer
-                        .has_sparkle(p.actor_id.runtime_index().expect("loot actor id"))
-            })
-            .map(|p| p.actor_id.runtime_index().expect("loot actor id"))
-            .collect();
         let pairs: Vec<(i32, f64, f64)> = self
             .combat
             .hostiles()
             .iter()
-            .filter(|h| !h.is_alive() && sparkle_ids.contains(&h.idx))
+            .filter(|h| {
+                !self.combat.hostile_is_alive(h.actor_id())
+                    && self.corpses.contains(h.actor_id())
+                    && self.corpses.has_marker(h.actor_id())
+                    && !self.corpses.is_looted(h.actor_id())
+            })
             .map(|h| (h.idx, h.x, h.z))
             .collect();
         let ids = crate::combat::tab_candidates(player_x, player_z, facing_x, facing_z, &pairs);
         let Some(idx) = ids.first().copied() else {
             return false;
         };
-        self.loot_open = true;
-        self.loot_target = Some(idx);
+        let actor_id = self
+            .combat
+            .hostiles()
+            .iter()
+            .find(|h| h.idx == idx)
+            .expect("loot candidate actor")
+            .actor_id();
+        self.corpses
+            .open(actor_id)
+            .expect("selected known corpse pile");
         true
     }
 
@@ -854,67 +847,51 @@ impl WorldSession {
         })
     }
 
-    fn sync_ground_loot(&mut self, world: &mut World) -> Result<(), SessionError> {
-        let mut planned: Vec<(
-            i32,
-            engine::world::EntityId,
-            f64,
-            f64,
-            f64,
-            Option<crate::loot::GroundPile>,
-        )> = Vec::new();
-        for h in self.combat.hostiles() {
-            if h.is_alive() {
+    fn reconcile_corpses(&mut self, world: &mut World) -> Result<(), SessionError> {
+        let mut records = Vec::new();
+        for hostile in self.combat.hostiles() {
+            let actor_id = hostile.actor_id();
+            if self.combat.hostile_is_alive(actor_id)
+                || self.corpses.is_looted(actor_id)
+                || self.corpses.contains(actor_id)
+            {
                 continue;
             }
+            let presentation = self.combat.presentations().get(actor_id);
             let Some(entity) = dead_loot_presentation(
-                h.actor_id(),
-                h.presentation_source(),
-                h.presentation_entity(),
+                actor_id,
+                presentation.map_or(
+                    crate::combat::HostilePresentationSource::Headless,
+                    |binding| binding.source(),
+                ),
+                presentation.map(|binding| binding.entity()),
             )?
             else {
                 continue;
             };
-            let y = self
-                .contact_height(GlobalXZ::at(h.x, h.z))
-                .map(|g| (g + FOOT_CLEARANCE_M) as f64)
-                .unwrap_or(0.0);
-            if self.looted_hostiles.contains(&h.idx) {
-                continue;
-            }
-            if self.ground_loot.iter().any(|p| p.actor_id == h.actor_id()) {
-                if !self.combat_layer.has_sparkle(h.idx) {
-                    planned.push((h.idx, entity, h.x, y, h.z, None));
-                }
-                continue;
-            }
-            let site = self.loot_site_for(h.x, h.z);
-            let pile = crate::loot::roll_pile(&h.mob_id, h.actor_id(), site);
-            planned.push((h.idx, entity, h.x, y, h.z, Some(pile)));
+            let ground = self
+                .contact_height(GlobalXZ::at(hostile.x, hostile.z))
+                .ok_or(SessionError::MissingContact {
+                    x: hostile.x,
+                    z: hostile.z,
+                })?;
+            records.push(super::corpse::DeadActorRecord::new(
+                actor_id,
+                hostile.mob_id.clone(),
+                GlobalPosition::at(hostile.x, f64::from(ground + FOOT_CLEARANCE_M), hostile.z),
+                entity,
+                self.loot_site_for(hostile.x, hostile.z),
+            ));
         }
-        for (idx, entity, x, y, z, pile) in planned {
-            self.combat_layer
-                .spawn_sparkle(world, idx, entity, x, y, z)?;
-            if let Some(pile) = pile {
-                self.ground_loot.push(pile);
-            }
+        for record in records {
+            self.corpses.reconcile(world, record).map_err(|error| {
+                SessionError::Engine(EngineError::Model(format!(
+                    "corpse reconciliation failed: {error}"
+                )))
+            })?;
         }
         Ok(())
     }
-
-    fn clear_ground_loot(&mut self, world: &mut World) {
-        self.combat_layer.strip_all_sparkles(world);
-        self.forget_ground_loot();
-        self.looted_hostiles.clear();
-    }
-
-    fn forget_ground_loot(&mut self) {
-        self.ground_loot.clear();
-        self.looted_hostiles.clear();
-        self.loot_open = false;
-        self.loot_target = None;
-    }
-
     pub fn fixture_mesh_visible(&self, world: &World) -> bool {
         self.combat_layer.mesh_visible(world)
     }
@@ -922,36 +899,38 @@ impl WorldSession {
     /// Harness-side seating check that does not require borrowing the render world.
     pub fn fixture_mesh_visible_from_session(&self) -> bool {
         !self.combat.hostiles().is_empty()
-            && self
-                .combat
-                .hostiles()
-                .iter()
-                .all(|hostile| hostile.presentation_entity().is_some())
+            && self.combat.hostiles().iter().all(|hostile| {
+                self.combat
+                    .presentations()
+                    .get(hostile.actor_id())
+                    .map(|b| b.entity())
+                    .is_some()
+            })
     }
 
     pub fn fixture_encounter_held(&self) -> bool {
-        self.combat_layer.fixture_encounter_held()
+        self.encounter.is_held()
     }
 
     /// Start a presentation fixture only after its harness has verified readiness.
     pub fn start_fixture_encounter(&mut self) {
-        self.combat_layer.start_fixture_encounter(&mut self.combat);
+        self.encounter.activate(&mut self.combat);
     }
 
     pub fn player_hp(&self) -> f64 {
-        self.combat.player().resources.hp()
+        self.combat.player_hp()
     }
 
     pub fn player_hp_max(&self) -> f64 {
-        self.combat.player().resources.hp_max()
+        self.combat.player_hp_max()
     }
 
     pub fn player_mana(&self) -> f64 {
-        self.combat.player().resources.mana()
+        self.combat.player_mana()
     }
 
     pub fn player_mana_max(&self) -> f64 {
-        self.combat.player().resources.mana_max()
+        self.combat.player_mana_max()
     }
 
     /// Player HP/mana bars are always drawn in world_hud.
@@ -961,10 +940,6 @@ impl WorldSession {
 
     pub fn attack_pip(&self) -> bool {
         self.combat_layer.attack_pip()
-    }
-
-    pub fn incoming_hit(&self) -> bool {
-        self.combat_layer.incoming_hit()
     }
 
     pub fn hurt_flash(&self) -> bool {
@@ -1002,16 +977,14 @@ impl WorldSession {
         self.combat.fail_tell()
     }
 
+    pub fn take_combat_presentation_events(
+        &mut self,
+    ) -> Vec<super::combat_layer::CombatPresentationEvent> {
+        self.combat_layer.take_presentation_events()
+    }
+
     pub fn take_combat_sfx(&mut self) -> Vec<super::combat_layer::CombatSfx> {
         self.combat_layer.take_combat_sfx()
-    }
-
-    pub fn swing_whoosh(&self) -> bool {
-        self.combat_layer.swing_whoosh()
-    }
-
-    pub fn hit_flash(&self) -> bool {
-        self.combat_layer.hit_flash()
     }
 
     pub fn lock_ring_visible(&self, world: &World) -> bool {
@@ -1032,8 +1005,8 @@ impl WorldSession {
         }
         self.combat.finish_death_respawn();
         self.combat.clear_hostiles();
-        self.looted_hostiles.clear();
-        self.combat_layer.despawn_meshes(world);
+        self.corpses.clear(world);
+        self.combat_layer.despawn_meshes(world, &mut self.combat);
     }
 
     pub fn last_shrine(&self) -> Option<GlobalPlace> {
@@ -1047,21 +1020,37 @@ impl WorldSession {
 
     /// Drop fixture meshes and props, clear transient death state, and return
     /// to the world spawn before seating the next fixture.
-    fn begin_fixture_rearm(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        if let Some(fauna) = self.fauna.as_mut() {
-            let actor_ids = fauna
-                .clear(world)
-                .unwrap_or_else(|err| panic!("fixture rearm failed to clear fauna: {err}"));
-            self.combat.deactivate_actors(&actor_ids);
+    fn prepare_planned_encounter(&mut self, world: &mut World) {
+        assert!(
+            self.encounter.transition() == super::encounter::EncounterTransition::Planned,
+            "encounter preparation requires a planned transition"
+        );
+        for mob_id in self.encounter.mob_ids() {
+            self.validate_encounter_mob(&mob_id);
         }
-        self.clear_ground_loot(world);
+        self.begin_fixture_rearm(world);
+        self.encounter.prepare();
+    }
+
+    fn apply_encounter_plan(&mut self, world: &mut World, plan: super::encounter::EncounterPlan) {
+        self.encounter.plan(plan);
+        self.prepare_planned_encounter(world);
+    }
+
+    fn begin_fixture_rearm(&mut self, world: &mut World) {
+        self.combat_layer.despawn_meshes(world, &mut self.combat);
+        if let Some(fauna) = self.fauna.as_mut() {
+            fauna
+                .clear(world, &mut self.combat)
+                .unwrap_or_else(|err| panic!("fixture rearm failed to clear fauna: {err}"));
+        }
+        self.corpses.clear(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         super::sites::clear_overland_sites(&mut self.combat);
         self.overland_sites.clear();
         self.roster_pins_seated = false;
         self.combat.player_mut().shaken = None;
-        self.combat_layer.skip_roster_pins();
+        self.encounter.set_skip_roster_pins(true);
         self.dungeon_skulls_for = None;
         if let Some(spawn) = self.spawn {
             if let Some(player) = self.player.as_mut() {
@@ -1076,33 +1065,32 @@ impl WorldSession {
 
     /// Leave fixture-only mode and reseat Taken Cairn / Woods Hut on the next tick.
     pub fn restore_overland_sites(&mut self, world: &mut World) {
-        self.combat_layer.despawn_meshes(world);
-        self.clear_ground_loot(world);
+        self.combat_layer.despawn_meshes(world, &mut self.combat);
+        self.corpses.clear(world);
         super::sites::despawn_site_props(world, &mut self.site_prop_ids);
         self.combat.clear_hostiles();
         self.combat.set_lock(None);
         self.overland_sites.clear();
         self.roster_pins_seated = false;
-        self.combat_layer.allow_roster_pins();
-        self.combat_layer.rearm();
+        self.encounter.set_skip_roster_pins(false);
+        self.encounter
+            .plan(super::encounter::EncounterPlan::NormalWorld);
+        self.encounter.prepare();
+        self.combat_layer.reset_presentation_state();
         self.dungeon_skulls_for = None;
     }
 
     /// Reseats the L1 wolf line on the next world tick. Meshes despawn now.
     pub fn rearm_combat_fixtures(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_wolf_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::WolfLine);
     }
 
     pub fn rearm_held_mob_fixture(
         &mut self,
         world: &mut World,
-        mobs: Vec<super::combat_layer::HeldMobFixture>,
+        mobs: Vec<super::encounter::HeldMobFixture>,
     ) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_held_mobs(mobs);
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Held(mobs));
     }
 
     pub fn player_progression(&self) -> &crate::progression::ActorProgression {
@@ -1110,7 +1098,7 @@ impl WorldSession {
     }
 
     pub fn ground_loot_count(&self) -> usize {
-        self.ground_loot.len()
+        self.corpses.count()
     }
 
     pub fn hostile_death_posed(&self, idx: i32) -> bool {
@@ -1118,56 +1106,47 @@ impl WorldSession {
             .hostiles()
             .iter()
             .find(|hostile| hostile.idx == idx)
-            .and_then(|hostile| hostile.presentation_entity())
+            .and_then(|hostile| {
+                self.combat
+                    .presentations()
+                    .get(hostile.actor_id())
+                    .map(|b| b.entity())
+            })
             .is_some_and(|entity| self.combat_layer.is_death_posed(entity))
     }
 
     /// Reseats one published orc on the next world tick. Meshes despawn now.
     pub fn rearm_orc_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_orc_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Orc);
     }
 
     /// Reseats one published yeti on the next world tick. Meshes despawn now.
     pub fn rearm_yeti_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_yeti_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Yeti);
     }
 
     /// Reseats one published demon on the next world tick. Meshes despawn now.
     pub fn rearm_demon_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_demon_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Demon);
     }
 
     /// Reseats one published blue_demon on the next world tick. Meshes despawn now.
     pub fn rearm_bluedemon_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_bluedemon_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::BlueDemon);
     }
 
     /// Reseats one published tribal_veteran on the next world tick. Meshes despawn now.
     pub fn rearm_tribal_veteran_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_tribal_veteran_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::TribalVeteran);
     }
 
     pub fn rearm_bones_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_bones_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Bones);
         self.combat.set_lock(None);
     }
 
     pub fn rearm_mage_fixture(&mut self, world: &mut World) {
-        self.begin_fixture_rearm(world);
-        self.combat_layer.request_mage_fixture();
-        self.combat_layer.rearm();
+        self.apply_encounter_plan(world, super::encounter::EncounterPlan::Mage);
         self.combat.set_lock(None);
     }
 
@@ -1450,7 +1429,8 @@ impl WorldSession {
                     world.set_pointer_lock(false);
                 }
             }
-            let ui_open = self.bag_open || self.loot_open || self.skill_open || self.summon_open;
+            let ui_open =
+                self.bag_open || self.corpses.is_open() || self.skill_open || self.summon_open;
             if ui_open {
                 world.set_pointer_lock(false);
             } else if input.capture_look {
@@ -1577,8 +1557,7 @@ impl WorldSession {
             paths.clear(world)?;
         }
         if let Some(fauna) = self.fauna.as_mut() {
-            let deactivated = fauna.clear(world)?;
-            self.combat.deactivate_actors(&deactivated);
+            fauna.clear(world, &mut self.combat)?;
         }
         if let Some(villagers) = self.villagers.as_mut() {
             villagers.clear(world)?;
@@ -1599,14 +1578,14 @@ impl WorldSession {
         // destination seating and leave the new bodies without combat anchors.
         self.site_prop_ids.clear();
         self.combat_layer.forget_meshes();
-        self.combat_layer.allow_roster_pins();
-        self.combat_layer.rearm();
+        self.encounter.set_skip_roster_pins(false);
+        self.combat_layer.reset_presentation_state();
         self.combat.clear_hostiles();
         self.combat.set_lock(None);
         self.overland_sites.clear();
         self.roster_pins_seated = false;
         self.dungeon_skulls_for = None;
-        self.forget_ground_loot();
+        self.corpses.close();
         let travel = self.travel.as_mut().expect("travel");
         travel.handed_off = true;
         travel.handoffs += 1;
@@ -2005,9 +1984,9 @@ impl WorldSession {
             .is_some();
         if live_id.is_none() {
             if self.dungeon_skulls_for.take().is_some() {
-                super::combat_layer::clear_dungeon_skulls(&mut self.combat);
-                super::combat_layer::clear_dungeon_bones(&mut self.combat);
-                if self.combat_layer.fixture_ready() {
+                super::encounter::clear_dungeon_skulls(&mut self.combat);
+                super::encounter::clear_dungeon_bones(&mut self.combat);
+                if self.combat_layer.presentation_ready() {
                     self.respawn_hostile_meshes(world, player)?;
                 }
             }
@@ -2018,8 +1997,8 @@ impl WorldSession {
             return Ok(());
         }
         if self.dungeon_skulls_for.is_some() {
-            super::combat_layer::clear_dungeon_skulls(&mut self.combat);
-            super::combat_layer::clear_dungeon_bones(&mut self.combat);
+            super::encounter::clear_dungeon_skulls(&mut self.combat);
+            super::encounter::clear_dungeon_bones(&mut self.combat);
         }
         let spots = self
             .dungeons
@@ -2028,9 +2007,9 @@ impl WorldSession {
             .unwrap_or_default();
         let heart = self.dungeons.as_ref().and_then(DungeonLayer::live_heart);
         if !spots.is_empty() {
-            super::combat_layer::seat_dungeon_skulls(&mut self.combat, &spots);
-            super::combat_layer::seat_dungeon_bones(&mut self.combat, &spots, heart);
-            if self.combat_layer.fixture_ready() {
+            super::encounter::seat_dungeon_skulls(&mut self.combat, &spots);
+            super::encounter::seat_dungeon_bones(&mut self.combat, &spots, heart);
+            if self.combat_layer.presentation_ready() {
                 self.respawn_hostile_meshes(world, player)?;
             }
         }
@@ -2043,7 +2022,7 @@ impl WorldSession {
         world: &mut World,
         player_pos: engine::space::GlobalPosition,
     ) -> Result<bool, SessionError> {
-        if self.combat_layer.roster_pins_skipped() {
+        if self.encounter.skip_roster_pins() {
             return Ok(false);
         }
         let overland = self
@@ -2089,28 +2068,34 @@ impl WorldSession {
         Ok(have < want)
     }
 
-    fn seat_pending_held_fixture(&mut self, world: &mut World) -> Result<(), SessionError> {
-        let Some(request) = self.pending_held_fixture.take() else {
+    fn seat_planned_encounter(&mut self, world: &mut World) -> Result<(), SessionError> {
+        if self.encounter.transition() == super::encounter::EncounterTransition::Planned {
+            self.prepare_planned_encounter(world);
+        }
+        if self.encounter.transition() != super::encounter::EncounterTransition::Prepared {
             return Ok(());
-        };
-        self.begin_fixture_rearm(world);
+        }
         let player = self.player.ok_or(SessionError::NoWorld)?;
         let facing = Camera::facing_xz(player.yaw_degrees);
-        self.combat_layer.request_canonical_mob_fixture();
-        self.combat_layer.install_canonical_mob_fixture(
+        self.encounter.seat(
             &mut self.combat,
-            request.mob_id(),
             player.position.x,
             player.position.z,
             f64::from(facing.x),
             f64::from(facing.z),
         );
-        self.respawn_hostile_meshes(world, &player)
+        if let Err(error) = self.respawn_hostile_meshes(world, &player) {
+            self.combat_layer.despawn_meshes(world, &mut self.combat);
+            self.combat_layer.reset_presentation_state();
+            return Err(error);
+        }
+        self.combat_layer.mark_presentation_ready();
+        Ok(())
     }
 
     fn update_world(&mut self, world: &mut World, input: WalkInput) -> Result<(), SessionError> {
         self.advance_level_up_notices(input.dt);
-        self.seat_pending_held_fixture(world)?;
+        self.seat_planned_encounter(world)?;
         let mut player = self.player.ok_or(SessionError::NoWorld)?;
 
         if input.toggle_fly {
@@ -2118,109 +2103,42 @@ impl WorldSession {
             player.vy = 0.0;
             player.airborne = false;
         }
-        {
-            let facing = Camera::facing_xz(player.yaw_degrees);
-            if !self.combat_layer.fixture_ready() {
-                if self.combat_layer.wants_held_mobs() {
-                    self.combat_layer.install_held_mobs(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_orc() {
-                    self.combat_layer.install_orc_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_yeti() {
-                    self.combat_layer.install_yeti_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_demon() {
-                    self.combat_layer.install_demon_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_bluedemon() {
-                    self.combat_layer.install_bluedemon_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_tribal_veteran() {
-                    self.combat_layer.install_tribal_veteran_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_bones() {
-                    self.combat_layer.install_bones_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.wants_mage() {
-                    self.combat_layer.install_mage_fixture(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else if self.combat_layer.roster_pins_skipped() {
-                    self.combat_layer.install_l1_wolf_line(
-                        &mut self.combat,
-                        player.position.x,
-                        player.position.z,
-                        facing.x as f64,
-                        facing.z as f64,
-                    );
-                } else {
-                    // Taken Cairn / Woods Hut: do not wipe site hostiles with L1 wolves.
-                    self.ensure_overland_sites(world, player.position)?;
-                    self.combat_layer.hold_fixture();
-                }
-                let feet: Vec<f64> = self
-                    .combat
-                    .hostiles()
-                    .iter()
-                    .map(|hostile| self.hostile_feet_y(world, hostile))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Err(err) = self.combat_layer.spawn_wolf_meshes(
-                    world,
-                    &mut self.combat,
-                    &feet,
-                    player.yaw_degrees,
-                ) {
-                    self.combat_layer.rearm();
-                    return Err(err.into());
-                }
+        // Phase 1: providers update population and register canonical actors before simulation.
+        let pre_sim_foot = player.position.horizontal();
+        let pre_sim_plots = self.plot_index();
+        let pre_sim_hamlets = self
+            .settlements
+            .as_ref()
+            .map_or(&[][..], SettlementLayer::hamlets);
+        if let Some(fauna) = self.fauna.as_mut() {
+            fauna.follow(
+                world,
+                &self.stream,
+                &self.surface,
+                &self.ponds.field(),
+                &pre_sim_plots,
+                pre_sim_hamlets,
+                pre_sim_foot,
+                pre_sim_foot,
+                input.dt,
+                &mut self.combat,
+            )?;
+        }
+        // Phase 2: authoritative fixed-step simulation; phase 3 projects every provider pose below.
+        if !self.combat_layer.presentation_ready() {
+            if self.encounter.transition() == super::encounter::EncounterTransition::Planned {
+                self.seat_planned_encounter(world)?;
+            } else if self.encounter.is_normal_world() {
+                self.ensure_overland_sites(world, player.position)?;
+                self.respawn_hostile_meshes(world, &player)?;
+                self.combat_layer.mark_presentation_ready();
             }
         }
-        if self.combat_layer.fixture_ready()
-            && !self.combat_layer.roster_pins_skipped()
-            && !self.combat_layer.canonical_mob_fixture()
+        if self.combat_layer.presentation_ready()
+            && self.encounter.is_normal_world()
+            && !self.encounter.skip_roster_pins()
         {
-            let restamped = self.ensure_overland_sites(world, player.position)?;
-            if restamped {
+            if self.ensure_overland_sites(world, player.position)? {
                 self.respawn_hostile_meshes(world, &player)?;
             }
         }
@@ -2234,7 +2152,7 @@ impl WorldSession {
             } else if input.capture_look
                 && world.pointer_lock()
                 && !self.bag_open
-                && !self.loot_open
+                && !self.corpses.is_open()
             {
                 // Dead-cone is not Tab. Same left click; sparkle still up.
                 if self.try_dead_loot(px, pz, facing.x as f64, facing.z as f64) {
@@ -2330,9 +2248,9 @@ impl WorldSession {
                 move |x, z| presentation_ground.feet_y(GlobalXZ::at(x, z)),
                 input.dt,
             )?;
-            self.sync_ground_loot(world)?;
+            self.reconcile_corpses(world)?;
             if self.combat.is_dead()
-                && self.combat.player().resources.hp() <= 0.0
+                && self.combat.player_hp() <= 0.0
                 && self.combat.slain_hold_s() <= 0.0
             {
                 self.resolve_death(world);
@@ -2355,7 +2273,7 @@ impl WorldSession {
         if rebased {
             self.combat_layer.reset_vfx(world)?;
         }
-        if rebased && self.combat_layer.fixture_ready() {
+        if rebased && self.combat_layer.presentation_ready() {
             if let Some(player) = self.player {
                 self.respawn_hostile_meshes(world, &player)?;
             }
@@ -2470,34 +2388,6 @@ impl WorldSession {
                 input.dt,
             )?;
         }
-        if let Some(fauna) = self.fauna.as_mut() {
-            let t = Instant::now();
-            fauna.follow(
-                world,
-                &self.stream,
-                &self.surface,
-                &self.ponds.field(),
-                &plots,
-                hamlets,
-                foot,
-                foot,
-                input.dt,
-                &mut self.combat,
-            )?;
-            world.hitch_span(
-                "fauna",
-                hitch_ms(t),
-                format!(
-                    "agents={} born={} died={} backlog={} loading={}",
-                    fauna.agent_count(),
-                    fauna.last_born(),
-                    fauna.last_died(),
-                    fauna.filling(),
-                    fauna.busy(),
-                ),
-            );
-        }
-
         self.doors.evict_if_missing(
             world,
             self.settlements
@@ -2651,6 +2541,25 @@ impl WorldSession {
         world.set_torch(Some(torch));
 
         world.look_first_person_global(player.eye(), player.yaw_degrees, player.pitch_degrees)?;
+        let mut head_positions = std::collections::BTreeMap::new();
+        for hostile in self.combat.hostiles() {
+            let feet = self.hostile_feet_y(world, hostile)?;
+            assert!(
+                head_positions
+                    .insert(hostile.actor_id(), (hostile.x, feet + 1.55, hostile.z))
+                    .is_none(),
+                "duplicate HUD head anchor"
+            );
+        }
+        self.combat_hud = self
+            .combat
+            .hud_snapshot()
+            .with_head_positions(&head_positions)
+            .with_presentation(
+                self.combat_layer.attack_pip(),
+                self.combat_layer.hurt_flash(),
+                self.combat_layer.hp_ghost_frac(),
+            );
 
         self.player = Some(player);
         Ok(())
@@ -3234,7 +3143,7 @@ mod level_up_notice_tests {
             .enumerate()
         {
             let runtime_index = i32::try_from(index).expect("live fixture index");
-            session.combat.add_canonical_mob(
+            session.combat.add_arena_mob(
                 &crate::gamedata::MobId::new(*id),
                 runtime_index,
                 1.0 + index as f64,

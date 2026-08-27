@@ -12,9 +12,9 @@ pub use math::{
     HEAR_AGGRO_M, LEASH_M, SIGHT_AGGRO_M, SPRINT_MPS, TAB_CONE_DEG, TAB_LOCK_M, TICK, WALK_MPS,
 };
 pub use types::{
-    tab_candidates, ActorId, Aggro, CanonicalHeading, CombatResources, HostilePresentationSource,
-    HostileState, LivePlayer, PlayerSaveError, PlayerSaveSnapshot, Shaken, SpawnSeed, TargetLock,
-    WorldCombat, WorldHostile,
+    tab_candidates, ActorId, Aggro, CanonicalHeading, CombatHudAction, CombatHudActor,
+    CombatHudSnapshot, CombatResources, HostilePresentationSource, HostileState, LivePlayer,
+    PlayerSaveError, PlayerSaveSnapshot, Shaken, SpawnSeed, TargetLock, WorldCombat, WorldHostile,
 };
 
 use serde::{Deserialize, Serialize};

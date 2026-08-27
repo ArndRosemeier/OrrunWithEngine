@@ -68,7 +68,7 @@ fn m5_actions(report_path: &Path) {
     assert!(!roster.is_empty());
     for (index, mob) in data.mobs().iter().enumerate() {
         let idx = i32::try_from(index).expect("mob roster index");
-        combat.add_canonical_mob(
+        combat.add_arena_mob(
             mob.id(),
             idx,
             1.0,
@@ -83,13 +83,14 @@ fn m5_actions(report_path: &Path) {
         "full authored mob roster was not seated"
     );
     combat.clear_hostiles();
-    combat.add_canonical_mob(&orrun::gamedata::MobId::new("wolf"), 0, 1.0, 0.0, 1.0, 0.0);
+    combat.add_arena_mob(&orrun::gamedata::MobId::new("wolf"), 0, 1.0, 0.0, 1.0, 0.0);
     combat.step_fixed(0.0, 0.0, 1.0, 0.0);
     combat.set_lock(Some(0));
     let mut checks = Vec::new();
-    let hp_before = combat.hostiles()[0].hp();
+    let hostile_id = combat.hostiles()[0].actor_id();
+    let hp_before = combat.hostile_hp(hostile_id);
     use_action(&mut combat, "slash");
-    assert!(combat.hostiles()[0].hp() < hp_before);
+    assert!(combat.hostile_hp(hostile_id) < hp_before);
     checks.push(ActionCheck {
         action: "slash".into(),
         passed: true,
@@ -98,30 +99,31 @@ fn m5_actions(report_path: &Path) {
     while combat.player_action_cooldown_s(&ActionId::new("slash")) > 0.0 {
         combat.step_fixed(0.0, 0.0, 1.0, 0.0);
     }
-    let hp_before = combat.hostiles()[0].hp();
+    let hostile_id = combat.hostiles()[0].actor_id();
+    let hp_before = combat.hostile_hp(hostile_id);
     use_action(&mut combat, "arrow");
-    assert!(combat.hostiles()[0].hp() < hp_before);
+    assert!(combat.hostile_hp(hostile_id) < hp_before);
     checks.push(ActionCheck {
         action: "arrow".into(),
         passed: true,
         detail: "arrow dealt canonical ranged damage".into(),
     });
     combat.clear_hostiles();
-    combat.set_player_hp(combat.player().resources.hp_max() - 20.0);
-    let wounded_hp = combat.player().resources.hp();
+    combat.set_player_hp(combat.player_hp_max() - 20.0);
+    let wounded_hp = combat.player_hp();
     use_action(&mut combat, "restore");
     assert!(
-        combat.player().resources.hp() > wounded_hp,
+        combat.player_hp() > wounded_hp,
         "restore did not increase HP: {} -> {}",
         wounded_hp,
-        combat.player().resources.hp()
+        combat.player_hp()
     );
     checks.push(ActionCheck {
         action: "restore".into(),
         passed: true,
         detail: "restore restored player HP".into(),
     });
-    combat.add_canonical_mob(
+    combat.add_arena_mob(
         &orrun::gamedata::MobId::new("wolf"),
         0,
         10.0,
@@ -147,23 +149,28 @@ fn m5_actions(report_path: &Path) {
         use_action(&mut combat, action);
         let hostile = &combat.hostiles()[0];
         assert!(
-            hostile.statuses().any(|s| s.kind() == expected),
+            combat
+                .actor_statuses(hostile.actor_id())
+                .any(|s| s.kind() == expected),
             "{action} status missing"
         );
         match expected {
             TimedStatusKind::Root => {
-                assert!(!hostile.can_move());
-                assert!(hostile.can_act());
+                assert!(!combat.actor_can_move(hostile.actor_id()));
+                assert!(combat.actor_can_act(hostile.actor_id()));
             }
             TimedStatusKind::Hold => {
-                assert!(!hostile.can_move());
-                assert!(!hostile.can_act());
+                assert!(!combat.actor_can_move(hostile.actor_id()));
+                assert!(!combat.actor_can_act(hostile.actor_id()));
             }
             TimedStatusKind::Snare => {
                 assert!(hostile.effective_movement_speed_mps() < hostile.movement_speed_mps())
             }
             TimedStatusKind::Charm => {
-                assert_eq!(hostile.effective_faction(), combat.player().faction())
+                assert_eq!(
+                    combat.actor_effective_faction(hostile.actor_id()),
+                    combat.player_faction()
+                )
             }
         }
         checks.push(ActionCheck {

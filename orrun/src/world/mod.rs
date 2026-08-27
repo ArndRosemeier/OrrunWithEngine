@@ -13,8 +13,10 @@ mod cave;
 mod chunk_mesh;
 mod combat_layer;
 mod coords;
+mod corpse;
 mod doors;
 mod dungeon;
+mod encounter;
 mod entry;
 mod fauna;
 mod footprint;
@@ -40,12 +42,13 @@ pub use ambience::{Ambience, AmbienceError};
 pub use atlas_fields::AtlasFields;
 pub use cave::{CaveError, CaveLayer, CAVE_LIVE_OPEN_M};
 pub use chunk_mesh::TerrainChunkBuilder;
-pub use combat_layer::{CombatLayer, CombatSfx, HeldMobFixture};
+pub use combat_layer::{CombatLayer, CombatPresentationEvent, CombatSfx};
 pub use coords::{
     chunk_of, chunk_span, AtlasBounds, AtlasCell, CoordError, Heading, MapPoint, CHUNK_SAMPLE_M,
     CHUNK_SPAN_M,
 };
 pub use dungeon::{DungeonError, DungeonLayer, LIVE_OPEN_M};
+pub use encounter::{EncounterDirector, EncounterPlan, EncounterTransition, HeldMobFixture};
 pub use entry::{best_settlement_entry, resolve_spawn, EntryError, SpawnPose, WorldEntryRequest};
 pub use fauna::{FaunaCatalog, FaunaError, FaunaLayer, FaunaSpec};
 pub use footprint::{BuildingIndex, BuildingPlot, CastlePlot, CavePlot, DungeonPlot, HousePlot};

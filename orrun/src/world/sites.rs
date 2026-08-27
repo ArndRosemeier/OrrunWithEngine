@@ -341,7 +341,7 @@ pub fn is_bandit_id(mob_id: &str) -> bool {
 }
 
 fn bandit_hostile(combat: &WorldCombat, idx: i32, x: f64, z: f64) -> WorldHostile {
-    combat.canonical_hostile(&crate::gamedata::MobId::new("bandit"), idx, x, z, x, z)
+    combat.hostile_metadata(&crate::gamedata::MobId::new("bandit"), idx, x, z, x, z)
 }
 
 pub fn seat_overland_sites(combat: &mut WorldCombat, sites: &[OverlandSite]) {

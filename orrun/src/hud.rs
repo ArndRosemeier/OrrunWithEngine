@@ -5,14 +5,14 @@ use engine::world::World;
 use engine::Frame;
 use glam::{Vec3, Vec4};
 
-use crate::combat::WorldCombat;
+use crate::combat::CombatHudSnapshot;
 use crate::controls::KeyBinds;
 
-pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
+pub fn draw_hotbar(ctx: &egui::Context, combat: &CombatHudSnapshot, binds: &KeyBinds) {
     let screen = ctx.screen_rect();
     let slot = 64.0;
     let gap = 6.0;
-    let roster = combat.player_action_roster();
+    let roster = combat.actions();
     let n = roster.len() as f32;
     let bar_w = n * slot + (n - 1.0) * gap;
     let bar_x = ((screen.width() - bar_w) * 0.5).max(12.0);
@@ -25,13 +25,10 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                let data = combat.game_data();
-                for action_id in roster {
-                    let action = data
-                        .action(action_id)
-                        .unwrap_or_else(|| panic!("hotbar references unknown action {action_id}"));
+                for action in roster {
+                    let action_id = action.id();
                     let gated = binds.get(action_id).is_none();
-                    let cd = combat.action_cd_frac(action_id);
+                    let cd = action.cooldown_fraction();
                     let fill = if gated {
                         Color32::from_rgb(48, 48, 48)
                     } else {
@@ -94,10 +91,9 @@ pub fn draw_hotbar(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) 
         });
 }
 
-pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
+pub fn draw_combat_log(ctx: &egui::Context, combat: &CombatHudSnapshot) {
     let screen = ctx.screen_rect();
-    let log_lines = combat.log_lines();
-    let lines: Vec<&str> = log_lines.iter().map(String::as_str).collect();
+    let lines: Vec<&str> = combat.log_lines().iter().map(String::as_str).collect();
     if lines.is_empty() {
         return;
     }
@@ -121,21 +117,14 @@ pub fn draw_combat_log(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
-pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
+pub fn draw_target_frame(ctx: &egui::Context, combat: &CombatHudSnapshot) {
     if combat.is_dead() {
         return;
     }
-    let Some(id) = combat.lock_id() else {
+    let Some(h) = combat.locked_actor().filter(|actor| actor.is_alive()) else {
         return;
     };
-    let Some(h) = combat
-        .hostiles()
-        .iter()
-        .find(|h| h.idx == id && h.is_alive())
-    else {
-        return;
-    };
-    let max = h.max_hp().max(1.0);
+    let max = h.hp_max().max(1.0);
     let frac = (h.hp() / max).clamp(0.0, 1.0) as f32;
     let fill = if frac <= 0.20 {
         Color32::from_rgb(200, 32, 32)
@@ -156,7 +145,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(h.name.to_string())
+                        egui::RichText::new(h.name().to_string())
                             .size(16.0)
                             .color(name_color),
                     );
@@ -173,6 +162,7 @@ pub fn draw_target_frame(ctx: &egui::Context, combat: &WorldCombat) {
 /// One on-screen nameplate for playtester JSON and HUD draw.
 #[derive(Clone, Debug)]
 pub struct NameplateInfo {
+    pub actor_id: crate::combat::ActorId,
     pub name: String,
     pub on_screen: bool,
     pub screen_x: f32,
@@ -183,24 +173,29 @@ const NAMEPLATE_RANGE_M: f64 = 28.0;
 
 /// Nearby living hostiles projected to screen. Locked target is included.
 pub fn nameplate_report(
-    combat: &WorldCombat,
+    combat: &CombatHudSnapshot,
     eye: Vec3,
     view_proj: glam::Mat4,
     screen_w: f32,
     screen_h: f32,
 ) -> Vec<NameplateInfo> {
     let mut out = Vec::new();
-    for h in combat.hostiles() {
+    for h in combat.actors() {
         if !h.is_alive() {
             continue;
         }
-        let dx = h.x - f64::from(eye.x);
-        let dz = h.z - f64::from(eye.z);
+        let dx = h.head_position().0 - f64::from(eye.x);
+        let dz = h.head_position().2 - f64::from(eye.z);
         let dist = (dx * dx + dz * dz).sqrt();
         if dist > NAMEPLATE_RANGE_M {
             continue;
         }
-        let world = Vec4::new(h.x as f32, 1.55, h.z as f32, 1.0);
+        let world = Vec4::new(
+            h.head_position().0 as f32,
+            h.head_position().1 as f32,
+            h.head_position().2 as f32,
+            1.0,
+        );
         let clip = view_proj * world;
         if clip.w.abs() < 1e-5 {
             continue;
@@ -210,7 +205,8 @@ pub fn nameplate_report(
         let sx = (ndc.x * 0.5 + 0.5) * screen_w;
         let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * screen_h;
         out.push(NameplateInfo {
-            name: h.name.clone(),
+            actor_id: h.id(),
+            name: h.name().to_owned(),
             on_screen,
             screen_x: sx,
             screen_y: sy,
@@ -221,7 +217,7 @@ pub fn nameplate_report(
 
 pub fn draw_nameplates(
     ctx: &egui::Context,
-    combat: &WorldCombat,
+    combat: &CombatHudSnapshot,
     eye: Vec3,
     view_proj: glam::Mat4,
 ) {
@@ -230,14 +226,14 @@ pub fn draw_nameplates(
     }
     let screen = ctx.screen_rect();
     let plates = nameplate_report(combat, eye, view_proj, screen.width(), screen.height());
-    for (i, plate) in plates.iter().enumerate() {
+    for plate in &plates {
         if !plate.on_screen {
             continue;
         }
         let color = Color32::WHITE;
         let x = plate.screen_x - 40.0;
         let y = plate.screen_y - 28.0;
-        egui::Area::new(egui::Id::new(("nameplate", i)))
+        egui::Area::new(egui::Id::new(("nameplate", plate.actor_id)))
             .fixed_pos(egui::pos2(x, y))
             .order(egui::Order::Foreground)
             .interactable(false)
@@ -251,11 +247,11 @@ pub fn draw_nameplates(
     }
 }
 
-pub fn draw_cast_bar(ctx: &egui::Context, combat: &WorldCombat) {
-    let Some(frac) = combat.action_cast_frac() else {
+pub fn draw_cast_bar(ctx: &egui::Context, combat: &CombatHudSnapshot) {
+    let Some(frac) = combat.cast_fraction() else {
         return;
     };
-    let Some(label) = combat.action_cast_label() else {
+    let Some(label) = combat.cast_label() else {
         return;
     };
     let screen = ctx.screen_rect();
@@ -288,7 +284,7 @@ pub fn draw_cast_bar(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
-pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
+pub fn draw_fail_toast(ctx: &egui::Context, combat: &CombatHudSnapshot) {
     let Some(line) = combat.fail_tell() else {
         return;
     };
@@ -309,7 +305,7 @@ pub fn draw_fail_toast(ctx: &egui::Context, combat: &WorldCombat) {
         });
 }
 
-pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &WorldCombat, binds: &KeyBinds) {
+pub fn draw_hotbar_and_log(ctx: &egui::Context, combat: &CombatHudSnapshot, binds: &KeyBinds) {
     draw_target_frame(ctx, combat);
     draw_hotbar(ctx, combat, binds);
     draw_cast_bar(ctx, combat);
@@ -598,40 +594,17 @@ impl ProgressionRow {
 }
 
 pub fn progression_report(session: &WorldSession) -> Vec<ProgressionRow> {
-    let progression = session.combat().player_progression();
-    let data = session.game_data();
-    let mut rows = Vec::new();
-    for id in progression.skills() {
-        let skill = data
-            .skill(id)
-            .unwrap_or_else(|| panic!("player knows unknown skill {id}"));
-        let level = progression.skill_level(id).expect("known skill level");
-        let xp = progression.skill_xp(id).expect("known skill XP");
-        let remaining = progression
-            .skill_xp_to_next(id)
-            .expect("known skill XP threshold");
-        rows.push(ProgressionRow {
-            label: skill.name().to_string(),
-            level,
-            xp,
-            xp_total: xp + remaining,
-        });
-    }
-    let hp_xp = progression.hp_xp();
-    rows.push(ProgressionRow {
-        label: "HP".to_string(),
-        level: progression.hp_level(),
-        xp: hp_xp,
-        xp_total: hp_xp + progression.hp_xp_to_next(),
-    });
-    let mana_xp = progression.mana_xp();
-    rows.push(ProgressionRow {
-        label: "Mana".to_string(),
-        level: progression.mana_level(),
-        xp: mana_xp,
-        xp_total: mana_xp + progression.mana_xp_to_next(),
-    });
-    rows
+    session
+        .combat_hud_snapshot()
+        .progression()
+        .iter()
+        .map(|track| ProgressionRow {
+            label: track.label().to_owned(),
+            level: track.level(),
+            xp: track.xp(),
+            xp_total: track.xp_total(),
+        })
+        .collect()
 }
 
 fn paint_progression_row(ui: &mut egui::Ui, row: &ProgressionRow) {

@@ -43,6 +43,14 @@ pub enum ResolutionError {
     InvalidActorIndex(usize),
     #[error("actor {0} is dead")]
     DeadActor(u32),
+    #[error("actor {0} is prevented from acting by a status")]
+    ActorCannotAct(u32),
+    #[error("target actor index {0} is out of bounds")]
+    InvalidTargetIndex(usize),
+    #[error("target actor {0} is dead")]
+    DeadTarget(u32),
+    #[error("target actor {target} is invalid for action {action}")]
+    InvalidTarget { action: ActionId, target: u32 },
     #[error("single_target action requires an explicit target")]
     MissingExplicitTarget,
 }
@@ -286,6 +294,13 @@ impl Actor {
     pub fn set_mana(&mut self, mana: f64) {
         self.mana = mana;
     }
+    pub fn regenerate_mana(&mut self, amount: f64) {
+        assert!(
+            amount.is_finite() && amount >= 0.0,
+            "mana regeneration must be finite and non-negative"
+        );
+        self.mana = (self.mana + amount).min(self.mana_max());
+    }
     pub fn is_alive(&self) -> bool {
         self.alive
     }
@@ -453,12 +468,38 @@ impl AttributedLevelUpEvent {
 /// The complete, typed result of resolving one action.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolution {
+    event_id: CombatEventId,
     pub action_id: ActionId,
     pub caster: ResolutionActorId,
     pub effects: Vec<AppliedEffect>,
     pub mana_spent: f64,
     pub deaths: Vec<ResolutionActorId>,
     pub level_ups: Vec<AttributedLevelUpEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CombatEventId {
+    simulation_tick: u64,
+    sequence: u32,
+}
+impl CombatEventId {
+    pub const fn simulation_tick(self) -> u64 {
+        self.simulation_tick
+    }
+    pub const fn sequence(self) -> u32 {
+        self.sequence
+    }
+}
+impl Resolution {
+    pub const fn event_id(&self) -> CombatEventId {
+        self.event_id
+    }
+    pub(crate) fn stamp(&mut self, simulation_tick: u64, sequence: u32) {
+        self.event_id = CombatEventId {
+            simulation_tick,
+            sequence,
+        };
+    }
 }
 
 struct PlannedEffect {
@@ -525,13 +566,13 @@ impl<'a> Resolver<'a> {
             return Err(ResolutionError::DeadActor(actors[caster].id().get()));
         }
         if !actors[caster].can_act() {
-            return Err(ResolutionError::DeadActor(actors[caster].id().get()));
+            return Err(ResolutionError::ActorCannotAct(actors[caster].id().get()));
         }
         if !actors[caster].actions().knows(action_id) {
             return Err(ResolutionError::UnknownAction(action_id.clone()));
         }
 
-        // Phase 1 â€” plan: resolve every assignment to concrete commands without
+        // Phase 1 — plan: resolve every assignment to concrete commands without
         // mutating actor state, so a failed action never half-applies.
         let mut planned = Vec::with_capacity(action.effects().len());
         for assignment in action.effects() {
@@ -579,7 +620,7 @@ impl<'a> Resolver<'a> {
             });
         }
 
-        // Phase 2 â€” spend resources once per action.
+        // Phase 2 — spend resources once per action.
         let mut mana_spent = 0.0;
         if action.mana_cost() > 0.0 {
             if !actors[caster].spend_mana(action.mana_cost()) {
@@ -604,7 +645,7 @@ impl<'a> Resolver<'a> {
             );
         }
 
-        // Phase 3 â€” apply and record.
+        // Phase 3 — apply and record.
         let mut effects = Vec::with_capacity(planned.len());
         let mut deaths = Vec::new();
         for p in planned {
@@ -705,6 +746,10 @@ impl<'a> Resolver<'a> {
         }
 
         Ok(Resolution {
+            event_id: CombatEventId {
+                simulation_tick: 0,
+                sequence: 0,
+            },
             action_id: action_id.clone(),
             caster: caster_id,
             effects,
@@ -786,9 +831,12 @@ fn select_targets(
                 TargetSelection::Single(idx) => idx,
                 TargetSelection::Area { .. } => return Err(ResolutionError::MissingExplicitTarget),
             };
-            let Some(t) = actors.get(idx).filter(|t| t.is_alive()) else {
-                return Ok(out);
-            };
+            let t = actors
+                .get(idx)
+                .ok_or(ResolutionError::InvalidTargetIndex(idx))?;
+            if !t.is_alive() {
+                return Err(ResolutionError::DeadTarget(t.id().get()));
+            }
             if !class_matches(
                 data,
                 target_class,
@@ -796,7 +844,10 @@ fn select_targets(
                 t.effective_faction(),
                 idx == caster,
             ) {
-                return Ok(out);
+                return Err(ResolutionError::InvalidTarget {
+                    action: action_id.clone(),
+                    target: t.id().get(),
+                });
             }
             if dist(c.x, c.z, t.x, t.z) > range_m {
                 return Err(ResolutionError::OutOfRange(action_id.clone()));
@@ -1335,7 +1386,7 @@ mod tests {
                 TargetSelection::Single(1),
             )
             .unwrap_err();
-        assert_eq!(err, ResolutionError::NoTarget(ActionId::new("slash")));
+        assert_eq!(err, ResolutionError::DeadTarget(1));
     }
 
     #[test]
@@ -1376,7 +1427,7 @@ mod tests {
             });
         };
         add(1, 2.0, 0.0); // straight ahead, in cone
-        add(2, 0.0, 2.0); // 90Â° off, out of cone
+        add(2, 0.0, 2.0); // 90° off, out of cone
         let got = select_targets(
             &data,
             &actors,
@@ -1495,5 +1546,23 @@ mod tests {
             1.0,
             "Hold pauses an uninterruptible cast"
         );
+    }
+    #[test]
+    fn charm_expiry_restores_base_faction_without_mutating_it() {
+        let data = data();
+        let mut actor = wolf(&data, 1.0, 0.0);
+        let base = actor.base_faction().clone();
+        actor.apply_status(
+            TimedStatusKind::Charm,
+            0.1,
+            1.0,
+            ResolutionActorId::new(0),
+            Some(FactionId::new("citizen")),
+        );
+        assert_eq!(actor.effective_faction(), &FactionId::new("citizen"));
+        assert_eq!(actor.base_faction(), &base);
+        actor.tick_runtime(0.1);
+        assert_eq!(actor.effective_faction(), &base);
+        assert_eq!(actor.base_faction(), &base);
     }
 }

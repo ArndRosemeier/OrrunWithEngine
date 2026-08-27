@@ -249,6 +249,7 @@ impl Track {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorProgression {
     skills: BTreeMap<SkillId, Track>,
+    authored_hp_base: f64,
     hp: Track,
     mana: Track,
 }
@@ -260,12 +261,24 @@ impl ActorProgression {
     }
 
     fn from_levels(levels: impl IntoIterator<Item = (SkillId, i32)>) -> Self {
+        Self::from_levels_with_hp_base(levels, balance::HP_BASE)
+    }
+
+    fn from_levels_with_hp_base(
+        levels: impl IntoIterator<Item = (SkillId, i32)>,
+        authored_hp_base: f64,
+    ) -> Self {
+        assert!(
+            authored_hp_base.is_finite() && authored_hp_base > 0.0,
+            "authored HP base must be finite and positive"
+        );
         let mut skills = BTreeMap::new();
         for (id, level) in levels {
             skills.insert(id, Track::new(level));
         }
         ActorProgression {
             skills,
+            authored_hp_base,
             hp: Track::new(1),
             mana: Track::new(1),
         }
@@ -279,7 +292,10 @@ impl ActorProgression {
 
     /// Initialize from authored mob skill levels.
     pub fn from_mob(mob: &MobDefinition, _gamedata: &GameData) -> Self {
-        Self::from_levels(mob.skills().iter().map(|s| (s.id().clone(), s.level())))
+        Self::from_levels_with_hp_base(
+            mob.skills().iter().map(|s| (s.id().clone(), s.level())),
+            f64::from(mob.hp()),
+        )
     }
 
     /// Export exact progression state in stable skill-ID order.
@@ -354,12 +370,13 @@ impl ActorProgression {
         }
         let mut events = Vec::new();
         let xp = xp_from_amount(amount, balance::XP_PER_HP_DAMAGE);
+        let authored_hp_base = self.authored_hp_base;
         self.hp.add_xp(
             &Proficiency::Hp,
             xp,
             |old, new| LevelUpResult::Resource {
-                max_before: balance::hp_max(old),
-                max_after: balance::hp_max(new),
+                max_before: authored_hp_base + balance::HP_PER_LEVEL * f64::from(old - 1),
+                max_after: authored_hp_base + balance::HP_PER_LEVEL * f64::from(new - 1),
             },
             &mut events,
         );
@@ -412,7 +429,7 @@ impl ActorProgression {
         balance::xp_to_next(self.hp.level) - self.hp.xp
     }
     pub fn hp_max(&self) -> f64 {
-        balance::hp_max(self.hp.level)
+        self.authored_hp_base + balance::HP_PER_LEVEL * f64::from(self.hp.level - 1)
     }
 
     pub fn mana_level(&self) -> i32 {
@@ -722,5 +739,26 @@ mod tests {
         let m = ActorProgression::from_mob(wolf, &data);
         assert!(m.skill_level(&SkillId::new("melee")).is_some());
         assert_eq!(m.hp_level(), 1);
+    }
+    #[test]
+    fn mob_authored_hp_is_progression_base_capacity() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/OrrunGameData.xml");
+        let data = GameData::load(path).expect("canonical data");
+        let wolf = data.mob(&MobId::new("wolf")).expect("wolf");
+        let mut progression = ActorProgression::from_mob(wolf, &data);
+        assert_eq!(progression.hp_max(), f64::from(wolf.hp()));
+        let events = progression.record_damage_taken(100.0);
+        assert_eq!(
+            progression.hp_max(),
+            f64::from(wolf.hp()) + balance::HP_PER_LEVEL
+        );
+        assert_eq!(
+            events[0].result,
+            LevelUpResult::Resource {
+                max_before: f64::from(wolf.hp()),
+                max_after: f64::from(wolf.hp()) + balance::HP_PER_LEVEL
+            }
+        );
     }
 }
