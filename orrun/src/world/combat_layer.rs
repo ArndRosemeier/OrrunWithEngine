@@ -943,7 +943,7 @@ impl CombatLayer {
             world,
             EffectSpec {
                 kind: visual_kind(effect.operation),
-                delivery: delivery(effect.application),
+                delivery: delivery(effect.application, effect.caster, effect.target),
                 origin,
                 target,
                 range_m: distance,
@@ -1265,8 +1265,13 @@ fn visual_kind(operation: EffectOperation) -> VisualKind {
     }
 }
 
-fn delivery(application: Application) -> Delivery {
+fn delivery(
+    application: Application,
+    caster: ResolutionActorId,
+    target: ResolutionActorId,
+) -> Delivery {
     match application {
+        Application::SingleTarget if caster == target => Delivery::AtTarget,
         Application::SingleTarget => Delivery::SingleTarget,
         Application::Cone => Delivery::Cone,
         Application::Aoe => Delivery::Aoe,
@@ -1515,11 +1520,52 @@ mod typed_presentation_tests {
     }
 
     #[test]
-    fn every_typed_application_has_a_delivery() {
-        assert_eq!(delivery(Application::SingleTarget), Delivery::SingleTarget);
-        assert_eq!(delivery(Application::Cone), Delivery::Cone);
-        assert_eq!(delivery(Application::Aoe), Delivery::Aoe);
-        assert_eq!(delivery(Application::Pbaoe), Delivery::Pbaoe);
+    fn delivery_preserves_travel_for_other_targets_and_centers_self_targets() {
+        let player = ResolutionActorId::new(0);
+        let hostile = ResolutionActorId::new(1);
+        assert_eq!(
+            delivery(Application::SingleTarget, player, player),
+            Delivery::AtTarget
+        );
+        assert_eq!(
+            delivery(Application::SingleTarget, player, hostile),
+            Delivery::SingleTarget
+        );
+        assert_eq!(delivery(Application::Cone, player, hostile), Delivery::Cone);
+        assert_eq!(delivery(Application::Aoe, player, hostile), Delivery::Aoe);
+        assert_eq!(
+            delivery(Application::Pbaoe, player, player),
+            Delivery::Pbaoe
+        );
+    }
+
+    #[test]
+    fn mend_self_target_delivery_spawns_with_coincident_positions() {
+        let player = ResolutionActorId::new(0);
+        let position = glam::Vec3::new(4.0, 1.0, -2.0);
+        let mut world = World::new();
+        let mut vfx = VfxSystem::new();
+
+        let handle = vfx
+            .spawn(
+                &mut world,
+                EffectSpec {
+                    kind: visual_kind(EffectOperation::Heal),
+                    delivery: delivery(Application::SingleTarget, player, player),
+                    origin: position,
+                    target: position,
+                    range_m: 0.1,
+                    radius_m: 1.0,
+                    angle_deg: 45.0,
+                    duration_s: 1.15,
+                    scale: 0.75,
+                    intensity: 1.0,
+                    seed: 7,
+                },
+            )
+            .expect("self-target Mend VFX must spawn");
+
+        assert!(vfx.is_active(handle));
     }
 
     #[test]
