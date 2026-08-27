@@ -38,7 +38,7 @@ use orrun::atlas::{ContinentAtlas, EndpointKind, Kind, NodeKind, SIZE as MAX_CON
 use orrun::controls::{is_reserved, Action};
 use orrun::gamedata::GameData;
 use orrun::hud;
-use orrun::save::SavedStand;
+use orrun::save::{SaveError, SavedStand};
 use orrun::settings::{self, clamp_continent_size, Settings};
 use orrun::world::{
     best_settlement_entry, install_daylight, install_materials, plan_overland_sites, Ambience,
@@ -711,8 +711,16 @@ fn main() {
     let game_data = Arc::new(GameData::load("data/OrrunGameData.xml").expect("canonical GameData"));
     let prefs = Settings::load().unwrap_or_else(|err| panic!("{err}"));
     let (seed, size) = parse_args(prefs.continent_size());
-    // A present save is authoritative: incompatible or malformed state fails loudly.
-    let remembered = SavedStand::read(seed, size).unwrap_or_else(|err| panic!("{err}"));
+    let (remembered, mut startup_notice) = match SavedStand::read(seed, size) {
+        Ok(remembered) => (remembered, None),
+        Err(SaveError::IncompatibleFormat { found, .. }) => (
+            None,
+            Some(format!(
+                "The saved game uses incompatible format {found}. Starting at the default location with a new character."
+            )),
+        ),
+        Err(err) => panic!("{err}"),
+    };
 
     let status = Arc::new(Mutex::new(format!("Charting {size} km of continent…")));
     let status_job = Arc::clone(&status);
@@ -752,12 +760,6 @@ fn main() {
 
     let last_stand = Arc::new(Mutex::new(remembered.clone()));
     let stand_in_loop = Arc::clone(&last_stand);
-
-    // Performance inspection default: allow the renderer to run uncapped.
-    // Set ENGINE_PRESENT_MODE=fifo to restore VSync explicitly.
-    if std::env::var_os("ENGINE_PRESENT_MODE").is_none() {
-        std::env::set_var("ENGINE_PRESENT_MODE", "immediate");
-    }
 
     Engine::run("Orrun", move |world, frame| {
         if frame.first {
@@ -902,6 +904,7 @@ fn main() {
             SessionState::Travel => draw_travel(viewer, session, frame),
             SessionState::World => {
                 draw_world_hud(session, world, frame);
+                draw_startup_notice(&frame.ui.ctx().clone(), &mut startup_notice);
             }
         }
         draw_settings(&mut settings_ui, world, frame);
@@ -922,6 +925,23 @@ fn main() {
             path.display()
         );
     }
+}
+
+fn draw_startup_notice(ctx: &egui::Context, notice: &mut Option<String>) {
+    let Some(message) = notice.clone() else {
+        return;
+    };
+    egui::Window::new("Saved game incompatible")
+        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(message);
+            ui.add_space(8.0);
+            if ui.button("Continue").clicked() {
+                *notice = None;
+            }
+        });
 }
 
 enum TitleAction {

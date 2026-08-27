@@ -388,7 +388,11 @@ impl FaunaLayer {
         }
     }
 
-    pub fn sync_canonical_actors(&mut self, combat: &crate::combat::WorldCombat) {
+    pub fn sync_canonical_actors(
+        &mut self,
+        combat: &crate::combat::WorldCombat,
+        ground: &ContactSnapshot,
+    ) {
         for agent in &mut self.agents {
             let Some(actor_id) = agent.actor_id else {
                 continue;
@@ -399,27 +403,27 @@ impl FaunaLayer {
                 .find(|actor| actor.actor_id() == actor_id)
                 .unwrap_or_else(|| panic!("fauna actor {actor_id:?} missing from canonical arena"));
             match actor.state {
-                crate::combat::types::HostileState::Idle
-                | crate::combat::types::HostileState::Alerted => {
+                crate::combat::types::HostileState::Idle => {
                     if matches!(agent.state, State::Engaged | State::Attack) {
                         agent.state = State::Graze;
                         agent.walking = false;
                     }
                 }
-                crate::combat::types::HostileState::Pursuing
+                crate::combat::types::HostileState::Alerted
+                | crate::combat::types::HostileState::Pursuing
                 | crate::combat::types::HostileState::Fleeing
                 | crate::combat::types::HostileState::Leashing => {
-                    sync_canonical_pose(agent, actor);
+                    sync_canonical_pose(agent, actor, combat.presentation_alpha(), ground);
                     agent.state = State::Engaged;
                     agent.walking = true;
                 }
                 crate::combat::types::HostileState::Attacking => {
-                    sync_canonical_pose(agent, actor);
+                    sync_canonical_pose(agent, actor, combat.presentation_alpha(), ground);
                     agent.state = State::Attack;
                     agent.walking = false;
                 }
                 crate::combat::types::HostileState::Dead => {
-                    sync_canonical_pose(agent, actor);
+                    sync_canonical_pose(agent, actor, combat.presentation_alpha(), ground);
                     agent.state = State::Dead;
                     agent.walking = false;
                 }
@@ -467,7 +471,7 @@ impl FaunaLayer {
             )? || self.busy();
         }
         self.register_canonical_actors(combat);
-        self.sync_canonical_actors(combat);
+        self.sync_canonical_actors(combat, &ground);
         self.tick(
             world, surface, ponds, plots, hamlets, &ground, player, dt, combat,
         )?;
@@ -1058,10 +1062,23 @@ fn xz_dist(a: GlobalXZ, b: GlobalXZ) -> f64 {
     (dx * dx + dz * dz).sqrt()
 }
 
-fn sync_canonical_pose(agent: &mut Agent, actor: &crate::combat::WorldHostile) {
-    agent.pos.x = actor.x;
-    agent.pos.z = actor.z;
-    let heading = actor.heading();
+fn sync_canonical_pose(
+    agent: &mut Agent,
+    actor: &crate::combat::WorldHostile,
+    alpha: f64,
+    ground: &ContactSnapshot,
+) {
+    let (x, z, heading) = actor.presented_pose(alpha);
+    agent.pos.x = x;
+    agent.pos.z = z;
+    let at = agent.pos.horizontal();
+    let y = ground.height_at(at).unwrap_or_else(|| {
+        panic!(
+            "engaged fauna actor {:?} has no resident ground at ({x:.2}, {z:.2})",
+            actor.actor_id()
+        )
+    });
+    agent.pos.y = f64::from(y + FOOT_CLEARANCE_M);
     agent.yaw = heading.x().atan2(heading.z()).to_degrees() as f32;
     agent.desired_yaw = agent.yaw;
 }

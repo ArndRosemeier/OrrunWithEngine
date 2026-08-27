@@ -954,9 +954,10 @@ struct LiveProp {
     prototype: EntityId,
     mid_prototype: Option<EntityId>,
     bins: HashMap<(i32, i32), EntityId>,
-    /// Empty entities retained so a sliding window does not change the GPU
-    /// batch layout every time a cell leaves on one edge and enters on another.
-    spare_bins: Vec<EntityId>,
+    /// Prototype backing each live bin. Reuse must preserve this immutable identity.
+    bin_prototypes: HashMap<(i32, i32), EntityId>,
+    /// Empty bins grouped by their immutable prototype.
+    spare_bins: HashMap<EntityId, Vec<EntityId>>,
 }
 
 /// One prop standing on the ground, in the world's own coordinates.
@@ -1186,7 +1187,8 @@ impl ScatterLayer {
                 prototype,
                 mid_prototype: None,
                 bins: HashMap::new(),
-                spare_bins: Vec::new(),
+                bin_prototypes: HashMap::new(),
+                spare_bins: HashMap::new(),
             });
         }
         for kind in [
@@ -1211,7 +1213,8 @@ impl ScatterLayer {
                 prototype,
                 mid_prototype: Some(mid_prototype),
                 bins: HashMap::new(),
-                spare_bins: Vec::new(),
+                bin_prototypes: HashMap::new(),
+                spare_bins: HashMap::new(),
             });
         }
 
@@ -1293,10 +1296,14 @@ impl ScatterLayer {
             for id in prop.bins.values().copied() {
                 world.despawn(id);
             }
-            for id in prop.spare_bins.drain(..) {
-                world.despawn(id);
+            for ids in prop.spare_bins.values_mut() {
+                for id in ids.drain(..) {
+                    world.despawn(id);
+                }
             }
+            prop.spare_bins.clear();
             prop.bins.clear();
+            prop.bin_prototypes.clear();
         }
         world.set_instances(self.far_entity, &[])?;
         for id in self.far_bins.values().copied() {
@@ -1520,7 +1527,10 @@ impl ScatterLayer {
             for key in stale {
                 if let Some(id) = prop.bins.remove(&key) {
                     world.set_instances(id, &[])?;
-                    prop.spare_bins.push(id);
+                    let prototype = prop.bin_prototypes.remove(&key).unwrap_or_else(|| {
+                        panic!("live scatter bin {key:?} has no prototype identity")
+                    });
+                    prop.spare_bins.entry(prototype).or_default().push(id);
                     if is_tree {
                         dropped_trees = true;
                         self.tree_shown.remove(&(vi, key.0, key.1));
@@ -1656,22 +1666,39 @@ impl ScatterLayer {
                 (places_of(&sprigs[..job.shown], origin), total)
             };
             let prop = &mut self.props[job.vi];
-            let id = match prop.bins.get(&(job.bx, job.bz)) {
+            let cell = (job.bx, job.bz);
+            let prototype = if self.centre.is_some_and(|focus| {
+                (bin_dist_key(job.bx, job.bz, focus) as f64).sqrt() > TREE_MID_RADIUS_M
+            }) {
+                prop.mid_prototype.unwrap_or(prop.prototype)
+            } else {
+                prop.prototype
+            };
+            if prop
+                .bin_prototypes
+                .get(&cell)
+                .is_some_and(|current| *current != prototype)
+            {
+                let id = prop
+                    .bins
+                    .remove(&cell)
+                    .expect("prototype identity exists without a live scatter bin");
+                let previous = prop
+                    .bin_prototypes
+                    .remove(&cell)
+                    .expect("prototype identity disappeared");
+                world.set_instances(id, &[])?;
+                prop.spare_bins.entry(previous).or_default().push(id);
+            }
+            let id = match prop.bins.get(&cell) {
                 Some(id) => *id,
                 None => {
-                    let prototype = if prop.class == PropClass::Tree
-                        && self.centre.is_some_and(|focus| {
-                            (bin_dist_key(job.bx, job.bz, focus) as f64).sqrt() > TREE_MID_RADIUS_M
-                        }) {
-                        prop.mid_prototype.unwrap_or(prop.prototype)
-                    } else {
-                        prop.prototype
-                    };
-                    let id = match prop.spare_bins.pop() {
+                    let id = match prop.spare_bins.get_mut(&prototype).and_then(Vec::pop) {
                         Some(id) => id,
                         None => world.spawn_instanced_like(prototype)?,
                     };
-                    prop.bins.insert((job.bx, job.bz), id);
+                    prop.bins.insert(cell, id);
+                    prop.bin_prototypes.insert(cell, prototype);
                     id
                 }
             };
@@ -1683,10 +1710,11 @@ impl ScatterLayer {
                 .near_buckets
                 .get(&(job.vi, job.bx, job.bz))
                 .is_some_and(|s| job.shown >= s.len());
-            if done {
-                if self.near_tree_bins.insert((job.bx, job.bz)) {
+            let cell = (job.bx, job.bz);
+            if done && self.tree_cell_complete(cell) {
+                if self.near_tree_bins.insert(cell) {
                     completed_cell = true;
-                    self.hide_far_bin(world, (job.bx, job.bz))?;
+                    self.hide_far_bin(world, cell)?;
                 }
             } else {
                 self.tree_queue.push_front(job);
@@ -1724,11 +1752,14 @@ impl ScatterLayer {
             let id = match prop.bins.get(&(bx, bz)) {
                 Some(id) => *id,
                 None => {
-                    let id = match prop.spare_bins.pop() {
+                    let prototype = prop.prototype;
+                    let id = match prop.spare_bins.get_mut(&prototype).and_then(Vec::pop) {
                         Some(id) => id,
-                        None => world.spawn_instanced_like(prop.prototype)?,
+                        None => world.spawn_instanced_like(prototype)?,
                     };
-                    prop.bins.insert((bx, bz), id);
+                    let cell = (bx, bz);
+                    prop.bins.insert(cell, id);
+                    prop.bin_prototypes.insert(cell, prototype);
                     id
                 }
             };
@@ -1782,13 +1813,31 @@ impl ScatterLayer {
         self.near_placed = n;
     }
 
+    fn tree_cell_complete(&self, cell: (i32, i32)) -> bool {
+        self.near_buckets.iter().all(|(&(vi, bx, bz), sprigs)| {
+            self.props[vi].class != PropClass::Tree
+                || (bx, bz) != cell
+                || self
+                    .tree_shown
+                    .get(&(vi, bx, bz))
+                    .is_some_and(|shown| *shown >= sprigs.len())
+        })
+    }
+
     fn rebuild_tree_bins(&mut self) {
         self.near_tree_bins.clear();
-        for prop in &self.props {
-            if prop.class != PropClass::Tree {
-                continue;
+        let candidate_cells: HashSet<(i32, i32)> = self
+            .near_buckets
+            .keys()
+            .filter_map(|&(vi, bx, bz)| {
+                (self.props[vi].class == PropClass::Tree).then_some((bx, bz))
+            })
+            .collect();
+        for cell in candidate_cells {
+            let complete = self.tree_cell_complete(cell);
+            if complete {
+                self.near_tree_bins.insert(cell);
             }
-            self.near_tree_bins.extend(prop.bins.keys().copied());
         }
     }
 

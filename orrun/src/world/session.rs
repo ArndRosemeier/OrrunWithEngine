@@ -311,7 +311,6 @@ impl Player {
 struct InstalledProxy {
     land: EntityId,
     sea: EntityId,
-    marker: EntityId,
 }
 
 struct TravelState {
@@ -1446,7 +1445,6 @@ impl WorldSession {
         if self.travel.as_ref().expect("travel").handed_off && self.update_loading(world)? {
             self.travel.as_mut().expect("travel").destination_ready = true;
         }
-        self.place_travel_marker(world)?;
 
         loop {
             let phase = self.travel.as_ref().expect("travel").phase;
@@ -1614,12 +1612,8 @@ impl WorldSession {
             world.spawn_anchored(spec.land_mesh()?, GlobalPlace::at(GlobalPosition::ORIGIN))?;
         let sea =
             world.spawn_anchored(spec.sea_mesh()?, GlobalPlace::at(GlobalPosition::ORIGIN))?;
-        let marker = world.spawn_anchored(
-            spec.marker_mesh()?,
-            GlobalPlace::at(GlobalPosition::at(0.0, 1_200.0, 0.0)),
-        )?;
         world.in_space(prev)?;
-        self.proxy = Some(InstalledProxy { land, sea, marker });
+        self.proxy = Some(InstalledProxy { land, sea });
         Ok(())
     }
 
@@ -1629,27 +1623,6 @@ impl WorldSession {
         };
         world.entity(proxy.land).expect("continent proxy land mesh");
         world.entity(proxy.sea).expect("continent proxy sea mesh");
-        world
-            .entity(proxy.marker)
-            .expect("continent proxy destination marker");
-    }
-
-    fn place_travel_marker(&mut self, world: &mut World) -> Result<(), SessionError> {
-        let Some(dest) = self.destination() else {
-            return Ok(());
-        };
-        let Some(spec) = self.proxy_spec.as_ref() else {
-            return Ok(());
-        };
-        let Some(proxy) = self.proxy.as_ref() else {
-            return Ok(());
-        };
-        let y = f64::from(spec.height_at(dest) + 1_200.0);
-        world.set_anchored_place(
-            proxy.marker,
-            GlobalPlace::at(GlobalPosition::at(dest.x, y, dest.z)),
-        )?;
-        Ok(())
     }
 
     fn travel_view_now(&self) -> Option<TravelView> {
@@ -2295,8 +2268,13 @@ impl WorldSession {
                     .map(|k| k.2)
                     .unwrap_or(py)
             };
+            let hostile_ground = self.stream.contact_snapshot();
             self.combat_layer
-                .sync_hostile_transforms(world, &self.combat)?;
+                .sync_hostile_transforms(world, &self.combat, move |x, z| {
+                    hostile_ground
+                        .height_at(GlobalXZ::at(x, z))
+                        .map(|height| f64::from(height + FOOT_CLEARANCE_M))
+                })?;
             self.combat_layer
                 .present(world, &self.combat, player.position, ground_y, input.dt)?;
             self.sync_ground_loot(world)?;

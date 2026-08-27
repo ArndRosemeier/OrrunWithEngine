@@ -512,6 +512,61 @@ mod tests {
         assert!(river_presence(20.0, 8.0) > 0.5);
     }
 
+    fn assert_tonal_pcm16(path: &Path) {
+        let bytes = std::fs::read(path).expect("read forest clip");
+        assert_eq!(&bytes[0..4], b"RIFF", "{} is not RIFF", path.display());
+        assert_eq!(&bytes[8..12], b"WAVE", "{} is not WAVE", path.display());
+        assert_eq!(
+            u16::from_le_bytes([bytes[20], bytes[21]]),
+            1,
+            "{} must be PCM",
+            path.display()
+        );
+        assert_eq!(
+            u16::from_le_bytes([bytes[22], bytes[23]]),
+            2,
+            "{} must be stereo",
+            path.display()
+        );
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            44_100,
+            "{} must be 44.1 kHz",
+            path.display()
+        );
+        assert_eq!(
+            u16::from_le_bytes([bytes[34], bytes[35]]),
+            16,
+            "{} must be PCM16",
+            path.display()
+        );
+        assert_eq!(
+            &bytes[36..40],
+            b"data",
+            "{} has unexpected WAV chunks",
+            path.display()
+        );
+        let samples: Vec<i16> = bytes[44..]
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+            .collect();
+        assert!(
+            samples.len() > 1,
+            "{} contains too few samples",
+            path.display()
+        );
+        let crossings = samples
+            .windows(2)
+            .filter(|pair| pair[0].is_negative() != pair[1].is_negative())
+            .count();
+        let rate = crossings as f64 / (samples.len() - 1) as f64;
+        assert!(
+            rate < 0.2,
+            "{} resembles broadband noise: zero-crossing rate {rate:.3}",
+            path.display()
+        );
+    }
+
     #[test]
     fn shipped_clips_are_on_disk() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/audio");
@@ -532,6 +587,9 @@ mod tests {
                 "expected shipped ambience clip at {}",
                 path.display()
             );
+            if name.starts_with("forest_") {
+                assert_tonal_pcm16(&path);
+            }
         }
     }
 }

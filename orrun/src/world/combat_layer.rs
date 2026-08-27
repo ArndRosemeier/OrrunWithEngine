@@ -53,13 +53,6 @@ const GOLD: Color = Color {
     b: 0.12,
     a: 1.0,
 };
-const FLASH_S: f32 = 6.0;
-const FLASH: Color = Color {
-    r: 1.0,
-    g: 0.96,
-    b: 0.55,
-    a: 1.0,
-};
 const SPARKLE: Color = Color {
     r: 1.0,
     g: 0.86,
@@ -158,8 +151,6 @@ pub struct CombatLayer {
     vfx: VfxSystem,
     vfx_seed: u32,
     flinch: Option<Flinch>,
-    flash: Option<EntityId>,
-    flash_t: f32,
     incoming_hit: bool,
     hurt_flash_s: f64,
     hp_ghost_frac: f32,
@@ -196,8 +187,6 @@ impl CombatLayer {
             vfx: VfxSystem::new(),
             vfx_seed: 1,
             flinch: None,
-            flash: None,
-            flash_t: 0.0,
             incoming_hit: false,
             hurt_flash_s: 0.0,
             hp_ghost_frac: 0.0,
@@ -368,7 +357,6 @@ impl CombatLayer {
         self.mesh_anchors.clear();
         self.lock_ring = None;
         self.ring_on = None;
-        self.flash = None;
         self.death_posed.clear();
         self.sparkles.clear();
     }
@@ -490,7 +478,7 @@ impl CombatLayer {
             }
             self.sparkles.remove(&idx);
         }
-        // Same XZ as lock-ring / hit-flash: Death-posed mesh origin, not combat h.x/h.z
+        // Same XZ as the lock ring: Death-posed mesh origin, not combat h.x/h.z
         // (orc mesh sits ORC_MESH_BEHIND_M behind the hostile point).
         let (x, y, z) = self
             .mesh_anchors
@@ -551,8 +539,6 @@ impl CombatLayer {
         self.pending_melee = None;
         self.skull_tele.clear();
         self.mage_tele.clear();
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.death_posed.clear();
         self.sparkles.clear();
@@ -573,7 +559,6 @@ impl CombatLayer {
         }
         self.mesh_anchors.clear();
         self.despawn_ring(world);
-        self.despawn_flash(world);
         self.strip_all_sparkles(world);
         self.flinch = None;
         self.death_posed.clear();
@@ -584,13 +569,6 @@ impl CombatLayer {
             world.despawn(id);
         }
         self.ring_on = None;
-    }
-
-    fn despawn_flash(&mut self, world: &mut World) {
-        if let Some(id) = self.flash.take() {
-            world.despawn(id);
-        }
-        self.flash_t = 0.0;
     }
 
     fn model_for(&mut self, mob_id: &str) -> EngineResult<Arc<AnimatedModel>> {
@@ -766,8 +744,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
     }
 
@@ -844,8 +820,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -894,8 +868,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -944,8 +916,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -994,8 +964,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -1044,8 +1012,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -1108,8 +1074,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -1156,8 +1120,6 @@ impl CombatLayer {
         self.pending_sfx.clear();
         self.pending_flinch = None;
         self.flinch = None;
-        self.flash = None;
-        self.flash_t = 0.0;
         self.ring_on = None;
         self.pending_melee = None;
         self.skull_tele.clear();
@@ -1525,12 +1487,8 @@ impl CombatLayer {
         }
         if let Some(target_id) = self.pending_flinch.take() {
             self.start_flinch(world, combat, target_id)?;
-            if !fire_targets.contains(&target_id) {
-                self.spawn_flash(world, combat, target_id, &mut ground_y)?;
-            }
         }
         self.tick_flinch(world, dt)?;
-        self.tick_flash(world, dt);
         self.vfx.update(world, dt)?;
         Ok(())
     }
@@ -1540,6 +1498,7 @@ impl CombatLayer {
         &mut self,
         world: &mut World,
         combat: &WorldCombat,
+        mut ground_y: impl FnMut(f64, f64) -> Option<f64>,
     ) -> EngineResult<()> {
         for h in combat.hostiles() {
             let Some(id) = h.entity else {
@@ -1548,8 +1507,9 @@ impl CombatLayer {
             let Some(anchor) = self.mesh_anchors.iter().find(|a| a.id == id) else {
                 continue;
             };
-            let render = world.to_render(GlobalPosition::at(h.x, anchor.pos.y, h.z))?;
-            let heading = h.heading();
+            let (x, z, heading) = h.presented_pose(combat.presentation_alpha());
+            let y = ground_y(x, z).unwrap_or(anchor.pos.y);
+            let render = world.to_render(GlobalPosition::at(x, y, z))?;
             let yaw = heading.x().atan2(heading.z()).to_degrees() as f32;
             let place = Place::at(render.x, render.y, render.z)?.yaw_deg(yaw)?;
             let has_locomotion_clip = mesh_spec(&h.mob_id)
@@ -1697,46 +1657,6 @@ impl CombatLayer {
         Ok(())
     }
 
-    fn spawn_flash(
-        &mut self,
-        world: &mut World,
-        combat: &WorldCombat,
-        target_id: i32,
-        ground_y: &mut impl FnMut(f64, f64) -> f64,
-    ) -> EngineResult<()> {
-        self.despawn_flash(world);
-        let Some(h) = combat.hostiles().iter().find(|h| h.idx == target_id) else {
-            return Ok(());
-        };
-        let (x, z) = self
-            .mesh_anchors
-            .iter()
-            .find(|a| Some(a.id) == h.entity)
-            .map(|a| (a.pos.x, a.pos.z))
-            .unwrap_or((h.x, h.z));
-        let y = ground_y(x, z) + 0.22;
-        let id = world.spawn_anchored(
-            hit_flash_mesh()?,
-            GlobalPlace::at(GlobalPosition::at(x, y, z)).with_scale(FLINCH_PEAK),
-        )?;
-        let _ = world.set_casts_shadow(id, false);
-        self.flash = Some(id);
-        self.flash_t = 0.0;
-        Ok(())
-    }
-
-    fn tick_flash(&mut self, world: &mut World, dt: f32) {
-        let Some(id) = self.flash else {
-            return;
-        };
-        self.flash_t += dt;
-        if self.flash_t >= FLASH_S {
-            world.despawn(id);
-            self.flash = None;
-            self.flash_t = 0.0;
-        }
-    }
-
     fn start_flinch(
         &mut self,
         world: &mut World,
@@ -1789,21 +1709,8 @@ impl CombatLayer {
     }
 }
 
-fn hit_flash_mesh() -> EngineResult<Mesh> {
-    let mut mesh = Mesh::new();
-    let s = 3.40;
-    let a = mesh.add_point((-s, 0.0, -s))?;
-    let b = mesh.add_point((s, 0.0, -s))?;
-    let c = mesh.add_point((s, 0.0, s))?;
-    let d = mesh.add_point((-s, 0.0, s))?;
-    mesh.add_quad(a, b, c, d)?;
-    mesh.add_quad(a, d, c, b)?;
-    mesh.paint_all(FLASH);
-    Ok(mesh)
-}
-
 fn sparkle_mesh() -> EngineResult<Mesh> {
-    // Clone of the hit-flash unlit quad, lock-ring-tube scale. Stays until taken or reset.
+    // Compact corpse-loot marker. Stays until taken or reset.
     let mut mesh = Mesh::new();
     let s = SPARKLE_HALF_M;
     let a = mesh.add_point((-s, 0.0, -s))?;

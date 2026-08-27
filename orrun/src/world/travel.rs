@@ -271,14 +271,6 @@ impl ContinentProxySpec {
         mesh.add_quad(a, d, c, b)?;
         Ok(mesh)
     }
-
-    pub fn marker_mesh(&self) -> EngineResult<Mesh> {
-        Mesh::box_at(
-            (0.0, 0.0, 0.0),
-            (180.0, 2_400.0, 180.0),
-            Color::rgb(255, 228, 120),
-        )
-    }
 }
 
 /// Altitude that frames the whole continent in `fov_y_degrees`.

@@ -405,6 +405,9 @@ pub struct WorldHostile {
     actor_id: ActorId,
     pub x: f64,
     pub z: f64,
+    previous_x: f64,
+    previous_z: f64,
+    previous_heading: CanonicalHeading,
     hp: f64,
     max_hp: f64,
     pub armor: i32,
@@ -536,6 +539,9 @@ impl WorldHostile {
             actor_id: ActorId::from_runtime_index(idx),
             x,
             z,
+            previous_x: x,
+            previous_z: z,
+            previous_heading: CanonicalHeading::from_xz(1.0, 0.0),
             hp: f64::from(sheet.hp),
             max_hp: f64::from(sheet.hp),
             armor: sheet.armor,
@@ -636,6 +642,19 @@ impl WorldHostile {
     }
     pub fn flee_threat(&self) -> Option<ActorId> {
         self.flee_threat
+    }
+    pub fn presented_pose(&self, alpha: f64) -> (f64, f64, CanonicalHeading) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let x = self.previous_x + (self.x - self.previous_x) * alpha;
+        let z = self.previous_z + (self.z - self.previous_z) * alpha;
+        let hx = self.previous_heading.x() + (self.heading.x() - self.previous_heading.x()) * alpha;
+        let hz = self.previous_heading.z() + (self.heading.z() - self.previous_heading.z()) * alpha;
+        let heading = if hx.hypot(hz) <= 1e-9 {
+            self.heading
+        } else {
+            CanonicalHeading::from_xz(hx, hz)
+        };
+        (x, z, heading)
     }
 }
 
@@ -1145,6 +1164,8 @@ impl WorldCombat {
         }
         actor.x = x;
         actor.z = z;
+        actor.previous_x = x;
+        actor.previous_z = z;
     }
     pub fn next_actor_runtime_index(&self) -> i32 {
         self.hostiles
@@ -1174,6 +1195,7 @@ impl WorldCombat {
             .expect("canonical actor id space exhausted");
         hostile.spawn_seed = seed;
         hostile.heading = heading;
+        hostile.previous_heading = heading;
         hostile.detection_left_s = deterministic_unit(seed, 1);
         self.hydrate_hostile(&mut hostile);
         let id = hostile.actor_id;
@@ -1304,6 +1326,10 @@ impl WorldCombat {
             specials,
             resolutions: std::mem::take(&mut self.pending_resolutions),
         }
+    }
+
+    pub fn presentation_alpha(&self) -> f64 {
+        (self.fixed_accum_s / TICK).clamp(0.0, 1.0)
     }
 
     pub fn reset_fixed_clock(&mut self) {
@@ -1588,6 +1614,9 @@ impl WorldCombat {
             .collect();
 
         for actor in &mut self.hostiles {
+            actor.previous_x = actor.x;
+            actor.previous_z = actor.z;
+            actor.previous_heading = actor.heading;
             if !actor.alive {
                 actor.state = HostileState::Dead;
                 actor.target = None;
@@ -1697,10 +1726,9 @@ impl WorldCombat {
                     break;
                 }
             }
-            if actor.awareness_s <= 0.0 {
+            if actor.awareness_s <= 0.0 && actor.provoked_by.is_none() {
                 actor.target = None;
                 actor.flee_threat = None;
-                actor.provoked_by = None;
                 actor.state = HostileState::Idle;
             }
 
@@ -1732,6 +1760,7 @@ impl WorldCombat {
                 HostileState::Alerted | HostileState::Pursuing | HostileState::Attacking => {
                     let Some((tx, tz)) = actor.target.and_then(locate) else {
                         actor.target = None;
+                        actor.provoked_by = None;
                         actor.state = HostileState::Idle;
                         continue;
                     };
@@ -2407,6 +2436,27 @@ mod tests {
     }
 
     #[test]
+    fn provoked_actor_keeps_target_after_awareness_expires() {
+        let mut c = WorldCombat::specialist(1, Discipline::Martial);
+        let mut wolf = dummy_wolf(1);
+        wolf.x = 10.0;
+        wolf.home_x = 10.0;
+        wolf.aggro.leash_m = 1_000.0;
+        c.add_hostile(wolf);
+        c.apply_damage_to_hostile(0, 1);
+        c.hostiles[0].detection_left_s = 100.0;
+
+        c.tick_hostile_ai(0.0, 0.0, AWARENESS_PERSIST_S + 0.1);
+
+        assert_eq!(c.hostiles[0].target, Some(ActorId::PLAYER));
+        assert_eq!(c.hostiles[0].provoked_by, Some(ActorId::PLAYER));
+        assert!(matches!(
+            c.hostiles[0].state,
+            HostileState::Pursuing | HostileState::Attacking
+        ));
+    }
+
+    #[test]
     fn successful_perception_refreshes_awareness_then_expiry_ends_chase() {
         let mut c = WorldCombat::specialist(1, Discipline::Martial);
         let mut wolf = dummy_wolf(1);
@@ -2428,6 +2478,25 @@ mod tests {
         c.tick_hostile_ai(100.0, 0.0, 0.11);
         assert_eq!(c.hostiles[0].state, HostileState::Idle);
         assert_eq!(c.hostiles[0].target, None);
+    }
+
+    #[test]
+    fn presentation_pose_interpolates_without_mutating_canonical_position() {
+        let mut wolf = dummy_wolf(1);
+        wolf.previous_x = 0.0;
+        wolf.previous_z = 0.0;
+        wolf.x = 1.0;
+        wolf.z = 2.0;
+        wolf.previous_heading = CanonicalHeading::from_xz(1.0, 0.0);
+        wolf.heading = CanonicalHeading::from_xz(0.0, 1.0);
+
+        let (x, z, heading) = wolf.presented_pose(0.5);
+
+        assert!((x - 0.5).abs() < 1e-12);
+        assert!((z - 1.0).abs() < 1e-12);
+        assert!((heading.x() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        assert!((heading.z() - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        assert_eq!((wolf.x, wolf.z), (1.0, 2.0));
     }
 
     #[test]
